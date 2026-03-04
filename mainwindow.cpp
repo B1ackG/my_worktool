@@ -744,9 +744,11 @@ QWidget* MainWindow::createSimulatorPage()
 
     QGroupBox *gSimLog = new QGroupBox("模拟器运行日志");
     QVBoxLayout *ll = new QVBoxLayout();
-    txtSimLog = new QTextEdit(); txtSimLog->setReadOnly(true);
+    txtSimLog = new QTextEdit();
+    txtSimLog->setReadOnly(true);
     txtSimLog->setStyleSheet("background: #1e1e1e; color: #00ff00; font-family: Monospace;");
     ll->addWidget(txtSimLog);
+    gSimLog->setLayout(ll); // 补上这两行，确保布局加入到 GroupBox
     rightLayout->addWidget(gSimLog, 1);
 
     mainPageLayout->addWidget(leftWidget);
@@ -957,6 +959,22 @@ void MainWindow::onSimTimerTick()
         ModbusSlave *target = (t.device == "Main") ? simMainDevice : simAGVDevice;
         if (target) {
             target->setRegister(t.addr, regVal);
+
+            // 更新 UI 表格
+            QTableWidget *table = (t.device == "Main") ? tblSimMain : tblSimAGV;
+            if (table) {
+                for (int r = 0; r < table->rowCount(); ++r) {
+                    QTableWidgetItem *addrItem = table->item(r, 0);
+                    if (addrItem && (quint16)addrItem->text().toUInt() == t.addr) {
+                        table->blockSignals(true);
+                        if (!table->item(r, 2)) table->setItem(r, 2, new QTableWidgetItem());
+                        table->item(r, 2)->setFlags(table->item(r, 2)->flags() | Qt::ItemIsEditable);
+                        table->item(r, 2)->setText(QString::number(regVal));
+                        table->blockSignals(false);
+                        break;
+                    }
+                }
+            }
             
             // 每秒记录一次日志，避免刷新过快 (100ms * 10 = 1s)
             if (t.currentTicks % 10 == 0) {
@@ -1651,20 +1669,52 @@ void MainWindow::onSimStopScriptClicked()
 void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString &opType)
 {
     QJsonObject entry;
-    entry.insert("timestamp", QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz"));
+    QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    entry.insert("timestamp", timeStr);
     
-    // Determine source d  evice based on sender
+    // Determine source device based on sender
     ModbusSlave *senderDevice = qobject_cast<ModbusSlave*>(sender());
-    QString device = "unknown";
-    if (senderDevice == simMainDevice) device = "main";
-    else if (senderDevice == simAGVDevice) device = "agv";
+    QString deviceName = "unknown";
+    QTableWidget *table = nullptr;
+    if (senderDevice == simMainDevice) {
+        deviceName = "主设备";
+        table = tblSimMain;
+    } else if (senderDevice == simAGVDevice) {
+        deviceName = "AGV";
+        table = tblSimAGV;
+    }
     
-    entry.insert("device", device);
+    entry.insert("device", deviceName);
     entry.insert("address", (int)addr);
     entry.insert("value", (int)value);
     entry.insert("operation", opType);
     
     registerHistory.append(entry);
+    
+    // 1. 同步到 UI 寄存器表整数列
+    if (table) {
+        for (int r = 0; r < table->rowCount(); ++r) {
+            QTableWidgetItem *addrItem = table->item(r, 0);
+            if (addrItem && (quint16)addrItem->text().toUInt() == addr) {
+                table->blockSignals(true);
+                if (!table->item(r, 2)) table->setItem(r, 2, new QTableWidgetItem());
+                table->item(r, 2)->setText(QString::number(value));
+                table->blockSignals(false);
+                break;
+            }
+        }
+    }
+
+    // 2. 输出到模拟器运行日志
+    if (txtSimLog) {
+        QString logMsg = QString("指令: [%1] %2 地址[%3] %4 %5")
+                            .arg(deviceName)
+                            .arg(opType == "Write" ? "写入" : "读取")
+                            .arg(addr)
+                            .arg(opType == "Write" ? "<-" : "->")
+                            .arg(value);
+        txtSimLog->append(QString("[%1] %2").arg(timeStr).arg(logMsg));
+    }
     
     // Optional: limit in-memory history size
     if (registerHistory.size() > 5000) registerHistory.removeFirst();
