@@ -22,8 +22,8 @@ QT_BEGIN_MOC_NAMESPACE
 QT_WARNING_PUSH
 QT_WARNING_DISABLE_DEPRECATED
 struct qt_meta_stringdata_MainWindow_t {
-    QByteArrayData data[47];
-    char stringdata0[881];
+    QByteArrayData data[61];
+    char stringdata0[1156];
 };
 #define QT_MOC_LITERAL(idx, ofs, len) \
     Q_STATIC_BYTE_ARRAY_DATA_HEADER_INITIALIZER_WITH_OFFSET(len, \
@@ -76,9 +76,23 @@ QT_MOC_LITERAL(40, 751, 16), // "onGitPushClicked"
 QT_MOC_LITERAL(41, 768, 16), // "onGitPullClicked"
 QT_MOC_LITERAL(42, 785, 17), // "onGitMergeClicked"
 QT_MOC_LITERAL(43, 803, 18), // "onGitStatusClicked"
-QT_MOC_LITERAL(44, 822, 22), // "onGitRefreshLogClicked"
-QT_MOC_LITERAL(45, 845, 17), // "onGitResetClicked"
-QT_MOC_LITERAL(46, 863, 17) // "onClearLogClicked"
+QT_MOC_LITERAL(44, 822, 22), // "onGitOpenIgnoreClicked"
+QT_MOC_LITERAL(45, 845, 23), // "onGitCheckIgnoreClicked"
+QT_MOC_LITERAL(46, 869, 22), // "onGitRefreshLogClicked"
+QT_MOC_LITERAL(47, 892, 17), // "onGitResetClicked"
+QT_MOC_LITERAL(48, 910, 17), // "onClearLogClicked"
+QT_MOC_LITERAL(49, 928, 23), // "onStartSimulatorClicked"
+QT_MOC_LITERAL(50, 952, 22), // "onStopSimulatorClicked"
+QT_MOC_LITERAL(51, 975, 23), // "onSimSetRegisterClicked"
+QT_MOC_LITERAL(52, 999, 18), // "onSimSetBitClicked"
+QT_MOC_LITERAL(53, 1018, 23), // "onSimWriteValuesClicked"
+QT_MOC_LITERAL(54, 1042, 24), // "onSimRandomValuesClicked"
+QT_MOC_LITERAL(55, 1067, 27), // "onApplyFaultSettingsClicked"
+QT_MOC_LITERAL(56, 1095, 22), // "onExportHistoryClicked"
+QT_MOC_LITERAL(57, 1118, 19), // "onRegisterOperation"
+QT_MOC_LITERAL(58, 1138, 4), // "addr"
+QT_MOC_LITERAL(59, 1143, 5), // "value"
+QT_MOC_LITERAL(60, 1149, 6) // "opType"
 
     },
     "MainWindow\0onNavSelectionChanged\0\0"
@@ -104,8 +118,16 @@ QT_MOC_LITERAL(46, 863, 17) // "onClearLogClicked"
     "onGitCheckoutClicked\0onGitAddClicked\0"
     "onGitCommitClicked\0onGitPushClicked\0"
     "onGitPullClicked\0onGitMergeClicked\0"
-    "onGitStatusClicked\0onGitRefreshLogClicked\0"
-    "onGitResetClicked\0onClearLogClicked"
+    "onGitStatusClicked\0onGitOpenIgnoreClicked\0"
+    "onGitCheckIgnoreClicked\0onGitRefreshLogClicked\0"
+    "onGitResetClicked\0onClearLogClicked\0"
+    "onStartSimulatorClicked\0onStopSimulatorClicked\0"
+    "onSimSetRegisterClicked\0onSimSetBitClicked\0"
+    "onSimWriteValuesClicked\0"
+    "onSimRandomValuesClicked\0"
+    "onApplyFaultSettingsClicked\0"
+    "onExportHistoryClicked\0onRegisterOperation\0"
+    "addr\0value\0opType"
 };
 #undef QT_MOC_LITERAL
 
@@ -115,7 +137,7 @@ static const uint qt_meta_data_MainWindow[] = {
        8,       // revision
        0,       // classname
        0,    0, // classinfo
-      37,   14, // methods
+      48,   14, // methods
        0,    0, // properties
        0,    0, // enums/sets
        0,    0, // constructors
@@ -123,43 +145,54 @@ static const uint qt_meta_data_MainWindow[] = {
        0,       // signalCount
 
  // slots: name, argc, parameters, tag, flags
-       1,    2,  199,    2, 0x08 /* Private */,
-       6,    0,  204,    2, 0x08 /* Private */,
-       7,    0,  205,    2, 0x08 /* Private */,
-       8,    0,  206,    2, 0x08 /* Private */,
-       9,    0,  207,    2, 0x08 /* Private */,
-      10,    0,  208,    2, 0x08 /* Private */,
-      11,    0,  209,    2, 0x08 /* Private */,
-      12,    0,  210,    2, 0x08 /* Private */,
-      13,    0,  211,    2, 0x08 /* Private */,
-      14,    0,  212,    2, 0x08 /* Private */,
-      15,    0,  213,    2, 0x08 /* Private */,
-      16,    1,  214,    2, 0x08 /* Private */,
-      18,    1,  217,    2, 0x08 /* Private */,
-      20,    0,  220,    2, 0x08 /* Private */,
-      21,    0,  221,    2, 0x08 /* Private */,
-      22,    0,  222,    2, 0x08 /* Private */,
-      23,    1,  223,    2, 0x08 /* Private */,
-      26,    0,  226,    2, 0x08 /* Private */,
-      27,    1,  227,    2, 0x08 /* Private */,
-      29,    0,  230,    2, 0x08 /* Private */,
-      30,    0,  231,    2, 0x08 /* Private */,
-      31,    0,  232,    2, 0x08 /* Private */,
-      32,    0,  233,    2, 0x08 /* Private */,
-      33,    0,  234,    2, 0x08 /* Private */,
-      34,    0,  235,    2, 0x08 /* Private */,
-      35,    0,  236,    2, 0x08 /* Private */,
-      36,    0,  237,    2, 0x08 /* Private */,
-      37,    0,  238,    2, 0x08 /* Private */,
-      38,    0,  239,    2, 0x08 /* Private */,
-      39,    0,  240,    2, 0x08 /* Private */,
-      40,    0,  241,    2, 0x08 /* Private */,
-      41,    0,  242,    2, 0x08 /* Private */,
-      42,    0,  243,    2, 0x08 /* Private */,
-      43,    0,  244,    2, 0x08 /* Private */,
-      44,    0,  245,    2, 0x08 /* Private */,
-      45,    0,  246,    2, 0x08 /* Private */,
-      46,    0,  247,    2, 0x08 /* Private */,
+       1,    2,  254,    2, 0x08 /* Private */,
+       6,    0,  259,    2, 0x08 /* Private */,
+       7,    0,  260,    2, 0x08 /* Private */,
+       8,    0,  261,    2, 0x08 /* Private */,
+       9,    0,  262,    2, 0x08 /* Private */,
+      10,    0,  263,    2, 0x08 /* Private */,
+      11,    0,  264,    2, 0x08 /* Private */,
+      12,    0,  265,    2, 0x08 /* Private */,
+      13,    0,  266,    2, 0x08 /* Private */,
+      14,    0,  267,    2, 0x08 /* Private */,
+      15,    0,  268,    2, 0x08 /* Private */,
+      16,    1,  269,    2, 0x08 /* Private */,
+      18,    1,  272,    2, 0x08 /* Private */,
+      20,    0,  275,    2, 0x08 /* Private */,
+      21,    0,  276,    2, 0x08 /* Private */,
+      22,    0,  277,    2, 0x08 /* Private */,
+      23,    1,  278,    2, 0x08 /* Private */,
+      26,    0,  281,    2, 0x08 /* Private */,
+      27,    1,  282,    2, 0x08 /* Private */,
+      29,    0,  285,    2, 0x08 /* Private */,
+      30,    0,  286,    2, 0x08 /* Private */,
+      31,    0,  287,    2, 0x08 /* Private */,
+      32,    0,  288,    2, 0x08 /* Private */,
+      33,    0,  289,    2, 0x08 /* Private */,
+      34,    0,  290,    2, 0x08 /* Private */,
+      35,    0,  291,    2, 0x08 /* Private */,
+      36,    0,  292,    2, 0x08 /* Private */,
+      37,    0,  293,    2, 0x08 /* Private */,
+      38,    0,  294,    2, 0x08 /* Private */,
+      39,    0,  295,    2, 0x08 /* Private */,
+      40,    0,  296,    2, 0x08 /* Private */,
+      41,    0,  297,    2, 0x08 /* Private */,
+      42,    0,  298,    2, 0x08 /* Private */,
+      43,    0,  299,    2, 0x08 /* Private */,
+      44,    0,  300,    2, 0x08 /* Private */,
+      45,    0,  301,    2, 0x08 /* Private */,
+      46,    0,  302,    2, 0x08 /* Private */,
+      47,    0,  303,    2, 0x08 /* Private */,
+      48,    0,  304,    2, 0x08 /* Private */,
+      49,    0,  305,    2, 0x08 /* Private */,
+      50,    0,  306,    2, 0x08 /* Private */,
+      51,    0,  307,    2, 0x08 /* Private */,
+      52,    0,  308,    2, 0x08 /* Private */,
+      53,    0,  309,    2, 0x08 /* Private */,
+      54,    0,  310,    2, 0x08 /* Private */,
+      55,    0,  311,    2, 0x08 /* Private */,
+      56,    0,  312,    2, 0x08 /* Private */,
+      57,    3,  313,    2, 0x08 /* Private */,
 
  // slots: parameters
     QMetaType::Void, 0x80000000 | 3, 0x80000000 | 3,    4,    5,
@@ -199,6 +232,17 @@ static const uint qt_meta_data_MainWindow[] = {
     QMetaType::Void,
     QMetaType::Void,
     QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void,
+    QMetaType::Void, QMetaType::UShort, QMetaType::UShort, QMetaType::QString,   58,   59,   60,
 
        0        // eod
 };
@@ -243,9 +287,20 @@ void MainWindow::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
         case 31: _t->onGitPullClicked(); break;
         case 32: _t->onGitMergeClicked(); break;
         case 33: _t->onGitStatusClicked(); break;
-        case 34: _t->onGitRefreshLogClicked(); break;
-        case 35: _t->onGitResetClicked(); break;
-        case 36: _t->onClearLogClicked(); break;
+        case 34: _t->onGitOpenIgnoreClicked(); break;
+        case 35: _t->onGitCheckIgnoreClicked(); break;
+        case 36: _t->onGitRefreshLogClicked(); break;
+        case 37: _t->onGitResetClicked(); break;
+        case 38: _t->onClearLogClicked(); break;
+        case 39: _t->onStartSimulatorClicked(); break;
+        case 40: _t->onStopSimulatorClicked(); break;
+        case 41: _t->onSimSetRegisterClicked(); break;
+        case 42: _t->onSimSetBitClicked(); break;
+        case 43: _t->onSimWriteValuesClicked(); break;
+        case 44: _t->onSimRandomValuesClicked(); break;
+        case 45: _t->onApplyFaultSettingsClicked(); break;
+        case 46: _t->onExportHistoryClicked(); break;
+        case 47: _t->onRegisterOperation((*reinterpret_cast< quint16(*)>(_a[1])),(*reinterpret_cast< quint16(*)>(_a[2])),(*reinterpret_cast< const QString(*)>(_a[3]))); break;
         default: ;
         }
     } else if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
@@ -291,13 +346,13 @@ int MainWindow::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 37)
+        if (_id < 48)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 37;
+        _id -= 48;
     } else if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 37)
+        if (_id < 48)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 37;
+        _id -= 48;
     }
     return _id;
 }

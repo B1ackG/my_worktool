@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QTextEdit>
 #include <QGroupBox>
 #include <QComboBox>
@@ -27,6 +28,9 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QJsonObject>
+#include <QJsonObject>
+#include "modbusslave.h"
 
 class MainWindow : public QMainWindow
 {
@@ -78,11 +82,24 @@ private slots:
     void onGitPullClicked();
     void onGitMergeClicked();
     void onGitStatusClicked();
+    void onGitOpenIgnoreClicked();
+    void onGitCheckIgnoreClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
 
     // Common
     void onClearLogClicked();
+
+    // Simulator Slots
+    void onStartSimulatorClicked();
+    void onStopSimulatorClicked();
+    void onSimSetRegisterClicked();
+    void onSimSetBitClicked();
+    void onSimWriteValuesClicked();
+    void onSimRandomValuesClicked();
+    void onApplyFaultSettingsClicked();
+    void onExportHistoryClicked();
+    void onRegisterOperation(quint16 addr, quint16 value, const QString &opType);
 
 private:
     void createWidgets();
@@ -93,6 +110,7 @@ private:
     QWidget* createModbusPage();
     QWidget* createSerialPage();
     QWidget* createGitPage();
+    QWidget* createSimulatorPage();
 
     // --- Main UI Structure ---
     QWidget *centralWidget;
@@ -102,6 +120,7 @@ private:
     QWidget *modbusPageWidget;
     QWidget *serialPageWidget;
     QWidget *gitPageWidget;
+    QWidget *simulatorPageWidget;
 
     // --- Modbus Widgets ---
     // Register Map Tables
@@ -201,9 +220,12 @@ private:
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
     QPushButton *btnGitPush;
+    QComboBox *cmbGitRemote; // Added for remote selection
     QPushButton *btnGitPull;
     QPushButton *btnGitMerge;
     QPushButton *btnGitStatus;
+    QPushButton *btnGitOpenIgnore;
+    QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
@@ -229,6 +251,54 @@ private:
     };
     DisplayFormat displayFormat;
 
+    // --- Simulator Members ---
+    ModbusSlave *simMainDevice; // port 5020
+    ModbusSlave *simAGVDevice;  // port 5021
+
+    // Simulator UI
+    QPushButton *btnSimStartMain;
+    QPushButton *btnSimStopMain;
+    QPushButton *btnSimStartAGV;
+    QPushButton *btnSimStopAGV;
+    QLabel *lblSimMainStatus;
+    QLabel *lblSimAGVStatus;
+    // Bind address/ports editable
+    QLineEdit *txtSimBindIP;    // e.g. 0.0.0.0 or 127.0.0.1
+    QLineEdit *txtSimMainPort;  // main device port
+    QLineEdit *txtSimAGVPort;   // agv device port
+    QLineEdit *simAddrEdit;
+    QLineEdit *simValueEdit;
+    QPushButton *btnSimSetReg;
+    QComboBox *simDeviceSelect;
+    QSpinBox *simBitIndex;
+    QCheckBox *simBitValue;
+    QPushButton *btnSimSetBit;
+    QTabWidget *tabSimRegisterMaps;
+    QTableWidget *tblSimMain;
+    QTableWidget *tblSimAGV;
+    QPushButton *btnSimWriteValues;
+    QPushButton *btnSimRandomValues;
+    QPushButton *btnSimRandomAndWrite;
+    QPushButton *btnSimAddCyclicTimer; // 添加此行
+    QPushButton *btnSimSaveScene;
+    QPushButton *btnSimLoadScene;
+    QTextEdit *txtSimScript;
+    QPushButton *btnSimRunScript;
+    QPushButton *btnSimStopScript;
+    QTextEdit *txtSimLog;
+    QPushButton *btnExportHistory;
+    QTabWidget *tabSimTools; // 新增：模拟器子功能Tab
+
+    // register history: simple in-memory list of JSON objects
+    QVector<QJsonObject> registerHistory;
+    // Fault injection controls
+    QSpinBox *spinSimDelayMs;
+    QDoubleSpinBox *spinSimDropProb;
+    QLineEdit *txtInjectFunc;     // function code to inject
+    QLineEdit *txtInjectFuncCode; // exception code for function
+    QLineEdit *txtInjectAddr;     // address to inject
+    QLineEdit *txtInjectAddrCode; // exception code for address
+
     // Serial
     QSerialPort *serialPort;
 
@@ -244,6 +314,53 @@ private:
     void runGitCommand(const QStringList &args); // Git helper
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
+    void setupSimulatorRegisterTable(QTableWidget *table);
+    void syncSimulatorTablesFromMaps();
+    void onSimRandomAndWriteClicked();
+    void onSimSaveSceneClicked();
+    void onSimLoadSceneClicked();
+    void onSimRunScriptClicked();
+    void onSimStopScriptClicked();
+    void onSimRandomAndWriteClicked_v2(); // unused but keeping to maintain structure if needed
+    void onSimTableRowChanged(int row, int column);
+    void onSimPopulateFloats();
+    void onSimShowBitEditor(int row);
+    void onSimAddCyclicTimerClicked();
+    void onSimRemoveCyclicTimerClicked(); // 新增
+    void onSimWaveTypeChanged(const QString &type); // 新增
+    void onSimTimerTick();
+    void onSimGenerateReportClicked();
+
+    struct CyclicTimer {
+        QString device; // "Main" or "AGV"
+        quint16 addr;
+        QString type; // "Sine", "Square", "Triangle", "Random", "Sawtooth"
+        double amplitude;
+        double offset;
+        double period; // in seconds
+        double phase; // in degrees
+        double dutyCycle; // for square wave (0-1)
+        int currentTicks;
+        bool active;
+    };
+    QList<CyclicTimer> simCyclicTimers;
+    QTimer *simTickTimer;
+
+    // UI Widgets for Waveform Configuration
+    QComboBox *cmbWaveDevice;
+    QSpinBox *spinWaveAddr;
+    QComboBox *cmbWaveType;
+    QDoubleSpinBox *spinWaveAmp;
+    QDoubleSpinBox *spinWaveOffset;
+    QDoubleSpinBox *spinWavePeriod;
+    QDoubleSpinBox *spinWavePhase;
+    QDoubleSpinBox *spinWaveDuty;
+    QTableWidget *tblWaveChannels;
+    QPushButton *btnWaveAdd;
+    QPushButton *btnWaveStopAll;
+
+    QList<QTimer*> scriptTimers;
+    QMap<quint16, QTimer*> cyclicTimers;
 
     // History
     static const int MAX_HISTORY = 10;

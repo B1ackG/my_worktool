@@ -17,7 +17,7 @@ CXX           = g++
 DEFINES       = -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_SERIALPORT_LIB -DQT_CORE_LIB
 CFLAGS        = -pipe -O2 -Wall -Wextra -D_REENTRANT -fPIC $(DEFINES)
 CXXFLAGS      = -pipe -O2 -std=gnu++1z -Wall -Wextra -D_REENTRANT -fPIC $(DEFINES)
-INCPATH       = -I../../ModbusTCPAssistant -I. -I/usr/include/x86_64-linux-gnu/qt5 -I/usr/include/x86_64-linux-gnu/qt5/QtWidgets -I/usr/include/x86_64-linux-gnu/qt5/QtGui -I/usr/include/x86_64-linux-gnu/qt5/QtNetwork -I/usr/include/x86_64-linux-gnu/qt5/QtSerialPort -I/usr/include/x86_64-linux-gnu/qt5/QtCore -I. -I/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++
+INCPATH       = -I../../my-assistant -I. -I/usr/include/x86_64-linux-gnu/qt5 -I/usr/include/x86_64-linux-gnu/qt5/QtWidgets -I/usr/include/x86_64-linux-gnu/qt5/QtGui -I/usr/include/x86_64-linux-gnu/qt5/QtNetwork -I/usr/include/x86_64-linux-gnu/qt5/QtSerialPort -I/usr/include/x86_64-linux-gnu/qt5/QtCore -I. -I/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++
 QMAKE         = /usr/lib/qt5/bin/qmake
 DEL_FILE      = rm -f
 CHK_DIR_EXISTS= test -d
@@ -37,7 +37,7 @@ MOVE          = mv -f
 TAR           = tar -cf
 COMPRESS      = gzip -9f
 DISTNAME      = ModbusTCPAssistant1.0.0
-DISTDIR = /home/robot/ModbusTCPAssistant/build_vscode/.tmp/ModbusTCPAssistant1.0.0
+DISTDIR = /home/l/myAssistant/my-assistant/build_vscode/.tmp/ModbusTCPAssistant1.0.0
 LINK          = g++
 LFLAGS        = -Wl,-O1
 LIBS          = $(SUBLIBS) /usr/lib/x86_64-linux-gnu/libQt5Widgets.so /usr/lib/x86_64-linux-gnu/libQt5Gui.so /usr/lib/x86_64-linux-gnu/libQt5Network.so /usr/lib/x86_64-linux-gnu/libQt5SerialPort.so /usr/lib/x86_64-linux-gnu/libQt5Core.so -lGL -lpthread   
@@ -53,10 +53,14 @@ OBJECTS_DIR   = ./
 ####### Files
 
 SOURCES       = ../main.cpp \
-		../mainwindow.cpp moc_mainwindow.cpp
+		../mainwindow.cpp \
+		../modbusslave.cpp moc_mainwindow.cpp \
+		moc_modbusslave.cpp
 OBJECTS       = main.o \
 		mainwindow.o \
-		moc_mainwindow.o
+		modbusslave.o \
+		moc_mainwindow.o \
+		moc_modbusslave.o
 DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/common/unix.conf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/common/linux.conf \
@@ -74,7 +78,6 @@ DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_core_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_designer.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_devicediscovery_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_edid_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_egl_support_private.pri \
@@ -86,7 +89,6 @@ DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_glx_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_help.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_input_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_kms_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_linuxaccessibility_support_private.pri \
@@ -106,8 +108,6 @@ DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_theme_support_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uiplugin.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uitools.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_vulkan_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets_private.pri \
@@ -119,7 +119,7 @@ DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/qt_config.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++/qmake.conf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_post.prf \
-		../.qmake.stash \
+		../../.qmake.stash \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/exclusive_builds.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/toolchain.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/default_pre.prf \
@@ -139,8 +139,10 @@ DIST          = /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_pre.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/exceptions.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/yacc.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/lex.prf \
-		../../ModbusTCPAssistant.pro ../mainwindow.h ../main.cpp \
-		../mainwindow.cpp
+		../../ModbusTCPAssistant.pro ../mainwindow.h \
+		../modbusslave.h ../main.cpp \
+		../mainwindow.cpp \
+		../modbusslave.cpp
 QMAKE_TARGET  = ModbusTCPAssistant
 DESTDIR       = 
 TARGET        = ModbusTCPAssistant
@@ -169,7 +171,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_core_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_designer.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_devicediscovery_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_edid_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_egl_support_private.pri \
@@ -181,7 +182,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_glx_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_help.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_input_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_kms_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_linuxaccessibility_support_private.pri \
@@ -201,8 +201,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_theme_support_private.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uiplugin.pri \
-		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uitools.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_vulkan_support_private.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets.pri \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets_private.pri \
@@ -214,7 +212,7 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/qt_config.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++/qmake.conf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_post.prf \
-		.qmake.stash \
+		../.qmake.stash \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/exclusive_builds.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/toolchain.prf \
 		/usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/default_pre.prf \
@@ -253,7 +251,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_core_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_dbus_private.pri:
-/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_designer.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_devicediscovery_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_edid_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_egl_support_private.pri:
@@ -265,7 +262,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_glx_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_gui_private.pri:
-/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_help.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_input_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_kms_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_linuxaccessibility_support_private.pri:
@@ -285,8 +281,6 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_testlib_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_theme_support_private.pri:
-/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uiplugin.pri:
-/usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_uitools.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_vulkan_support_private.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets.pri:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/modules/qt_lib_widgets_private.pri:
@@ -298,7 +292,7 @@ Makefile: ../ModbusTCPAssistant.pro /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/qt_config.prf:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++/qmake.conf:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/spec_post.prf:
-.qmake.stash:
+../.qmake.stash:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/exclusive_builds.prf:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/toolchain.prf:
 /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/default_pre.prf:
@@ -334,8 +328,8 @@ distdir: FORCE
 	@test -d $(DISTDIR) || mkdir -p $(DISTDIR)
 	$(COPY_FILE) --parents $(DIST) $(DISTDIR)/
 	$(COPY_FILE) --parents /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/data/dummy.cpp $(DISTDIR)/
-	$(COPY_FILE) --parents ../mainwindow.h $(DISTDIR)/
-	$(COPY_FILE) --parents ../main.cpp ../mainwindow.cpp $(DISTDIR)/
+	$(COPY_FILE) --parents ../mainwindow.h ../modbusslave.h $(DISTDIR)/
+	$(COPY_FILE) --parents ../main.cpp ../mainwindow.cpp ../modbusslave.cpp $(DISTDIR)/
 
 
 clean: compiler_clean 
@@ -345,7 +339,6 @@ clean: compiler_clean
 
 distclean: clean 
 	-$(DEL_FILE) $(TARGET) 
-	-$(DEL_FILE) .qmake.stash
 	-$(DEL_FILE) Makefile
 
 
@@ -367,9 +360,9 @@ compiler_moc_predefs_clean:
 moc_predefs.h: /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/data/dummy.cpp
 	g++ -pipe -O2 -std=gnu++1z -Wall -Wextra -dM -E -o moc_predefs.h /usr/lib/x86_64-linux-gnu/qt5/mkspecs/features/data/dummy.cpp
 
-compiler_moc_header_make_all: moc_mainwindow.cpp
+compiler_moc_header_make_all: moc_mainwindow.cpp moc_modbusslave.cpp
 compiler_moc_header_clean:
-	-$(DEL_FILE) moc_mainwindow.cpp
+	-$(DEL_FILE) moc_mainwindow.cpp moc_modbusslave.cpp
 moc_mainwindow.cpp: ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMainWindow \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmainwindow.h \
@@ -507,6 +500,7 @@ moc_mainwindow.cpp: ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractspinbox.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/qvalidator.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDoubleSpinBox \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QTextEdit \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtextedit.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractscrollarea.h \
@@ -557,9 +551,108 @@ moc_mainwindow.cpp: ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		../modbusslave.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpserver.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qhostaddress.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QVector \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMap \
 		moc_predefs.h \
 		/usr/lib/qt5/bin/moc
-	/usr/lib/qt5/bin/moc $(DEFINES) --include /home/robot/ModbusTCPAssistant/build_vscode/moc_predefs.h -I/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++ -I/home/robot/ModbusTCPAssistant -I/usr/include/x86_64-linux-gnu/qt5 -I/usr/include/x86_64-linux-gnu/qt5/QtWidgets -I/usr/include/x86_64-linux-gnu/qt5/QtGui -I/usr/include/x86_64-linux-gnu/qt5/QtNetwork -I/usr/include/x86_64-linux-gnu/qt5/QtSerialPort -I/usr/include/x86_64-linux-gnu/qt5/QtCore -I. -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/aarch64-linux-gnu/include/c++/6.3.1 -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/aarch64-linux-gnu/include/c++/6.3.1/aarch64-linux-gnu -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/aarch64-linux-gnu/include/c++/6.3.1/backward -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/lib/gcc/aarch64-linux-gnu/6.3.1/include -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/lib/gcc/aarch64-linux-gnu/6.3.1/include-fixed -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/aarch64-linux-gnu/include -I/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/aarch64-linux-gnu/libc/usr/include ../mainwindow.h -o moc_mainwindow.cpp
+	/usr/lib/qt5/bin/moc $(DEFINES) --include /home/l/myAssistant/my-assistant/build_vscode/moc_predefs.h -I/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++ -I/home/l/myAssistant/my-assistant -I/usr/include/x86_64-linux-gnu/qt5 -I/usr/include/x86_64-linux-gnu/qt5/QtWidgets -I/usr/include/x86_64-linux-gnu/qt5/QtGui -I/usr/include/x86_64-linux-gnu/qt5/QtNetwork -I/usr/include/x86_64-linux-gnu/qt5/QtSerialPort -I/usr/include/x86_64-linux-gnu/qt5/QtCore -I. -I/usr/include/c++/13 -I/usr/include/x86_64-linux-gnu/c++/13 -I/usr/include/c++/13/backward -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/opt/binary/usr/local/include -I/opt/binary/usr/include ../mainwindow.h -o moc_mainwindow.cpp
+
+moc_modbusslave.cpp: ../modbusslave.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobjectdefs.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qnamespace.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qglobal.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qconfig-bootstrapped.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qconfig.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtcore-config.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsystemdetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qprocessordetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcompilerdetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtypeinfo.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsysinfo.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlogging.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qflags.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbasicatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_bootstrap.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qgenericatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_cxx11.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_msvc.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qglobalstatic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmutex.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qnumeric.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qversiontagging.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobjectdefs_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstring.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qchar.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearray.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qrefcount.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qarraydata.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringliteral.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringalgorithms.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringbuilder.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qalgorithms.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qiterator.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qhashfunctions.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qpair.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvector.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontainertools_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qpoint.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearraylist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringlist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregexp.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringmatcher.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcoreevent.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qscopedpointer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmetatype.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvarlengtharray.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontainerfwd.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobject_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpserver.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtnetworkglobal.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtnetwork-config.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qabstractsocket.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qiodevice.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdebug.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qhash.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmap.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtextstream.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlocale.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvariant.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qshareddata.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qset.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontiguouscache.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsharedpointer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsharedpointer_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qhostaddress.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpSocket \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpsocket.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QVector \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMap \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QTimer \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtimer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbasictimer.h \
+		moc_predefs.h \
+		/usr/lib/qt5/bin/moc
+	/usr/lib/qt5/bin/moc $(DEFINES) --include /home/l/myAssistant/my-assistant/build_vscode/moc_predefs.h -I/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++ -I/home/l/myAssistant/my-assistant -I/usr/include/x86_64-linux-gnu/qt5 -I/usr/include/x86_64-linux-gnu/qt5/QtWidgets -I/usr/include/x86_64-linux-gnu/qt5/QtGui -I/usr/include/x86_64-linux-gnu/qt5/QtNetwork -I/usr/include/x86_64-linux-gnu/qt5/QtSerialPort -I/usr/include/x86_64-linux-gnu/qt5/QtCore -I. -I/usr/include/c++/13 -I/usr/include/x86_64-linux-gnu/c++/13 -I/usr/include/c++/13/backward -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/opt/binary/usr/local/include -I/opt/binary/usr/include ../modbusslave.h -o moc_modbusslave.cpp
 
 compiler_moc_objc_header_make_all:
 compiler_moc_objc_header_clean:
@@ -714,6 +807,7 @@ main.o: ../main.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractspinbox.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/qvalidator.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDoubleSpinBox \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QTextEdit \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtextedit.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractscrollarea.h \
@@ -764,6 +858,21 @@ main.o: ../main.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		../modbusslave.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpserver.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qhostaddress.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QVector \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMap \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QApplication \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qapplication.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcoreapplication.h \
@@ -910,6 +1019,7 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractspinbox.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/qvalidator.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDoubleSpinBox \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QTextEdit \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtextedit.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractscrollarea.h \
@@ -960,17 +1070,145 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		../modbusslave.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpserver.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qhostaddress.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QVector \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMap \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMessageBox \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmessagebox.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDateTime \
-		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDataStream \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDebug \
-		/usr/include/x86_64-linux-gnu/qt5/QtGui/QIntValidator
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/QIntValidator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QRandomGenerator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qrandom.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonDocument \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsondocument.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QFile \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QRegularExpression \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QTextStream \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/QDesktopServices \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/qdesktopservices.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstandardpaths.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QUrl
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o mainwindow.o ../mainwindow.cpp
+
+modbusslave.o: ../modbusslave.cpp ../modbusslave.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobjectdefs.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qnamespace.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qglobal.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qconfig-bootstrapped.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qconfig.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtcore-config.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsystemdetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qprocessordetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcompilerdetection.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtypeinfo.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsysinfo.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlogging.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qflags.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbasicatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_bootstrap.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qgenericatomic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_cxx11.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qatomic_msvc.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qglobalstatic.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmutex.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qnumeric.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qversiontagging.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobjectdefs_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstring.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qchar.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearray.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qrefcount.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qarraydata.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringliteral.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringalgorithms.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringbuilder.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qalgorithms.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qiterator.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qhashfunctions.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qpair.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvector.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontainertools_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qpoint.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearraylist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringlist.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregexp.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstringmatcher.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcoreevent.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qscopedpointer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmetatype.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvarlengtharray.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontainerfwd.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qobject_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpserver.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtnetworkglobal.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtnetwork-config.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qabstractsocket.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qiodevice.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdebug.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qhash.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qmap.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtextstream.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qlocale.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qvariant.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qshareddata.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qset.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcontiguouscache.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsharedpointer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qsharedpointer_impl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qhostaddress.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpSocket \
+		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/qtcpsocket.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QVector \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QMap \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QTimer \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qtimer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qbasictimer.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDataStream \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatastream.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDateTime \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QtEndian \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qendian.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qfloat16.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QRandomGenerator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qrandom.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonDocument \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsondocument.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qurl.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qurlquery.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h
+	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o modbusslave.o ../modbusslave.cpp
 
 moc_mainwindow.o: moc_mainwindow.cpp 
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o moc_mainwindow.o moc_mainwindow.cpp
+
+moc_modbusslave.o: moc_modbusslave.cpp 
+	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o moc_modbusslave.o moc_modbusslave.cpp
 
 ####### Install
 
