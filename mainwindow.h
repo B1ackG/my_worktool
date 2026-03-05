@@ -335,6 +335,8 @@ private:
     void onSimWaveTypeChanged(const QString &type); // 新增
     void onSimTimerTick();
     void onSimGenerateReportClicked();
+    void refreshSimRowDisplay(QTableWidget *table, int row);
+    void setSimRowEnabled(QTableWidget *table, int row, bool enabled);
 
     struct CyclicTimer {
         QString device; // "Main" or "AGV"
@@ -369,6 +371,8 @@ private:
 
     // 模拟器表格显示的格式缓存：Key=tablePtr, Value=Map<row, formatString>
     QMap<QTableWidget*, QMap<int, QString>> simTableFormats;
+    // 被 32-bit 显示占用并禁用的行：Key=tablePtr, Value=Map<lockedRow, ownerRow>
+    QMap<QTableWidget*, QMap<int, int>> simDisabledRowsOwner;
 
     // History
     static const int MAX_HISTORY = 10;

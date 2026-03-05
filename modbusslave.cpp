@@ -88,9 +88,11 @@ bool ModbusSlave::isRunning() const { return server->isListening(); }
 
 bool ModbusSlave::setRegister(quint16 addr, quint16 value)
 {
-    QMutexLocker locker(&mutex);
-    if (addr >= (quint16)holding.size()) return false;
-    holding[addr] = value;
+    {
+        QMutexLocker locker(&mutex);
+        if (addr >= (quint16)holding.size()) return false;
+        holding[addr] = value;
+    }
     emit registerOperation(addr, value, QString("write"));
     return true;
 }
@@ -105,11 +107,14 @@ quint16 ModbusSlave::getRegister(quint16 addr) const
 bool ModbusSlave::setRegisterBit(quint16 addr, int bitIndex, bool value)
 {
     if (bitIndex < 0 || bitIndex > 15) return false;
-    QMutexLocker locker(&mutex);
-    if (addr >= (quint16)holding.size()) return false;
-    quint16 v = holding[addr];
-    if (value) v |= (1 << bitIndex); else v &= ~(1 << bitIndex);
-    holding[addr] = v;
+    quint16 v = 0;
+    {
+        QMutexLocker locker(&mutex);
+        if (addr >= (quint16)holding.size()) return false;
+        v = holding[addr];
+        if (value) v |= (1 << bitIndex); else v &= ~(1 << bitIndex);
+        holding[addr] = v;
+    }
     emit registerOperation(addr, v, QString("write_bit"));
     return true;
 }
@@ -226,25 +231,31 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
         QByteArray payload;
         payload.append(char(func));
         payload.append(char(qty * 2));
-        QMutexLocker locker(&mutex);
-        for (quint16 i = 0; i < qty; ++i) {
-            quint16 addr = start + i;
-            // per-address exception
-            if (addrExceptions.contains(addr)) {
-                quint8 exCode = addrExceptions.value(addr);
-                QByteArray ex; ex.append(char(func | 0x80)); ex.append(char(exCode));
-                QByteArray resp = buildResponse(trans, unitId, ex);
-                if (shouldDrop()) { emit logMessage("丢弃注入的地址异常响应"); return; }
-                auto deliverEx = [sock, resp]() { if (sock) sock->write(resp); };
-                if (fixedDelayMs > 0) QTimer::singleShot(fixedDelayMs, this, deliverEx); else deliverEx();
-                emit logMessage(QString("注入地址异常: addr=%1 code=%2").arg(addr).arg(exCode));
-                return;
+        QVector<QPair<quint16, quint16>> readOps;
+        {
+            QMutexLocker locker(&mutex);
+            for (quint16 i = 0; i < qty; ++i) {
+                quint16 addr = start + i;
+                // per-address exception
+                if (addrExceptions.contains(addr)) {
+                    quint8 exCode = addrExceptions.value(addr);
+                    QByteArray ex; ex.append(char(func | 0x80)); ex.append(char(exCode));
+                    QByteArray resp = buildResponse(trans, unitId, ex);
+                    if (shouldDrop()) { emit logMessage("丢弃注入的地址异常响应"); return; }
+                    auto deliverEx = [sock, resp]() { if (sock) sock->write(resp); };
+                    if (fixedDelayMs > 0) QTimer::singleShot(fixedDelayMs, this, deliverEx); else deliverEx();
+                    emit logMessage(QString("注入地址异常: addr=%1 code=%2").arg(addr).arg(exCode));
+                    return;
+                }
+                quint16 val = 0;
+                if (addr < (quint16)holding.size()) val = holding[addr];
+                readOps.append(qMakePair(addr, val));
+                payload.append(char((val >> 8) & 0xFF));
+                payload.append(char(val & 0xFF));
             }
-            quint16 val = 0;
-            if (addr < (quint16)holding.size()) val = holding[addr];
-            emit registerOperation(addr, val, QString("read"));
-            payload.append(char((val >> 8) & 0xFF));
-            payload.append(char(val & 0xFF));
+        }
+        for (const auto &op : readOps) {
+            emit registerOperation(op.first, op.second, QString("read"));
         }
         QByteArray resp = buildResponse(trans, unitId, payload);
         if (shouldDrop()) { emit logMessage("丢弃 Read Registers 响应 (随机丢包)"); return; }

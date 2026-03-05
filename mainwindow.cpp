@@ -77,29 +77,6 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
-    // Preload initial register values per spec
-    // 主设备 (5020)
-    simMainDevice->setRegister(201, 0x427B);
-    simMainDevice->setRegister(202, 0xAD49);
-    simMainDevice->setRegister(203, 0x44FA);
-    simMainDevice->setRegister(204, 0x0000);
-    simMainDevice->setRegister(804, 0);
-    simMainDevice->setRegister(805, 0);
-    simMainDevice->setRegister(403, 0);
-    simMainDevice->setRegister(29, 0);
-    simMainDevice->setRegister(400, 0);
-    simMainDevice->setRegister(401, 0);
-    simMainDevice->setRegister(404, 0);
-    for (int a = 500; a <= 503; ++a) simMainDevice->setRegister(a, 0);
-
-    // AGV (5021)
-    simAGVDevice->setRegister(0, 64);
-    simAGVDevice->setRegister(2, 0);
-    simAGVDevice->setRegister(3, 0);
-    simAGVDevice->setRegister(4, 0);
-    simAGVDevice->setRegister(50, 0x0000);
-    simAGVDevice->setRegister(104, 0);
-
     // Do not auto-start servers; user can configure bind IP/ports and start them
     txtSimLog->append(QString("模拟器已初始化（请配置端口并启动主设备/AGV）"));
 
@@ -968,20 +945,17 @@ void MainWindow::onSimTimerTick()
                 for (int r = 0; r < table->rowCount(); ++r) {
                     QTableWidgetItem *addrItem = table->item(r, 0);
                     if (addrItem && (quint16)addrItem->text().toUInt() == t.addr) {
-                        table->blockSignals(true);
-                        if (!table->item(r, 2)) table->setItem(r, 2, new QTableWidgetItem());
-                        table->item(r, 2)->setFlags(table->item(r, 2)->flags() | Qt::ItemIsEditable);
-                        
-                        // 考虑当前格式
-                        QString fmt = simTableFormats.value(table).value(r, "Unsigned");
-                        QString display;
-                        if (fmt == "Hex") display = "0x" + QString::number(regVal, 16).toUpper().rightJustified(4, '0');
-                        else if (fmt == "Binary") display = "0b" + QString::number(regVal, 2).rightJustified(16, '0');
-                        else if (fmt == "Signed") display = QString::number((int16_t)regVal);
-                        else display = QString::number(regVal);
-
-                        table->item(r, 2)->setText(display);
-                        table->blockSignals(false);
+                        refreshSimRowDisplay(table, r);
+                        for (int k = 0; k < table->rowCount(); ++k) {
+                            QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
+                            if (!fmtk.startsWith("32-bit")) continue;
+                            QTableWidgetItem *aItem = table->item(k, 0);
+                            if (!aItem) continue;
+                            quint16 a = (quint16)aItem->text().toUInt();
+                            if (a == t.addr || (quint16)(a + 1) == t.addr) {
+                                refreshSimRowDisplay(table, k);
+                            }
+                        }
                         break;
                     }
                 }
@@ -1707,10 +1681,17 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
         for (int r = 0; r < table->rowCount(); ++r) {
             QTableWidgetItem *addrItem = table->item(r, 0);
             if (addrItem && (quint16)addrItem->text().toUInt() == addr) {
-                table->blockSignals(true);
-                if (!table->item(r, 2)) table->setItem(r, 2, new QTableWidgetItem());
-                table->item(r, 2)->setText(QString::number(value));
-                table->blockSignals(false);
+                refreshSimRowDisplay(table, r);
+                for (int k = 0; k < table->rowCount(); ++k) {
+                    QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
+                    if (!fmtk.startsWith("32-bit")) continue;
+                    QTableWidgetItem *aItem = table->item(k, 0);
+                    if (!aItem) continue;
+                    quint16 a = (quint16)aItem->text().toUInt();
+                    if (a == addr || (quint16)(a + 1) == addr) {
+                        refreshSimRowDisplay(table, k);
+                    }
+                }
                 break;
             }
         }
@@ -2339,6 +2320,69 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     connect(table, &QTableWidget::cellChanged, this, &MainWindow::onSimTableRowChanged);
 }
 
+void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
+{
+    if (!table) return;
+    if (row < 0 || row >= table->rowCount()) return;
+
+    QTableWidgetItem *addrItem = table->item(row, 0);
+    if (!addrItem || addrItem->text().isEmpty()) return;
+
+    ModbusSlave *target = (table == tblSimAGV) ? simAGVDevice : simMainDevice;
+    if (!target) return;
+
+    quint16 addr = (quint16)addrItem->text().toUInt();
+    quint16 val = target->getRegister(addr);
+
+    QString fmt = simTableFormats.value(table).value(row, "Unsigned");
+    QString display;
+    if (fmt == "Hex") display = "0x" + QString::number(val, 16).toUpper().rightJustified(4, '0');
+    else if (fmt == "Binary") display = "0b" + QString::number(val, 2).rightJustified(16, '0');
+    else if (fmt == "Signed") display = QString::number((int16_t)val);
+    else if (fmt == "ASCII - Hex") {
+        char c1 = (char)((val >> 8) & 0xFF);
+        char c2 = (char)(val & 0xFF);
+        display = QString("'%1%2'").arg(c1 > 31 ? QChar(c1) : '.').arg(c2 > 31 ? QChar(c2) : '.');
+    } else if (fmt.startsWith("32-bit")) {
+        uint32_t val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+        if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
+        else if (fmt == "32-bit Unsigned") display = QString::number(val32);
+        else if (fmt == "32-bit Float") {
+            float f;
+            memcpy(&f, &val32, 4);
+            display = QString::number(f, 'f', 2);
+        }
+    }
+    if (display.isEmpty()) display = QString::number(val);
+
+    table->blockSignals(true);
+    if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
+    table->item(row, 2)->setText(display);
+    table->blockSignals(false);
+}
+
+void MainWindow::setSimRowEnabled(QTableWidget *table, int row, bool enabled)
+{
+    if (!table) return;
+    if (row < 0 || row >= table->rowCount()) return;
+
+    for (int col = 0; col < table->columnCount(); ++col) {
+        if (!table->item(row, col)) table->setItem(row, col, new QTableWidgetItem());
+        QTableWidgetItem *item = table->item(row, col);
+        Qt::ItemFlags flags = item->flags();
+        if (enabled) {
+            flags |= (Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+            if (col == 2) flags |= Qt::ItemIsEditable;
+            else flags &= ~Qt::ItemIsEditable;
+            item->setForeground(QBrush(Qt::black));
+        } else {
+            flags &= ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
+            item->setForeground(QBrush(Qt::gray));
+        }
+        item->setFlags(flags);
+    }
+}
+
 void MainWindow::onSimTableRowChanged(int row, int column)
 {
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
@@ -2349,59 +2393,57 @@ void MainWindow::onSimTableRowChanged(int row, int column)
     if (!addrItem || addrItem->text().isEmpty()) return;
     quint16 addr = (quint16)addrItem->text().toUInt();
     
-    table->blockSignals(true);
     if (column == 2) { 
         QString valStr = table->item(row, 2)->text();
-        bool ok;
-        quint16 val;
+        bool ok = false;
+        quint16 val = 0;
         
-        // 尝试解析输入（如果是十六进制等）
-        if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
-            val = (quint16)valStr.toUInt(&ok, 16);
-        } else if (valStr.startsWith("0b", Qt::CaseInsensitive)) {
-            val = (quint16)valStr.mid(2).toUInt(&ok, 2);
-        } else {
-            val = (quint16)valStr.toUInt(&ok, 10);
-            if (!ok) val = (quint16)valStr.toInt(&ok, 10); // 处理负数输入
-        }
-
-        if (ok) {
-            target->setRegister(addr, val);
-        } else {
-            val = target->getRegister(addr);
-        }
-
-        // 根据格式设置显示
         QString fmt = simTableFormats.value(table).value(row, "Unsigned");
-        QString display;
-        if (fmt == "Hex") display = "0x" + QString::number(val, 16).toUpper().rightJustified(4, '0');
-        else if (fmt == "Binary") display = "0b" + QString::number(val, 2).rightJustified(16, '0');
-        else if (fmt == "Signed") display = QString::number((int16_t)val);
-        else if (fmt == "ASCII - Hex") {
-            char c1 = (char)((val >> 8) & 0xFF);
-            char c2 = (char)(val & 0xFF);
-            display = QString("'%1%2'").arg(c1 > 31 ? QChar(c1) : '.').arg(c2 > 31 ? QChar(c2) : '.');
-        } 
-        else if (fmt.startsWith("32-bit")) {
+
+        if (fmt == "32-bit Float") {
+            float f = valStr.toFloat(&ok);
+            if (ok) {
+                target->setFloat(addr, f);
+                // 强制刷新当前行和下一行（因为 setFloat 修改了两个寄存器）
+                refreshSimRowDisplay(table, row);
+                refreshSimRowDisplay(table, row + 1);
+            }
+        } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
+            bool ok32 = false;
             uint32_t val32 = 0;
-            // 假设大端模式读取 32 位 (addr, addr+1)
-            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
-            if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
-            else if (fmt == "32-bit Unsigned") display = QString::number(val32);
-            else if (fmt == "32-bit Float") {
-                float f;
-                memcpy(&f, &val32, 4);
-                display = QString::number(f, 'f', 2);
+            if (fmt == "32-bit Signed") val32 = (uint32_t)valStr.toInt(&ok32);
+            else val32 = valStr.toUInt(&ok32);
+
+            if (ok32) {
+                target->setRegister(addr, (quint16)(val32 >> 16));
+                target->setRegister(addr + 1, (quint16)(val32 & 0xFFFF));
+                refreshSimRowDisplay(table, row);
+                refreshSimRowDisplay(table, row + 1);
+                ok = true; // 标记为已处理
+            }
+        } else {
+            // 原有的 16 位逻辑
+            if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
+                val = (quint16)valStr.toUInt(&ok, 16);
+            } else if (valStr.startsWith("0b", Qt::CaseInsensitive)) {
+                val = (quint16)valStr.mid(2).toUInt(&ok, 2);
+            } else {
+                val = (quint16)valStr.toUInt(&ok, 10);
+                if (!ok) val = (quint16)valStr.toInt(&ok, 10);
+            }
+
+            if (ok) {
+                target->setRegister(addr, val);
+                refreshSimRowDisplay(table, row);
             }
         }
-        else display = QString::number(val);
 
-        table->item(row, 2)->setText(display);
+        if (!ok && fmt != "32-bit Float" && !fmt.startsWith("32-bit")) {
+            // 如果解析失败且不是32位格式，还原显示
+            refreshSimRowDisplay(table, row);
+        }
         
-        // 旧有的 Float 逻辑适配
-        float f = target->getFloat(addr);
-        if (table->columnCount() > 3 && table->item(row, 3)) 
-            table->item(row, 3)->setText(QString::number(f, 'f', 2));
+        // 旧有的 Float 逻辑适配（如果有第4列）
     }
     else if (column == 3) { // Float changed
         float f = table->item(row, 3)->text().toFloat();
@@ -2415,7 +2457,6 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             }
         }
     }
-    table->blockSignals(false);
 }
 
 void MainWindow::onSimShowBitEditor(int row)
@@ -2594,6 +2635,14 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     if (!index.isValid()) return;
     int row = index.row();
 
+    if (simDisabledRowsOwner.value(table).contains(row)) {
+        int owner = simDisabledRowsOwner.value(table).value(row);
+        if (txtSimLog) {
+            txtSimLog->append(QString("行 %1 已被行 %2 的 32-bit 格式占用，请先修改行 %2 的格式").arg(row).arg(owner));
+        }
+        return;
+    }
+
     QMenu menu(this);
     
     // Format Submenu
@@ -2602,9 +2651,15 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     for (const QString &fmt : formats) {
         QAction *a = formatMenu->addAction(fmt);
         connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
+            QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
+            if (oldFmt.startsWith("32-bit")) {
+                int lockedRow = row + 1;
+                simDisabledRowsOwner[table].remove(lockedRow);
+                setSimRowEnabled(table, lockedRow, true);
+                refreshSimRowDisplay(table, lockedRow);
+            }
             simTableFormats[table][row] = fmt;
-            // 触发刷新
-            onSimTableRowChanged(row, 2); 
+            refreshSimRowDisplay(table, row);
         });
     }
     formatMenu->addSeparator();
@@ -2613,9 +2668,24 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     for (const QString &fmt : f32) {
         QAction *a = sub32->addAction(fmt);
         connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
+            if (row + 1 >= table->rowCount()) {
+                if (txtSimLog) txtSimLog->append(QString("行 %1 无法设置 %2：缺少下一行").arg(row).arg(fmt));
+                return;
+            }
+
+            QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
+            if (oldFmt.startsWith("32-bit")) {
+                int prevLockedRow = row + 1;
+                simDisabledRowsOwner[table].remove(prevLockedRow);
+                setSimRowEnabled(table, prevLockedRow, true);
+                refreshSimRowDisplay(table, prevLockedRow);
+            }
+
             simTableFormats[table][row] = fmt;
-            // 触发刷新
-            onSimTableRowChanged(row, 2); 
+            int lockedRow = row + 1;
+            simDisabledRowsOwner[table][lockedRow] = row;
+            setSimRowEnabled(table, lockedRow, false);
+            refreshSimRowDisplay(table, row);
         });
     }
 
