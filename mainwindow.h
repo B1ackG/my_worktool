@@ -367,6 +367,9 @@ private:
     QList<QTimer*> scriptTimers;
     QMap<quint16, QTimer*> cyclicTimers;
 
+    // 模拟器表格显示的格式缓存：Key=tablePtr, Value=Map<row, formatString>
+    QMap<QTableWidget*, QMap<int, QString>> simTableFormats;
+
     // History
     static const int MAX_HISTORY = 10;
 };

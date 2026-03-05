@@ -901,29 +901,29 @@ void MainWindow::onSimAddCyclicTimerClicked()
         
         QPushButton *btnRemove = new QPushButton("删除");
         tblWaveChannels->setCellWidget(i, 4, btnRemove);
-        connect(btnRemove, &QPushButton::clicked, this, [this](){
-            QPushButton *btn = qobject_cast<QPushButton*>(sender());
-            if (!btn) return;
-            // 通过位置查找对应行
-            int row = -1;
-            for(int r=0; r < tblWaveChannels->rowCount(); ++r) {
-                if(tblWaveChannels->cellWidget(r, 4) == btn) {
-                    row = r;
-                    break;
-                }
-            }
-            if (row >= 0 && row < simCyclicTimers.size()) {
-                QString msg = QString("停止并移除波形通道: %1 地址 %2").arg(simCyclicTimers[row].device).arg(simCyclicTimers[row].addr);
-                txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(msg));
-                simCyclicTimers.removeAt(row);
-                // 刷新界面表格内容
-                onSimAddCyclicTimerClicked(); 
-            }
-        });
+        connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
     }
+}
 
-    QString msg = QString("已更新波形通道: %1 地址 %2 类型: %3 (幅度:%4 周期:%5s)").arg(t.device).arg(t.addr).arg(t.type).arg(t.amplitude).arg(t.period);
-    txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(msg));
+void MainWindow::onSimRemoveCyclicTimerClicked()
+{
+    QPushButton *btn = qobject_cast<QPushButton*>(sender());
+    if (!btn) return;
+    // 通过位置查找对应行
+    int row = -1;
+    for(int r=0; r < tblWaveChannels->rowCount(); ++r) {
+        if(tblWaveChannels->cellWidget(r, 4) == btn) {
+            row = r;
+            break;
+        }
+    }
+    if (row >= 0 && row < simCyclicTimers.size()) {
+        QString msg = QString("停止并移除波形通道: %1 地址 %2").arg(simCyclicTimers[row].device).arg(simCyclicTimers[row].addr);
+        txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(msg));
+        simCyclicTimers.removeAt(row);
+        // 刷新界面表格内容
+        onSimAddCyclicTimerClicked(); 
+    }
 }
 
 void MainWindow::onSimTimerTick()
@@ -971,7 +971,16 @@ void MainWindow::onSimTimerTick()
                         table->blockSignals(true);
                         if (!table->item(r, 2)) table->setItem(r, 2, new QTableWidgetItem());
                         table->item(r, 2)->setFlags(table->item(r, 2)->flags() | Qt::ItemIsEditable);
-                        table->item(r, 2)->setText(QString::number(regVal));
+                        
+                        // 考虑当前格式
+                        QString fmt = simTableFormats.value(table).value(r, "Unsigned");
+                        QString display;
+                        if (fmt == "Hex") display = "0x" + QString::number(regVal, 16).toUpper().rightJustified(4, '0');
+                        else if (fmt == "Binary") display = "0b" + QString::number(regVal, 2).rightJustified(16, '0');
+                        else if (fmt == "Signed") display = QString::number((int16_t)regVal);
+                        else display = QString::number(regVal);
+
+                        table->item(r, 2)->setText(display);
                         table->blockSignals(false);
                         break;
                     }
@@ -2306,15 +2315,13 @@ void MainWindow::setupRegisterTable(QTableWidget *table) {
 
 void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     if (!table) return;
-    table->setColumnCount(5);
-    table->setHorizontalHeaderLabels(QStringList() << "地址" << "描述" << "整数值" << "浮点值" << "操作");
+    table->setColumnCount(3);
+    table->setHorizontalHeaderLabels(QStringList() << "地址" << "描述" << "值");
     
     // 重新规划列表宽度
-    table->setColumnWidth(0, 50);  // 地址列：仅需显示4-5位数字
-    table->setColumnWidth(1, 120); // 描述列：允许较长描述
-    table->setColumnWidth(2, 60);  // 整数值：5位数字
-    table->setColumnWidth(3, 80);  // 浮点值：格式化后的浮点数
-    table->setColumnWidth(4, 70);  // 操作列：固定的按钮宽度
+    table->setColumnWidth(0, 50);  // 地址列
+    table->setColumnWidth(1, 150); // 描述列
+    table->setColumnWidth(2, 100); // 值列
 
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch); // 描述列自适应剩余空间
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -2327,15 +2334,7 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     for (int i = 0; i < 50; ++i) {
         if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem(QString::number(i)));
         if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem(""));
-        if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem(""));
-        if (!table->item(i, 3)) table->setItem(i, 3, new QTableWidgetItem(""));
-        
-        QPushButton *btnBit = new QPushButton("位编辑");
-        btnBit->setFixedWidth(60); // 明确限制按钮宽度
-        table->setCellWidget(i, 4, btnBit);
-        connect(btnBit, &QPushButton::clicked, this, [this, table, i](){
-            onSimShowBitEditor(i);
-        });
+        if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem("0"));
     }
     connect(table, &QTableWidget::cellChanged, this, &MainWindow::onSimTableRowChanged);
 }
@@ -2351,11 +2350,58 @@ void MainWindow::onSimTableRowChanged(int row, int column)
     quint16 addr = (quint16)addrItem->text().toUInt();
     
     table->blockSignals(true);
-    if (column == 2) { // Integer changed
-        quint16 val = (quint16)table->item(row, 2)->text().toUInt();
-        target->setRegister(addr, val);
+    if (column == 2) { 
+        QString valStr = table->item(row, 2)->text();
+        bool ok;
+        quint16 val;
+        
+        // 尝试解析输入（如果是十六进制等）
+        if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
+            val = (quint16)valStr.toUInt(&ok, 16);
+        } else if (valStr.startsWith("0b", Qt::CaseInsensitive)) {
+            val = (quint16)valStr.mid(2).toUInt(&ok, 2);
+        } else {
+            val = (quint16)valStr.toUInt(&ok, 10);
+            if (!ok) val = (quint16)valStr.toInt(&ok, 10); // 处理负数输入
+        }
+
+        if (ok) {
+            target->setRegister(addr, val);
+        } else {
+            val = target->getRegister(addr);
+        }
+
+        // 根据格式设置显示
+        QString fmt = simTableFormats.value(table).value(row, "Unsigned");
+        QString display;
+        if (fmt == "Hex") display = "0x" + QString::number(val, 16).toUpper().rightJustified(4, '0');
+        else if (fmt == "Binary") display = "0b" + QString::number(val, 2).rightJustified(16, '0');
+        else if (fmt == "Signed") display = QString::number((int16_t)val);
+        else if (fmt == "ASCII - Hex") {
+            char c1 = (char)((val >> 8) & 0xFF);
+            char c2 = (char)(val & 0xFF);
+            display = QString("'%1%2'").arg(c1 > 31 ? QChar(c1) : '.').arg(c2 > 31 ? QChar(c2) : '.');
+        } 
+        else if (fmt.startsWith("32-bit")) {
+            uint32_t val32 = 0;
+            // 假设大端模式读取 32 位 (addr, addr+1)
+            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+            if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
+            else if (fmt == "32-bit Unsigned") display = QString::number(val32);
+            else if (fmt == "32-bit Float") {
+                float f;
+                memcpy(&f, &val32, 4);
+                display = QString::number(f, 'f', 2);
+            }
+        }
+        else display = QString::number(val);
+
+        table->item(row, 2)->setText(display);
+        
+        // 旧有的 Float 逻辑适配
         float f = target->getFloat(addr);
-        if (table->item(row, 3)) table->item(row, 3)->setText(QString::number(f, 'f', 2));
+        if (table->columnCount() > 3 && table->item(row, 3)) 
+            table->item(row, 3)->setText(QString::number(f, 'f', 2));
     }
     else if (column == 3) { // Float changed
         float f = table->item(row, 3)->text().toFloat();
@@ -2417,7 +2463,7 @@ void MainWindow::syncSimulatorTablesFromMaps() {
         for (int row = 0; row < src->rowCount(); ++row) {
             if (!dst->item(row, 0)) dst->setItem(row, 0, new QTableWidgetItem());
             if (!dst->item(row, 1)) dst->setItem(row, 1, new QTableWidgetItem());
-            if (!dst->item(row, 2)) dst->setItem(row, 2, new QTableWidgetItem());
+            if (!dst->item(row, 2)) dst->setItem(row, 2, new QTableWidgetItem("0"));
 
             QTableWidgetItem *srcAddr = src->item(row, 0);
             QTableWidgetItem *srcCmt = src->item(row, 1);
@@ -2555,14 +2601,22 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     QStringList formats = {"Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary"};
     for (const QString &fmt : formats) {
         QAction *a = formatMenu->addAction(fmt);
-        connect(a, &QAction::triggered, this, [this, fmt](){ onSimSetFormat(fmt); });
+        connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
+            simTableFormats[table][row] = fmt;
+            // 触发刷新
+            onSimTableRowChanged(row, 2); 
+        });
     }
     formatMenu->addSeparator();
     QMenu *sub32 = formatMenu->addMenu("32-bit");
     QStringList f32 = {"32-bit Signed", "32-bit Unsigned", "32-bit Float"};
     for (const QString &fmt : f32) {
         QAction *a = sub32->addAction(fmt);
-        connect(a, &QAction::triggered, this, [this, fmt](){ onSimSetFormat(fmt); });
+        connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
+            simTableFormats[table][row] = fmt;
+            // 触发刷新
+            onSimTableRowChanged(row, 2); 
+        });
     }
 
     menu.addSeparator();
@@ -2593,9 +2647,12 @@ void MainWindow::onSimShowWaveformEditor(int row) {
 
     QDialog *dlg = new QDialog(this);
     dlg->setWindowTitle(QString("地址 %1 周期波形配置").arg(addr));
+    dlg->setMinimumSize(400, 300); // 设置最小大小确保显示
     QVBoxLayout *v = new QVBoxLayout(dlg);
     
-    QGridLayout *g = new QGridLayout();
+    QGroupBox *group = new QGroupBox("波形参数", dlg);
+    QGridLayout *g = new QGridLayout(group);
+    
     g->addWidget(new QLabel("类型:"), 0, 0);
     QComboBox *cbType = new QComboBox();
     cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机");
@@ -2608,16 +2665,55 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     g->addWidget(new QLabel("周期(s):"), 2, 0);
     QDoubleSpinBox *spPer = new QDoubleSpinBox(); spPer->setRange(0.1, 3600); spPer->setValue(2.0);
     g->addWidget(spPer, 2, 1);
+
+    g->addWidget(new QLabel("偏移:"), 3, 0);
+    QDoubleSpinBox *spOff = new QDoubleSpinBox(); spOff->setRange(-65535, 65535); spOff->setValue(0);
+    g->addWidget(spOff, 3, 1);
     
-    v->addLayout(g);
+    v->addWidget(group);
+    
+    QHBoxLayout *hButtons = new QHBoxLayout();
     QPushButton *btnOk = new QPushButton("开始生成");
-    v->addWidget(btnOk);
+    QPushButton *btnCancel = new QPushButton("取消");
+    hButtons->addStretch();
+    hButtons->addWidget(btnOk);
+    hButtons->addWidget(btnCancel);
+    v->addLayout(hButtons);
     
     connect(btnOk, &QPushButton::clicked, dlg, [=](){
-        // 此处绑定原有波形生成逻辑，暂时打印
-        txtSimLog->append(QString("地址 %1 开始生成 %2").arg(addr).arg(cbType->currentText()));
+        CyclicTimer t;
+        t.device = (tabSimRegisterMaps->currentIndex() == 0) ? "AGV" : "Main";
+        t.addr = (quint16)addr;
+        t.type = cbType->currentText();
+        t.amplitude = spAmp->value();
+        t.offset = spOff->value();
+        t.period = spPer->value();
+        t.phase = 0.0;
+        t.dutyCycle = 0.5;
+        t.currentTicks = 0;
+        t.active = true;
+
+        // Replace if exists, else append
+        bool found = false;
+        for (int i=0; i<simCyclicTimers.size(); ++i) {
+            if (simCyclicTimers[i].device == t.device && simCyclicTimers[i].addr == t.addr) {
+                simCyclicTimers[i] = t;
+                found = true;
+                break;
+            }
+        }
+        if (!found) simCyclicTimers.append(t);
+
+        // 如果全局 UI 的波形表格已初始化，刷新它
+        if (tblWaveChannels) {
+            onSimAddCyclicTimerClicked();
+        }
+
+        txtSimLog->append(QString("地址 %1 开始生成 %2 (幅度:%3, 周期:%4s)")
+            .arg(addr).arg(cbType->currentText()).arg(spAmp->value()).arg(spPer->value()));
         dlg->accept();
     });
+    connect(btnCancel, &QPushButton::clicked, dlg, &QDialog::reject);
     
     dlg->exec();
     dlg->deleteLater();
