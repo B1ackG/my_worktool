@@ -28,6 +28,8 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QMenu>
+#include <QAction>
 #include <QJsonObject>
 #include <QJsonObject>
 #include "modbusslave.h"
@@ -100,6 +102,9 @@ private slots:
     void onApplyFaultSettingsClicked();
     void onExportHistoryClicked();
     void onRegisterOperation(quint16 addr, quint16 value, const QString &opType);
+    void onSimShowContextMenu(const QPoint &pos);
+    void onSimSetFormat(const QString &format);
+    void onSimShowWaveformEditor(int row);
 
 private:
     void createWidgets();

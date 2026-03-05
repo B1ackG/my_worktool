@@ -13,6 +13,8 @@
 #include <QTextStream>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QMenu>
+#include <QAction>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -2317,6 +2319,9 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch); // 描述列自适应剩余空间
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+    table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(table, &QTableWidget::customContextMenuRequested, this, &MainWindow::onSimShowContextMenu);
+
     table->setRowCount(50);
 
     for (int i = 0; i < 50; ++i) {
@@ -2534,4 +2539,86 @@ void MainWindow::loadRegisterTables() {
     loadTable(tblAGV, "Map_AGV");
     loadTable(tblRobot, "Map_Robot");
     syncSimulatorTablesFromMaps();
+}
+
+void MainWindow::onSimShowContextMenu(const QPoint &pos) {
+    QTableWidget *table = qobject_cast<QTableWidget*>(sender());
+    if (!table) return;
+    QModelIndex index = table->indexAt(pos);
+    if (!index.isValid()) return;
+    int row = index.row();
+
+    QMenu menu(this);
+    
+    // Format Submenu
+    QMenu *formatMenu = menu.addMenu("Format");
+    QStringList formats = {"Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary"};
+    for (const QString &fmt : formats) {
+        QAction *a = formatMenu->addAction(fmt);
+        connect(a, &QAction::triggered, this, [this, fmt](){ onSimSetFormat(fmt); });
+    }
+    formatMenu->addSeparator();
+    QMenu *sub32 = formatMenu->addMenu("32-bit");
+    QStringList f32 = {"32-bit Signed", "32-bit Unsigned", "32-bit Float"};
+    for (const QString &fmt : f32) {
+        QAction *a = sub32->addAction(fmt);
+        connect(a, &QAction::triggered, this, [this, fmt](){ onSimSetFormat(fmt); });
+    }
+
+    menu.addSeparator();
+    QAction *actBit = menu.addAction("bit Edit");
+    connect(actBit, &QAction::triggered, this, [this, row](){ onSimShowBitEditor(row); });
+
+    QAction *actWave = menu.addAction("periodic waveformation");
+    connect(actWave, &QAction::triggered, this, [this, row](){ onSimShowWaveformEditor(row); });
+
+    menu.exec(table->viewport()->mapToGlobal(pos));
+}
+
+void MainWindow::onSimSetFormat(const QString &format) {
+    // 转发请求或更新全局设置即可，这里简单记录日志，实际由刷新函数处理
+    txtSimLog->append(QString("格式切换为: %1").arg(format));
+    // 假设您已实现 cmbDisplayFormat 或类似逻辑，可在此同步
+    if (cmbDisplayFormat) {
+        int idx = cmbDisplayFormat->findText(format);
+        if (idx >= 0) cmbDisplayFormat->setCurrentIndex(idx);
+    }
+}
+
+void MainWindow::onSimShowWaveformEditor(int row) {
+    QTableWidget *table = (tabSimRegisterMaps->currentIndex() == 0) ? tblSimAGV : tblSimMain;
+    QTableWidgetItem *addrItem = table->item(row, 0);
+    if (!addrItem) return;
+    int addr = addrItem->text().toInt();
+
+    QDialog *dlg = new QDialog(this);
+    dlg->setWindowTitle(QString("地址 %1 周期波形配置").arg(addr));
+    QVBoxLayout *v = new QVBoxLayout(dlg);
+    
+    QGridLayout *g = new QGridLayout();
+    g->addWidget(new QLabel("类型:"), 0, 0);
+    QComboBox *cbType = new QComboBox();
+    cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机");
+    g->addWidget(cbType, 0, 1);
+    
+    g->addWidget(new QLabel("幅度:"), 1, 0);
+    QDoubleSpinBox *spAmp = new QDoubleSpinBox(); spAmp->setRange(0, 65535); spAmp->setValue(1000);
+    g->addWidget(spAmp, 1, 1);
+    
+    g->addWidget(new QLabel("周期(s):"), 2, 0);
+    QDoubleSpinBox *spPer = new QDoubleSpinBox(); spPer->setRange(0.1, 3600); spPer->setValue(2.0);
+    g->addWidget(spPer, 2, 1);
+    
+    v->addLayout(g);
+    QPushButton *btnOk = new QPushButton("开始生成");
+    v->addWidget(btnOk);
+    
+    connect(btnOk, &QPushButton::clicked, dlg, [=](){
+        // 此处绑定原有波形生成逻辑，暂时打印
+        txtSimLog->append(QString("地址 %1 开始生成 %2").arg(addr).arg(cbType->currentText()));
+        dlg->accept();
+    });
+    
+    dlg->exec();
+    dlg->deleteLater();
 }

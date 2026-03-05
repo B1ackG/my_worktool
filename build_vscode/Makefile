@@ -551,6 +551,11 @@ moc_mainwindow.cpp: ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMenu \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmenu.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qaction.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qactiongroup.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QAction \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
@@ -858,6 +863,11 @@ main.o: ../main.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMenu \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmenu.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qaction.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qactiongroup.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QAction \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
@@ -1070,6 +1080,11 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtableview.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHeaderView \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qheaderview.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMenu \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmenu.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qaction.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qactiongroup.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QAction \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
