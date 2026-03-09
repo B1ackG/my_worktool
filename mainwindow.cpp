@@ -1984,7 +1984,12 @@ void MainWindow::runGitCommand(const QStringList &args) {
 
     QProcess process;
     process.setWorkingDirectory(workDir);
+
+#ifdef Q_OS_WIN
+    process.setProgram("git.exe");
+#else
     process.setProgram("git");
+#endif
     process.setArguments(args);
     
     txtGitLog->append(QString("<font color='cyan'>$ git %1</font>").arg(args.join(" ")));
@@ -2020,7 +2025,11 @@ void MainWindow::onGitRefreshBranchesClicked() {
     // Get local branches
     QProcess process;
     process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start("git.exe", QStringList() << "branch");
+#else
     process.start("git", QStringList() << "branch");
+#endif
     process.waitForFinished();
     
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
@@ -2265,7 +2274,11 @@ void MainWindow::onGitRefreshLogClicked() {
     QProcess process;
     process.setWorkingDirectory(workDir);
     // Get short hash, relative time, Subject, Author name
+#ifdef Q_OS_WIN
+    process.start("git.exe", QStringList() << "log" << "--pretty=format:%h - %cd : %s (%an)" << "--date=short" << "-n" << "20");
+#else
     process.start("git", QStringList() << "log" << "--pretty=format:%h - %cd : %s (%an)" << "--date=short" << "-n" << "20");
+#endif
     process.waitForFinished();
     
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
