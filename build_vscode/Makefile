@@ -1103,6 +1103,7 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMessageBox \
 		/usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmessagebox.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDateTime \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDate \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDataStream \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDebug \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/QIntValidator \
@@ -1116,7 +1117,14 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/QDesktopServices \
 		/usr/include/x86_64-linux-gnu/qt5/QtGui/qdesktopservices.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qstandardpaths.h \
-		/usr/include/x86_64-linux-gnu/qt5/QtCore/QUrl
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QUrl \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/QClipboard \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/qclipboard.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/QGuiApplication \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/qguiapplication.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcoreapplication.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qeventloop.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtGui/qinputmethod.h
 	$(CXX) -c $(CXXFLAGS) $(INCPATH) -o mainwindow.o ../mainwindow.cpp
 
 modbusslave.o: ../modbusslave.cpp ../modbusslave.h \

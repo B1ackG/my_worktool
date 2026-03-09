@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include <QMessageBox>
 #include <QDateTime>
+#include <QDate>
 #include <QDataStream>
 #include <QDebug>
 #include <QIntValidator>
@@ -15,6 +16,8 @@
 #include <QUrl>
 #include <QMenu>
 #include <QAction>
+#include <QClipboard>
+#include <QGuiApplication>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -282,7 +285,11 @@ void MainWindow::createWidgets()
     // Let's initialize here to be safe and consistent
     cmbGitDir = new QComboBox();
     cmbGitDir->setEditable(true);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     cmbGitDir->setPlaceholderText("选择Git仓库路径...");
+#else
+    cmbGitDir->lineEdit()->setPlaceholderText("选择Git仓库路径...");
+#endif
     // loadGitHistory(); // Call this later or here? Better here.
     
     btnGitSelectDir = new QPushButton("选择目录");
@@ -313,6 +320,8 @@ void MainWindow::createWidgets()
     btnGitRefreshLog = new QPushButton("刷新历史");
     btnGitReset = new QPushButton("硬回退 (Reset)");
     btnGitReset->setStyleSheet("color: red; font-weight: bold;");
+    btnGitCopyDaily = new QPushButton("复制到日报");
+    btnGitCopyDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
     
     txtGitLog = new QTextEdit();
     txtGitLog->setReadOnly(true);
@@ -551,6 +560,7 @@ QWidget* MainWindow::createGitPage()
     layHist->addWidget(cmbGitHistory, 1);
     layHist->addWidget(btnGitRefreshLog);
     layHist->addWidget(btnGitReset);
+    layHist->addWidget(btnGitCopyDaily);
     layOps->addLayout(layHist);
     
     grpOps->setLayout(layOps);
@@ -826,6 +836,7 @@ void MainWindow::createConnections()
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
+    connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
     
     // Waveform Controls
     connect(btnWaveAdd, &QPushButton::clicked, this, &MainWindow::onSimAddCyclicTimerClicked);
@@ -934,40 +945,65 @@ void MainWindow::onSimTimerTick()
             val = (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0) * t.amplitude + t.offset;
         }
 
-        quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
         ModbusSlave *target = (t.device == "Main") ? simMainDevice : simAGVDevice;
         if (target) {
-            target->setRegister(t.addr, regVal);
-
-            // 更新 UI 表格
+            // 根据 UI 当前该地址的显示格式决定如何设置寄存器
             QTableWidget *table = (t.device == "Main") ? tblSimMain : tblSimAGV;
+            QString fmt = "Unsigned";
+            int foundRow = -1;
             if (table) {
                 for (int r = 0; r < table->rowCount(); ++r) {
                     QTableWidgetItem *addrItem = table->item(r, 0);
                     if (addrItem && (quint16)addrItem->text().toUInt() == t.addr) {
-                        refreshSimRowDisplay(table, r);
-                        for (int k = 0; k < table->rowCount(); ++k) {
-                            QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
-                            if (!fmtk.startsWith("32-bit")) continue;
-                            QTableWidgetItem *aItem = table->item(k, 0);
-                            if (!aItem) continue;
-                            quint16 a = (quint16)aItem->text().toUInt();
-                            if (a == t.addr || (quint16)(a + 1) == t.addr) {
-                                refreshSimRowDisplay(table, k);
-                            }
-                        }
+                        fmt = simTableFormats.value(table).value(r, "Unsigned");
+                        foundRow = r;
                         break;
+                    }
+                }
+            }
+
+            if (fmt == "32-bit Float") {
+                target->setFloat(t.addr, (float)val);
+            } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
+                uint32_t val32 = (fmt == "32-bit Signed") ? (uint32_t)(int32_t)val : (uint32_t)val;
+                target->setRegister(t.addr, (quint16)(val32 >> 16));
+                target->setRegister(t.addr + 1, (quint16)(val32 & 0xFFFF));
+            } else {
+                // 普通 16 位模式
+                quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
+                target->setRegister(t.addr, regVal);
+            }
+
+            // 更新 UI 表格显示
+            if (table && foundRow >= 0) {
+                refreshSimRowDisplay(table, foundRow);
+                // 如果是 32 位格式，还需要刷新下一行
+                if (fmt.startsWith("32-bit")) {
+                    refreshSimRowDisplay(table, foundRow + 1);
+                }
+                
+                // 检查是否有其他 32 位格式也引用了这些地址（反向同步）
+                for (int k = 0; k < table->rowCount(); ++k) {
+                    if (k == foundRow) continue;
+                    QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
+                    if (!fmtk.startsWith("32-bit")) continue;
+                    QTableWidgetItem *aItem = table->item(k, 0);
+                    if (!aItem) continue;
+                    quint16 a = (quint16)aItem->text().toUInt();
+                    if (a == t.addr || (quint16)(a + 1) == t.addr) {
+                        refreshSimRowDisplay(table, k);
                     }
                 }
             }
             
             // 每秒记录一次日志，避免刷新过快 (100ms * 10 = 1s)
             if (t.currentTicks % 10 == 0) {
-                QString logMsg = QString("周期更新: %1 地址[%2] -> %3 (类型:%4)")
+                QString logMsg = QString("周期更新: %1 地址[%2] -> %3 (类型:%4, 格式:%5)")
                                  .arg(t.device == "Main" ? "主设备" : "AGV")
                                  .arg(t.addr)
-                                 .arg(regVal)
-                                 .arg(t.type);
+                                 .arg(val)
+                                 .arg(t.type)
+                                 .arg(fmt);
                 txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(logMsg));
             }
         }
@@ -1321,6 +1357,7 @@ void MainWindow::onStartSimulatorClicked()
         QString bind = txtSimBindIP->text().trimmed();
         quint16 port = static_cast<quint16>(txtSimMainPort->text().toUShort());
         bool ok = simMainDevice->start(port, 1, bind);
+        simLastReadValues.remove("主设备");
         txtSimLog->append(QString("主设备 启动 %1 (绑定 %2:%3)").arg(ok).arg(bind).arg(port));
         if (ok) {
             btnSimStartMain->setEnabled(false);
@@ -1337,6 +1374,7 @@ void MainWindow::onStartSimulatorClicked()
         QString bind = txtSimBindIP->text().trimmed();
         quint16 port = static_cast<quint16>(txtSimAGVPort->text().toUShort());
         bool ok = simAGVDevice->start(port, 1, bind);
+        simLastReadValues.remove("AGV");
         txtSimLog->append(QString("AGV 启动 %1 (绑定 %2:%3)").arg(ok).arg(bind).arg(port));
         if (ok) {
             btnSimStartAGV->setEnabled(false);
@@ -1358,6 +1396,7 @@ void MainWindow::onStopSimulatorClicked()
     if (!b) return;
     if (b == btnSimStopMain) {
         simMainDevice->stop();
+        simLastReadValues.remove("主设备");
         txtSimLog->append("主设备 停止");
         btnSimStartMain->setEnabled(true);
         btnSimStopMain->setEnabled(false);
@@ -1365,6 +1404,7 @@ void MainWindow::onStopSimulatorClicked()
         lblSimMainStatus->setStyleSheet("color: red; font-weight: bold;");
     } else if (b == btnSimStopAGV) {
         simAGVDevice->stop();
+        simLastReadValues.remove("AGV");
         txtSimLog->append("AGV 停止");
         btnSimStartAGV->setEnabled(true);
         btnSimStopAGV->setEnabled(false);
@@ -1655,6 +1695,9 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
 {
     QJsonObject entry;
     QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    const QString normalizedOpType = opType.trimmed().toLower();
+    const bool isRead = normalizedOpType == "read";
+    const bool isWrite = (normalizedOpType == "write" || normalizedOpType == "write_bit");
     entry.insert("timestamp", timeStr);
     
     // Determine source device based on sender
@@ -1699,13 +1742,24 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
 
     // 2. 输出到模拟器运行日志
     if (txtSimLog) {
-        QString logMsg = QString("指令: [%1] %2 地址[%3] %4 %5")
-                            .arg(deviceName)
-                            .arg(opType == "Write" ? "写入" : "读取")
-                            .arg(addr)
-                            .arg(opType == "Write" ? "<-" : "->")
-                            .arg(value);
-        txtSimLog->append(QString("[%1] %2").arg(timeStr).arg(logMsg));
+        bool shouldLog = true;
+        if (isRead) {
+            QMap<quint16, quint16> &deviceReadValues = simLastReadValues[deviceName];
+            shouldLog = !deviceReadValues.contains(addr) || deviceReadValues.value(addr) != value;
+            deviceReadValues.insert(addr, value);
+        }
+
+        if (shouldLog) {
+            const QString actionText = isRead ? "读取" : (isWrite ? "写入" : normalizedOpType);
+            const QString arrowText = isRead ? "->" : (isWrite ? "<-" : ":");
+            QString logMsg = QString("指令: [%1] %2 地址[%3] %4 %5")
+                                .arg(deviceName)
+                                .arg(actionText)
+                                .arg(addr)
+                                .arg(arrowText)
+                                .arg(value);
+            txtSimLog->append(QString("[%1] %2").arg(timeStr).arg(logMsg));
+        }
     }
     
     // Optional: limit in-memory history size
@@ -2242,6 +2296,44 @@ void MainWindow::onGitResetClicked() {
     }
 }
 
+void MainWindow::onGitCopyForDailyReportClicked() {
+    QString today = QDate::currentDate().toString("yyyy-MM-dd");
+    QStringList todayCommits;
+
+    // Iterate through all items in the history combo box
+    for (int i = 0; i < cmbGitHistory->count(); ++i) {
+        QString item = cmbGitHistory->itemText(i);
+        // Format: %h - %cd : %s (%an) -> e.g., "a1b2c3d - 2026-03-05 : Fix bug (Author)"
+        
+        // Extract date (usually between the first " - " and the first " : ")
+        int dashIdx = item.indexOf(" - ");
+        int colonIdx = item.indexOf(" : ");
+        
+        if (dashIdx != -1 && colonIdx != -1) {
+            QString datePart = item.mid(dashIdx + 3, colonIdx - (dashIdx + 3)).trimmed();
+            if (datePart == today) {
+                // Extract Subject
+                QString subject = item.mid(colonIdx + 3);
+                int authorIdx = subject.lastIndexOf(" (");
+                if (authorIdx != -1) {
+                    subject = subject.left(authorIdx);
+                }
+                todayCommits.prepend(subject.trimmed()); // prepend to get chronological order (git log is reverse)
+            }
+        }
+    }
+
+    if (todayCommits.isEmpty()) {
+        txtGitLog->append("未找到日期为 " + today + " 的提交记录");
+        return;
+    }
+
+    QString finalContent = todayCommits.join("\n");
+    QGuiApplication::clipboard()->setText(finalContent);
+    txtGitLog->append(QString("已拼接今日(%1)共 %2 条提交并复制:").arg(today).arg(todayCommits.size()));
+    txtGitLog->append(finalContent);
+}
+
 void MainWindow::saveGitHistory(const QString &dir) {
     if (dir.isEmpty()) return;
 
@@ -2723,13 +2815,18 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     QGroupBox *group = new QGroupBox("波形参数", dlg);
     QGridLayout *g = new QGridLayout(group);
     
+    QString currentFmt = simTableFormats.value(table).value(row, "Unsigned");
+    bool isFloat32 = (currentFmt == "32-bit Float");
+
     g->addWidget(new QLabel("类型:"), 0, 0);
     QComboBox *cbType = new QComboBox();
     cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机");
     g->addWidget(cbType, 0, 1);
     
     g->addWidget(new QLabel("幅度:"), 1, 0);
-    QDoubleSpinBox *spAmp = new QDoubleSpinBox(); spAmp->setRange(0, 65535); spAmp->setValue(1000);
+    QDoubleSpinBox *spAmp = new QDoubleSpinBox(); 
+    spAmp->setRange(isFloat32 ? -1e9 : 0, 1e9); 
+    spAmp->setValue(isFloat32 ? 10.0 : 1000.0);
     g->addWidget(spAmp, 1, 1);
     
     g->addWidget(new QLabel("周期(s):"), 2, 0);
@@ -2737,7 +2834,9 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     g->addWidget(spPer, 2, 1);
 
     g->addWidget(new QLabel("偏移:"), 3, 0);
-    QDoubleSpinBox *spOff = new QDoubleSpinBox(); spOff->setRange(-65535, 65535); spOff->setValue(0);
+    QDoubleSpinBox *spOff = new QDoubleSpinBox(); 
+    spOff->setRange(-1e9, 1e9); 
+    spOff->setValue(0);
     g->addWidget(spOff, 3, 1);
     
     v->addWidget(group);
@@ -2779,8 +2878,8 @@ void MainWindow::onSimShowWaveformEditor(int row) {
             onSimAddCyclicTimerClicked();
         }
 
-        txtSimLog->append(QString("地址 %1 开始生成 %2 (幅度:%3, 周期:%4s)")
-            .arg(addr).arg(cbType->currentText()).arg(spAmp->value()).arg(spPer->value()));
+        txtSimLog->append(QString("地址 %1 开始生成 %2 (格式: %3, 幅度:%4, 周期:%5s)")
+            .arg(addr).arg(cbType->currentText()).arg(currentFmt).arg(spAmp->value()).arg(spPer->value()));
         dlg->accept();
     });
     connect(btnCancel, &QPushButton::clicked, dlg, &QDialog::reject);

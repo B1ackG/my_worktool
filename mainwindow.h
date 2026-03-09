@@ -88,6 +88,7 @@ private slots:
     void onGitCheckIgnoreClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
+    void onGitCopyForDailyReportClicked();
 
     // Common
     void onClearLogClicked();
@@ -234,6 +235,7 @@ private:
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
+    QPushButton *btnGitCopyDaily;
     QTextEdit *txtGitLog;
 
     // --- Logic Objects ---
@@ -296,6 +298,7 @@ private:
 
     // register history: simple in-memory list of JSON objects
     QVector<QJsonObject> registerHistory;
+    QMap<QString, QMap<quint16, quint16>> simLastReadValues;
     // Fault injection controls
     QSpinBox *spinSimDelayMs;
     QDoubleSpinBox *spinSimDropProb;

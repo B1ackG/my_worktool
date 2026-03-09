@@ -1,22 +1,35 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "build",
-            "type": "shell",
-            "command": "mkdir -p build_vscode && cd build_vscode && export QMAKESPEC=linux-g++ && /usr/bin/qmake ../ModbusTCPAssistant.pro && make -j$(nproc)",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$gcc"],
-            "detail": "Build the Qt project using qmake and make"
-        },
-        {
-            "label": "clean",
-            "type": "shell",
-            "command": "rm -rf build_vscode",
-            "problemMatcher": []
-        }
-    ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build",
+			"type": "shell",
+			"command": "mkdir -p build_vscode && cd build_vscode && export QMAKESPEC=linux-g++ && /usr/bin/qmake ../ModbusTCPAssistant.pro && make -j$(nproc)",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"detail": "Build the Qt project using qmake and make"
+		},
+		{
+			"label": "clean",
+			"type": "shell",
+			"command": "rm -rf build_vscode",
+			"problemMatcher": []
+		},
+		{
+			"label": "show-build-log",
+			"type": "shell",
+			"command": "tail",
+			"args": [
+				"-n",
+				"80",
+				"build_vscode/Makefile"
+			],
+			"isBackground": false
+		}
+	]
 }
