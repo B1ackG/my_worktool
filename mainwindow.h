@@ -31,7 +31,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QJsonObject>
-#include <QJsonObject>
+#include <QDirIterator>
 #include "modbusslave.h"
 
 class MainWindow : public QMainWindow
@@ -67,6 +67,10 @@ private slots:
     void saveConnectionHistory(const QString &ip);
     void loadConnectionHistory();
 
+    // Add these helper methods
+    void saveAutoScene();
+    void loadAutoScene();
+
     // Serial Port Slots
     void onSerialOpenClicked();
     void onSerialCloseClicked();
@@ -89,6 +93,7 @@ private slots:
     void onGitRefreshLogClicked();
     void onGitResetClicked();
     void onGitCopyForDailyReportClicked();
+    void onScpTransferClicked();
 
     // Common
     void onClearLogClicked();
@@ -236,6 +241,9 @@ private:
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
     QPushButton *btnGitCopyDaily;
+    QLineEdit *txtScpTargetIp;
+    QLineEdit *txtScpPassword;
+    QPushButton *btnScpTransfer;
     QTextEdit *txtGitLog;
 
     // --- Logic Objects ---
@@ -327,6 +335,8 @@ private:
     void onSimRandomAndWriteClicked();
     void onSimSaveSceneClicked();
     void onSimLoadSceneClicked();
+    void onSimExportCsvClicked();
+    void onSimImportCsvClicked();
     void onSimRunScriptClicked();
     void onSimStopScriptClicked();
     void onSimRandomAndWriteClicked_v2(); // unused but keeping to maintain structure if needed
@@ -336,6 +346,7 @@ private:
     void onSimAddCyclicTimerClicked();
     void onSimRemoveCyclicTimerClicked(); // 新增
     void onSimWaveTypeChanged(const QString &type); // 新增
+    void onSimStopAllWaveformsClicked(); // 新增
     void onSimTimerTick();
     void onSimGenerateReportClicked();
     void refreshSimRowDisplay(QTableWidget *table, int row);
@@ -379,6 +390,7 @@ private:
 
     // History
     static const int MAX_HISTORY = 10;
+    QString lastScenePath; // 添加此行
 };
 
 #endif // MAINWINDOW_H

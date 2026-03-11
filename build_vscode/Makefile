@@ -563,6 +563,8 @@ moc_mainwindow.cpp: ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDirIterator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdiriterator.h \
 		../modbusslave.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
@@ -875,6 +877,8 @@ main.o: ../main.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDirIterator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdiriterator.h \
 		../modbusslave.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
@@ -1092,6 +1096,8 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QDirIterator \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qdiriterator.h \
 		../modbusslave.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
 		/usr/include/x86_64-linux-gnu/qt5/QtNetwork/QTcpServer \
@@ -1111,6 +1117,8 @@ mainwindow.o: ../mainwindow.cpp ../mainwindow.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qrandom.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonDocument \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsondocument.h \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonArray \
+		/usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonarray.h \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QFile \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QRegularExpression \
 		/usr/include/x86_64-linux-gnu/qt5/QtCore/QTextStream \

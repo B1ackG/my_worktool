@@ -9,6 +9,7 @@
 #include <bitset>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QFile>
 #include <QRegularExpression>
 #include <QTextStream>
@@ -48,6 +49,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadConnectionHistory();
     loadGitHistory();
     loadRegisterTables();
+    loadAutoScene(); // 自动加载上次保存的寄存器设置、格式和波形
     syncSimulatorTablesFromMaps();
 
     connect(simMainDevice, &ModbusSlave::clientConnected, this, [this](){
@@ -102,11 +104,15 @@ MainWindow::MainWindow(QWidget *parent)
     btnSimStartAGV->setEnabled(true);
     btnSimStopAGV->setEnabled(false);
     lblSimAGVStatus->setText("离线"); lblSimAGVStatus->setStyleSheet("color: red; font-weight: bold;");
+
+    // 程序启动时确保波形初始状态为停止
+    onSimStopAllWaveformsClicked();
 }
 
 MainWindow::~MainWindow()
 {
     saveRegisterTables();
+    saveAutoScene(); // 自动保存所有寄存器设置、格式和波形
 
     if (tcpSocket && tcpSocket->state() == QAbstractSocket::ConnectedState)
         tcpSocket->disconnectFromHost();
@@ -322,6 +328,14 @@ void MainWindow::createWidgets()
     btnGitReset->setStyleSheet("color: red; font-weight: bold;");
     btnGitCopyDaily = new QPushButton("复制到日报");
     btnGitCopyDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
+
+    txtScpTargetIp = new QLineEdit("192.168.1.245");
+    txtScpTargetIp->setPlaceholderText("目标设备地址");
+    txtScpPassword = new QLineEdit();
+    txtScpPassword->setPlaceholderText("SSH 密码");
+    txtScpPassword->setEchoMode(QLineEdit::Password);
+    btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
+    btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
     
     txtGitLog = new QTextEdit();
     txtGitLog->setReadOnly(true);
@@ -562,6 +576,15 @@ QWidget* MainWindow::createGitPage()
     layHist->addWidget(btnGitReset);
     layHist->addWidget(btnGitCopyDaily);
     layOps->addLayout(layHist);
+
+    // SCP Transfer Section
+    QHBoxLayout *layScp = new QHBoxLayout();
+    layScp->addWidget(new QLabel("目标:"));
+    layScp->addWidget(txtScpTargetIp, 1);
+    layScp->addWidget(new QLabel("密码:"));
+    layScp->addWidget(txtScpPassword, 1);
+    layScp->addWidget(btnScpTransfer);
+    layOps->addLayout(layScp);
     
     grpOps->setLayout(layOps);
     layout->addWidget(grpOps);
@@ -649,16 +672,16 @@ QWidget* MainWindow::createSimulatorPage()
     spinWaveAddr = new QSpinBox(); spinWaveAddr->setRange(0, 9999);
     glWave->addWidget(spinWaveAddr, 0, 3);
     glWave->addWidget(new QLabel("类型:"), 1, 0);
-    cmbWaveType = new QComboBox(); cmbWaveType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机");
+    cmbWaveType = new QComboBox(); cmbWaveType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机" << "来回增减");
     glWave->addWidget(cmbWaveType, 1, 1);
-    glWave->addWidget(new QLabel("幅度:"), 1, 2);
-    spinWaveAmp = new QDoubleSpinBox(); spinWaveAmp->setRange(0, 65535); spinWaveAmp->setValue(1000);
+    glWave->addWidget(new QLabel("幅度(或最大):"), 1, 2);
+    spinWaveAmp = new QDoubleSpinBox(); spinWaveAmp->setRange(-65535, 65535); spinWaveAmp->setValue(1000);
     glWave->addWidget(spinWaveAmp, 1, 3);
     glWave->addWidget(new QLabel("周期(s):"), 2, 0);
     spinWavePeriod = new QDoubleSpinBox(); spinWavePeriod->setRange(0.1, 3600); spinWavePeriod->setValue(2.0);
     glWave->addWidget(spinWavePeriod, 2, 1);
-    glWave->addWidget(new QLabel("偏移:"), 2, 2);
-    spinWaveOffset = new QDoubleSpinBox(); spinWaveOffset->setRange(-65535, 65535); spinWaveOffset->setValue(1000);
+    glWave->addWidget(new QLabel("偏移(或最小):"), 2, 2);
+    spinWaveOffset = new QDoubleSpinBox(); spinWaveOffset->setRange(-65535, 65535); spinWaveOffset->setValue(0);
     glWave->addWidget(spinWaveOffset, 2, 3);
     glWave->addWidget(new QLabel("相位(°):"), 3, 0);
     spinWavePhase = new QDoubleSpinBox(); spinWavePhase->setRange(0.0, 360.0); spinWavePhase->setValue(0.0);
@@ -667,7 +690,11 @@ QWidget* MainWindow::createSimulatorPage()
     spinWaveDuty = new QDoubleSpinBox(); spinWaveDuty->setRange(0.01, 0.99); spinWaveDuty->setSingleStep(0.05); spinWaveDuty->setValue(0.5);
     glWave->addWidget(spinWaveDuty, 3, 3);
     btnWaveAdd = new QPushButton("➕ 添加/更新通道");
-    glWave->addWidget(btnWaveAdd, 4, 0, 1, 4);
+    btnWaveStopAll = new QPushButton("⏹️ 全部暂停/恢复");
+    QHBoxLayout *hWaveBtns = new QHBoxLayout();
+    hWaveBtns->addWidget(btnWaveAdd);
+    hWaveBtns->addWidget(btnWaveStopAll);
+    glWave->addLayout(hWaveBtns, 4, 0, 1, 4);
     lw->addLayout(glWave);
     tblWaveChannels = new QTableWidget();
     tblWaveChannels->setColumnCount(5);
@@ -712,8 +739,17 @@ QWidget* MainWindow::createSimulatorPage()
     QVBoxLayout *lsc = new QVBoxLayout(pageScene);
     btnSimSaveScene = new QPushButton("💾 保存当前寄存器快照 (Scene)");
     btnSimLoadScene = new QPushButton("📂 加载寄存器快照 (Scene)");
-    lsc->addWidget(btnSimSaveScene); lsc->addWidget(btnSimLoadScene); lsc->addStretch();
-    tabSimTools->addTab(pageScene, "场景快照");
+    QPushButton *btnExportCsv = new QPushButton("📊 导出寄存器表 (Excel/CSV)");
+    QPushButton *btnImportCsv = new QPushButton("📥 导入寄存器表 (Excel/CSV)");
+    lsc->addWidget(btnSimSaveScene); lsc->addWidget(btnSimLoadScene); 
+    lsc->addWidget(btnExportCsv); lsc->addWidget(btnImportCsv);
+    lsc->addStretch();
+    tabSimTools->addTab(pageScene, "场景与导入导出");
+
+    connect(btnSimSaveScene, &QPushButton::clicked, this, &MainWindow::onSimSaveSceneClicked);
+    connect(btnSimLoadScene, &QPushButton::clicked, this, &MainWindow::onSimLoadSceneClicked);
+    connect(btnExportCsv, &QPushButton::clicked, this, &MainWindow::onSimExportCsvClicked);
+    connect(btnImportCsv, &QPushButton::clicked, this, &MainWindow::onSimImportCsvClicked);
 
     leftLayout->addWidget(tabSimTools);
     leftLayout->addStretch();
@@ -837,13 +873,48 @@ void MainWindow::createConnections()
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
+    connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
     
     // Waveform Controls
     connect(btnWaveAdd, &QPushButton::clicked, this, &MainWindow::onSimAddCyclicTimerClicked);
+    connect(btnWaveStopAll, &QPushButton::clicked, this, &MainWindow::onSimStopAllWaveformsClicked);
     
     simTickTimer = new QTimer(this);
     connect(simTickTimer, &QTimer::timeout, this, &MainWindow::onSimTimerTick);
     simTickTimer->start(100); 
+}
+
+void MainWindow::onSimStopAllWaveformsClicked()
+{
+    if (simCyclicTimers.isEmpty()) return;
+
+    // 如果当前有任何一个是激活的，则全部停止；如果全都是停止的，则全部激活。
+    bool anyActive = false;
+    for (const auto &t : simCyclicTimers) if (t.active) { anyActive = true; break; }
+
+    for (int i=0; i<simCyclicTimers.size(); ++i) {
+        simCyclicTimers[i].active = !anyActive;
+    }
+    
+    // 刷新日志和界面
+    QString status = anyActive ? "全部停止" : "全部启动";
+    txtSimLog->append(QString("[%1] 周期波形已%2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(status));
+    
+    // 强制刷新表格显示
+    if (tblWaveChannels) {
+        tblWaveChannels->setRowCount(simCyclicTimers.size());
+        for (int i=0; i<simCyclicTimers.size(); ++i) {
+            const CyclicTimer &ct = simCyclicTimers[i];
+            tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device == "Main" ? "主设备" : "AGV"));
+            tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
+            tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
+            tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active ? "运行中" : "停止"));
+            
+            QPushButton *btnRemove = new QPushButton("删除");
+            tblWaveChannels->setCellWidget(i, 4, btnRemove);
+            connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
+        }
+    }
 }
 
 void MainWindow::onSimAddCyclicTimerClicked()
@@ -943,6 +1014,25 @@ void MainWindow::onSimTimerTick()
             val = t.amplitude * (2.0 * cyclePos - 1.0) + t.offset;
         } else if (t.type == "随机") {
             val = (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0) * t.amplitude + t.offset;
+        } else if (t.type == "来回增减") {
+            // 来回增减逻辑：在 offset 到 amplitude 之间循环
+            // t.offset 对应最小值，t.amplitude 对应最大值
+            double minVal = t.offset;
+            double maxVal = t.amplitude;
+            if (minVal > maxVal) qSwap(minVal, maxVal);
+            double range = maxVal - minVal;
+            if (range <= 0) {
+                val = minVal;
+            } else {
+                // cyclePos 从 0 到 1
+                double cyclePos = fmod(currentTime + (t.phase / 360.0) * t.period, t.period) / t.period;
+                // 0 -> 0.5 增加, 0.5 -> 1.0 减少
+                if (cyclePos < 0.5) {
+                    val = minVal + (cyclePos * 2.0) * range;
+                } else {
+                    val = maxVal - ((cyclePos - 0.5) * 2.0) * range;
+                }
+            }
         }
 
         ModbusSlave *target = (t.device == "Main") ? simMainDevice : simAGVDevice;
@@ -1532,22 +1622,67 @@ void MainWindow::onSimRandomAndWriteClicked()
 
 void MainWindow::onSimSaveSceneClicked()
 {
-    QString fn = QFileDialog::getSaveFileName(this, "保存场景", QString(), "JSON Files (*.json)");
+    QString initialPath = lastScenePath.isEmpty() ? QDir::currentPath() : lastScenePath;
+    QString fn = QFileDialog::getSaveFileName(this, "保存场景", initialPath, "JSON Files (*.json);;All Files (*)");
     if (fn.isEmpty()) return;
+    
+    // Save path for next time
+    lastScenePath = QFileInfo(fn).absolutePath();
+    
     QJsonObject root;
 
-    QVector<quint16> mainData = simMainDevice->exportHolding();
-    QJsonObject mainObj;
-    for (int i = 0; i < mainData.size(); ++i) {
-        if (mainData[i] != 0) mainObj.insert(QString::number(i), int(mainData[i]));
+    auto exportDeviceHolding = [this](ModbusSlave *dev, QTableWidget *table) {
+        QJsonObject obj;
+        if (!dev || !table) return obj;
+        
+        QJsonObject values;
+        QJsonObject formats;
+        
+        // Export only registers that are actually in the UI table to keep size reasonable
+        // and ensure we capture what the user sees/configured.
+        for (int i = 0; i < table->rowCount(); ++i) {
+            QTableWidgetItem *addrItem = table->item(i, 0);
+            if (!addrItem) continue;
+            bool ok;
+            quint16 addr = (quint16)addrItem->text().toUInt(&ok);
+            if (!ok) continue;
+            
+            // Save value if non-zero
+            quint16 val = dev->getRegister(addr);
+            if (val != 0) {
+                values.insert(QString::number(addr), int(val));
+            }
+            
+            // Save format if not default (Unsigned)
+            QString fmt = simTableFormats.value(table).value(i, "Unsigned");
+            if (fmt != "Unsigned") {
+                formats.insert(QString::number(i), fmt);
+            }
+        }
+        obj.insert("values", values);
+        obj.insert("formats", formats);
+        return obj;
+    };
+
+    root.insert("main", exportDeviceHolding(simMainDevice, tblSimMain));
+    root.insert("agv", exportDeviceHolding(simAGVDevice, tblSimAGV));
+
+    // Save Waveform Settings (CyclicTimers)
+    QJsonArray waveArr;
+    for (const CyclicTimer &t : simCyclicTimers) {
+        QJsonObject o;
+        o.insert("device", t.device);
+        o.insert("addr", int(t.addr));
+        o.insert("type", t.type);
+        o.insert("amplitude", t.amplitude);
+        o.insert("offset", t.offset);
+        o.insert("period", t.period);
+        o.insert("phase", t.phase);
+        o.insert("dutyCycle", t.dutyCycle);
+        o.insert("active", t.active);
+        waveArr.append(o);
     }
-    QVector<quint16> agvData = simAGVDevice->exportHolding();
-    QJsonObject agvObj;
-    for (int i = 0; i < agvData.size(); ++i) {
-        if (agvData[i] != 0) agvObj.insert(QString::number(i), int(agvData[i]));
-    }
-    root.insert("main", mainObj);
-    root.insert("agv", agvObj);
+    root.insert("waveforms", waveArr);
 
     QFile f(fn);
     if (!f.open(QIODevice::WriteOnly)) {
@@ -1557,43 +1692,195 @@ void MainWindow::onSimSaveSceneClicked()
     QJsonDocument doc(root);
     f.write(doc.toJson());
     f.close();
-    txtSimLog->append(QString("场景已保存: %1").arg(fn));
+
+    int mCount = root.value("main").toObject().value("values").toObject().size();
+    int aCount = root.value("agv").toObject().value("values").toObject().size();
+    txtSimLog->append(QString("场景已保存: %1 (主:%2个, AGV:%3个)").arg(fn).arg(mCount).arg(aCount));
 }
 
 void MainWindow::onSimLoadSceneClicked()
 {
-    QString fn = QFileDialog::getOpenFileName(this, "加载场景", QString(), "JSON Files (*.json)");
+    QString initialPath = lastScenePath.isEmpty() ? QDir::currentPath() : lastScenePath;
+    QString fn = QFileDialog::getOpenFileName(this, "加载场景", initialPath, "JSON Files (*.json);;All Files (*)");
     if (fn.isEmpty()) return;
+
+    // Save path for next time
+    lastScenePath = QFileInfo(fn).absolutePath();
+
     QFile f(fn);
     if (!f.open(QIODevice::ReadOnly)) { QMessageBox::warning(this, "错误", "无法打开场景文件"); return; }
     QJsonDocument doc = QJsonDocument::fromJson(f.readAll()); f.close();
-    if (!doc.isObject()) { QMessageBox::warning(this, "错误", "场景文件格式错误"); return; }
+    if (doc.isNull() || !doc.isObject()) { 
+        QMessageBox::warning(this, "错误", "场景文件损坏或格式错误"); 
+        return; 
+    }
     QJsonObject root = doc.object();
 
-    QVector<quint16> mainData = simMainDevice->exportHolding();
-    int msize = mainData.size();
-    if (root.contains("main") && root.value("main").isObject()) {
-        QJsonObject mainObj = root.value("main").toObject();
-        for (auto it = mainObj.begin(); it != mainObj.end(); ++it) {
-            bool ok = false; int idx = it.key().toInt(&ok); if (!ok) continue;
-            if (idx >= 0 && idx < msize) mainData[idx] = (quint16)it.value().toInt();
-        }
-    }
-    simMainDevice->loadHolding(mainData);
+    auto loadDeviceHolding = [this](ModbusSlave *dev, QTableWidget *table, QJsonObject &obj) {
+        if (!dev || !table) return 0;
+        int count = 0;
 
-    QVector<quint16> agvData = simAGVDevice->exportHolding();
-    int asize = agvData.size();
-    if (root.contains("agv") && root.value("agv").isObject()) {
-        QJsonObject agvObj = root.value("agv").toObject();
-        for (auto it = agvObj.begin(); it != agvObj.end(); ++it) {
-            bool ok = false; int idx = it.key().toInt(&ok); if (!ok) continue;
-            if (idx >= 0 && idx < asize) agvData[idx] = (quint16)it.value().toInt();
+        // Support both old and new format
+        QJsonObject valuesObj;
+        if (obj.contains("values") && obj.value("values").isObject()) {
+            valuesObj = obj.value("values").toObject();
+        } else {
+            // Backward compatibility
+            valuesObj = obj;
         }
-    }
-    simAGVDevice->loadHolding(agvData);
 
-    syncSimulatorTablesFromMaps();
-    txtSimLog->append(QString("场景已加载: %1").arg(fn));
+        for (auto it = valuesObj.begin(); it != valuesObj.end(); ++it) {
+            quint16 addr = it.key().toUInt();
+            quint16 val = (quint16)it.value().toInt();
+            dev->setRegister(addr, val);
+            count++;
+        }
+        return count;
+    };
+
+    int cAGV = 0, cMain = 0;
+    if (root.contains("AGV")) {
+        QJsonObject agvObj = root.value("AGV").toObject();
+        cAGV = loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
+    }
+    if (root.contains("Main")) {
+        QJsonObject mainObj = root.value("Main").toObject();
+        cMain = loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
+    }
+
+    logMessage(QString("场景加载成功: AGV(%1) 主设备(%2)").arg(cAGV).arg(cMain));
+    
+    // 强制刷新表格显示
+    for(int i=0; i<tblSimAGV->rowCount(); ++i) refreshSimRowDisplay(tblSimAGV, i);
+    for(int i=0; i<tblSimMain->rowCount(); ++i) refreshSimRowDisplay(tblSimMain, i);
+}
+
+void MainWindow::onSimExportCsvClicked()
+{
+    QString fn = QFileDialog::getSaveFileName(this, "导出寄存器表", QString(), "CSV Files (*.csv)");
+    if (fn.isEmpty()) return;
+
+    QFile f(fn);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "错误", "无法保存文件");
+        return;
+    }
+
+    QTextStream out(&f);
+    // BOM for Excel
+    out.setGenerateByteOrderMark(true);
+    out << "Device,Address,Value,Format,Description\n";
+
+    auto exportTable = [&](QTableWidget *table, const QString &deviceName) {
+        if (!table) return;
+        for (int i = 0; i < table->rowCount(); ++i) {
+            QString addr = table->item(i, 0) ? table->item(i, 0)->text() : "";
+            QString val = table->item(i, 1) ? table->item(i, 1)->text() : "";
+            QString fmt = simTableFormats.value(table).value(i, "Unsigned");
+            QString desc = table->item(i, 2) ? table->item(i, 2)->text() : "";
+            
+            // CSV escaping
+            if (desc.contains(",")) desc = "\"" + desc + "\"";
+            
+            out << deviceName << "," << addr << "," << val << "," << fmt << "," << desc << "\n";
+        }
+    };
+
+    exportTable(tblSimAGV, "AGV");
+    exportTable(tblSimMain, "Main");
+
+    f.close();
+    txtSimLog->append(QString("寄存器表已导出: %1").arg(fn));
+}
+
+void MainWindow::onSimImportCsvClicked()
+{
+    QString fn = QFileDialog::getOpenFileName(this, "导入寄存器表", QString(), "CSV Files (*.csv);;All Files (*)");
+    if (fn.isEmpty()) return;
+
+    QFile f(fn);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "错误", "无法打开文件");
+        return;
+    }
+
+    QTextStream in(&f);
+    in.setCodec("UTF-8");
+    QString header = in.readLine(); // skip header
+    int count = 0;
+
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        if (line.trimmed().isEmpty()) continue;
+        QStringList parts = line.split(",");
+        if (parts.size() < 3) continue;
+
+        QString deviceStr = parts[0].trimmed();
+        quint16 addr = parts[1].trimmed().toUInt();
+        QString valStr = parts[2].trimmed();
+        QString fmt = (parts.size() >= 4) ? parts[3].trimmed() : "Unsigned";
+        QString desc = (parts.size() >= 5) ? parts[4].trimmed() : "";
+        
+        // 处理 CSV 中带引号的情况
+        if (desc.startsWith("\"") && desc.endsWith("\"")) desc = desc.mid(1, desc.length()-2);
+
+        QTableWidget *table = (deviceStr.toLower() == "main" || deviceStr == "主设备") ? tblSimMain : tblSimAGV;
+        ModbusSlave *slave = (deviceStr.toLower() == "main" || deviceStr == "主设备") ? simMainDevice : simAGVDevice;
+
+        if (!table || !slave) continue;
+
+        // 查找或添加行
+        int row = -1;
+        for (int r = 0; r < table->rowCount(); ++r) {
+            if (table->item(r, 0) && table->item(r, 0)->text().toUInt() == addr) {
+                row = r;
+                break;
+            }
+        }
+
+        if (row == -1) {
+            row = table->rowCount();
+            table->insertRow(row);
+            table->setItem(row, 0, new QTableWidgetItem(QString::number(addr)));
+            table->setItem(row, 1, new QTableWidgetItem(valStr));
+            table->setItem(row, 2, new QTableWidgetItem(desc));
+        } else {
+            if (!table->item(row, 1)) table->setItem(row, 1, new QTableWidgetItem(valStr));
+            else table->item(row, 1)->setText(valStr);
+            
+            if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem(desc));
+            else table->item(row, 2)->setText(desc);
+        }
+
+        // 更新格式和值
+        simTableFormats[table][row] = fmt;
+        
+        // 特殊处理 32-bit 格式的行锁定逻辑
+        if (fmt.startsWith("32-bit") && row + 1 < table->rowCount()) {
+            int lockedRow = row + 1;
+            simDisabledRowsOwner[table][lockedRow] = row;
+            setSimRowEnabled(table, lockedRow, false);
+        }
+        
+        // 尝试解析并设置寄存器值
+        bool ok = false;
+        if (fmt == "32-bit Float") {
+            slave->setFloat(addr, valStr.toFloat(&ok));
+        } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
+            uint32_t v32 = valStr.toUInt(&ok);
+            slave->setRegister(addr, (quint16)(v32 >> 16));
+            slave->setRegister(addr + 1, (quint16)(v32 & 0xFFFF));
+        } else {
+            slave->setRegister(addr, (quint16)valStr.toUInt(&ok));
+        }
+        
+        refreshSimRowDisplay(table, row);
+        count++;
+    }
+
+    f.close();
+    syncSimulatorTablesFromMaps(); // 额外同步一次确保全量更新
+    txtSimLog->append(QString("寄存器表已导入: %1 (共 %2 条)").arg(fn).arg(count));
 }
 
 void MainWindow::onSimRunScriptClicked()
@@ -2347,6 +2634,124 @@ void MainWindow::onGitCopyForDailyReportClicked() {
     txtGitLog->append(finalContent);
 }
 
+void MainWindow::onScpTransferClicked() {
+    QString dir = cmbGitDir->currentText();
+    if (dir.isEmpty() || !QDir(dir).exists()) {
+        txtGitLog->append("错误: 请先选择有效的 Git 目录");
+        return;
+    }
+
+    QString targetIp = txtScpTargetIp->text().trimmed();
+    if (targetIp.isEmpty()) {
+        txtGitLog->append("错误: 请输入目标设备地址");
+        return;
+    }
+
+    QString password = txtScpPassword->text();
+
+    // 递归查找目录下最深层、最新的可执行文件
+    QString latestFile;
+    QDateTime latestTime;
+
+    QDirIterator it(dir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        QFileInfo fileInfo = it.fileInfo();
+        QString fileName = fileInfo.fileName();
+
+        // 过滤掉辅助工具自身和常见的非嵌入式程序
+        if (fileName == "ModbusTCPAssistant") continue;
+        if (fileName.startsWith(".") || fileName.endsWith(".so")) continue;
+        if (fileName.contains(".") && !fileName.endsWith(".sh")) continue;
+
+        if (latestFile.isEmpty() || fileInfo.lastModified() > latestTime) {
+            latestFile = fileInfo.absoluteFilePath();
+            latestTime = fileInfo.lastModified();
+        }
+    }
+
+    if (latestFile.isEmpty()) {
+        txtGitLog->append("未在目录及其子目录下找到符合条件的可执行文件");
+        return;
+    }
+
+    QFileInfo fi(latestFile);
+    txtGitLog->append(QString("发现最新可执行文件: %1 (修改时间: %2)").arg(fi.fileName()).arg(fi.lastModified().toString()));
+
+    // 检查文件时间与当前时间的差距
+    QDateTime now = QDateTime::currentDateTime();
+    qint64 diffSeconds = fi.lastModified().secsTo(now);
+    if (qAbs(diffSeconds) > 60) {
+        QString timeInfo = QString("找到的可执行文件 [%1] 与当前时间相差较大：\n\n"
+                                   "文件修改时间: %2\n"
+                                   "当前系统时间: %3\n"
+                                   "时间差距: %4 分钟 %5 秒\n\n"
+                                   "是否确认继续传输？")
+                               .arg(fi.fileName())
+                               .arg(fi.lastModified().toString("yyyy-MM-dd HH:mm:ss"))
+                               .arg(now.toString("yyyy-MM-dd HH:mm:ss"))
+                               .arg(qAbs(diffSeconds) / 60)
+                               .arg(qAbs(diffSeconds) % 60);
+        
+        QMessageBox::StandardButton reply;
+        reply = QMessageBox::question(this, "文件时间检查", timeInfo, 
+                                      QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::No) {
+            txtGitLog->append("用户取消传输：文件时间不匹配");
+            return;
+        }
+    }
+
+    // 执行停止并传输命令
+    // 使用 sshpass 处理密码，增加 -o StrictHostKeyChecking=no 避免指纹验证阻塞
+    QString fileName = fi.fileName();
+    QString remotePath = QString("/userfs/app/%1").arg(fileName);
+    QString stopCmd = QString("pkill -9 %1").arg(fileName);
+    QString runCmd = QString("chmod +x %1 && %1 &").arg(remotePath);
+
+    QString fullRemoteCmd;
+    if (!password.isEmpty()) {
+        fullRemoteCmd = QString("sshpass -p %1 ssh -o StrictHostKeyChecking=no root@%2 \"%3; exit 0\"").arg(password).arg(targetIp).arg(stopCmd);
+    } else {
+        fullRemoteCmd = QString("ssh -o StrictHostKeyChecking=no root@%2 \"%3; exit 0\"").arg(targetIp).arg(stopCmd);
+    }
+
+    txtGitLog->append(QString("正在停止目标程序: %1 ...").arg(fileName));
+    
+    QProcess *stopProcess = new QProcess(this);
+    connect(stopProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, stopProcess, fileName, password, targetIp, latestFile, remotePath, runCmd](int, QProcess::ExitStatus) {
+        stopProcess->deleteLater();
+        
+        // 停止命令执行完（无论成功失败，可能程序本就没运行），开始传输
+        QString scpProgram;
+        QStringList scpArgs;
+
+        if (!password.isEmpty()) {
+            scpProgram = "sshpass";
+            scpArgs << "-p" << password << "scp" << "-o" << "StrictHostKeyChecking=no" << latestFile << QString("root@%1:/userfs/app").arg(targetIp);
+        } else {
+            scpProgram = "scp";
+            scpArgs << "-o" << "StrictHostKeyChecking=no" << latestFile << QString("root@%1:/userfs/app").arg(targetIp);
+        }
+
+        txtGitLog->append(QString("正在传输文件: %1 ...").arg(fileName));
+
+        QProcess *scpProcess = new QProcess(this);
+        connect(scpProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, scpProcess, fileName](int exitCode, QProcess::ExitStatus exitStatus) {
+            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+                txtGitLog->append(QString("传输成功: %1 已上传至 /userfs/app").arg(fileName));
+            } else {
+                QString error = scpProcess->readAllStandardError();
+                txtGitLog->append(QString("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
+            }
+            scpProcess->deleteLater();
+        });
+        scpProcess->start(scpProgram, scpArgs);
+    });
+
+    stopProcess->start("sh", QStringList() << "-c" << fullRemoteCmd);
+}
+
 void MainWindow::saveGitHistory(const QString &dir) {
     if (dir.isEmpty()) return;
 
@@ -2768,31 +3173,28 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
         });
     }
     formatMenu->addSeparator();
-    QMenu *sub32 = formatMenu->addMenu("32-bit");
-    QStringList f32 = {"32-bit Signed", "32-bit Unsigned", "32-bit Float"};
-    for (const QString &fmt : f32) {
-        QAction *a = sub32->addAction(fmt);
-        connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
-            if (row + 1 >= table->rowCount()) {
-                if (txtSimLog) txtSimLog->append(QString("行 %1 无法设置 %2：缺少下一行").arg(row).arg(fmt));
-                return;
-            }
+    QAction *af32 = formatMenu->addAction("32-bit Float");
+    connect(af32, &QAction::triggered, this, [this, table, row](){ 
+        QString fmt = "32-bit Float";
+        if (row + 1 >= table->rowCount()) {
+            if (txtSimLog) txtSimLog->append(QString("行 %1 无法设置 %2：缺少下一行").arg(row).arg(fmt));
+            return;
+        }
 
-            QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
-            if (oldFmt.startsWith("32-bit")) {
-                int prevLockedRow = row + 1;
-                simDisabledRowsOwner[table].remove(prevLockedRow);
-                setSimRowEnabled(table, prevLockedRow, true);
-                refreshSimRowDisplay(table, prevLockedRow);
-            }
+        QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
+        if (oldFmt.startsWith("32-bit")) {
+            int prevLockedRow = row + 1;
+            simDisabledRowsOwner[table].remove(prevLockedRow);
+            setSimRowEnabled(table, prevLockedRow, true);
+            refreshSimRowDisplay(table, prevLockedRow);
+        }
 
-            simTableFormats[table][row] = fmt;
-            int lockedRow = row + 1;
-            simDisabledRowsOwner[table][lockedRow] = row;
-            setSimRowEnabled(table, lockedRow, false);
-            refreshSimRowDisplay(table, row);
-        });
-    }
+        simTableFormats[table][row] = fmt;
+        int lockedRow = row + 1;
+        simDisabledRowsOwner[table][lockedRow] = row;
+        setSimRowEnabled(table, lockedRow, false);
+        refreshSimRowDisplay(table, row);
+    });
 
     menu.addSeparator();
     QAction *actBit = menu.addAction("bit Edit");
@@ -2833,12 +3235,13 @@ void MainWindow::onSimShowWaveformEditor(int row) {
 
     g->addWidget(new QLabel("类型:"), 0, 0);
     QComboBox *cbType = new QComboBox();
-    cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机");
+    cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机" << "来回增减");
     g->addWidget(cbType, 0, 1);
     
-    g->addWidget(new QLabel("幅度:"), 1, 0);
+    QLabel *lblAmp = new QLabel("幅度(或最大):");
+    g->addWidget(lblAmp, 1, 0);
     QDoubleSpinBox *spAmp = new QDoubleSpinBox(); 
-    spAmp->setRange(isFloat32 ? -1e9 : 0, 1e9); 
+    spAmp->setRange(-1e9, 1e9); 
     spAmp->setValue(isFloat32 ? 10.0 : 1000.0);
     g->addWidget(spAmp, 1, 1);
     
@@ -2846,11 +3249,23 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     QDoubleSpinBox *spPer = new QDoubleSpinBox(); spPer->setRange(0.1, 3600); spPer->setValue(2.0);
     g->addWidget(spPer, 2, 1);
 
-    g->addWidget(new QLabel("偏移:"), 3, 0);
+    QLabel *lblOff = new QLabel("偏移(或最小):");
+    g->addWidget(lblOff, 3, 0);
     QDoubleSpinBox *spOff = new QDoubleSpinBox(); 
     spOff->setRange(-1e9, 1e9); 
     spOff->setValue(0);
     g->addWidget(spOff, 3, 1);
+
+    // 切换类型时自动更新标签提示
+    connect(cbType, &QComboBox::currentTextChanged, [=](const QString &text){
+        if (text == "来回增减") {
+            lblAmp->setText("最大值:");
+            lblOff->setText("最小值:");
+        } else {
+            lblAmp->setText("幅度:");
+            lblOff->setText("偏移:");
+        }
+    });
     
     v->addWidget(group);
     
@@ -2899,4 +3314,112 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     
     dlg->exec();
     dlg->deleteLater();
+}
+
+void MainWindow::saveAutoScene()
+{
+    QJsonObject root;
+    auto exportDeviceHolding = [this](ModbusSlave *dev, QTableWidget *table) {
+        QJsonObject obj;
+        if (!dev || !table) return obj;
+        QJsonObject values, formats;
+        for (int i = 0; i < table->rowCount(); ++i) {
+            QTableWidgetItem *addrItem = table->item(i, 0);
+            if (!addrItem) continue;
+            bool ok;
+            quint16 addr = (quint16)addrItem->text().toUInt(&ok);
+            if (!ok) continue;
+            quint16 val = dev->getRegister(addr);
+            if (val != 0) values.insert(QString::number(addr), int(val));
+            QString fmt = simTableFormats.value(table).value(i, "Unsigned");
+            if (fmt != "Unsigned") formats.insert(QString::number(i), fmt);
+        }
+        obj.insert("values", values);
+        obj.insert("formats", formats);
+        return obj;
+    };
+    root.insert("main", exportDeviceHolding(simMainDevice, tblSimMain));
+    root.insert("agv", exportDeviceHolding(simAGVDevice, tblSimAGV));
+    
+    QJsonArray waveArr;
+    for (const CyclicTimer &t : simCyclicTimers) {
+        QJsonObject o;
+        o.insert("device", t.device); o.insert("addr", int(t.addr)); o.insert("type", t.type);
+        o.insert("amplitude", t.amplitude); o.insert("offset", t.offset); o.insert("period", t.period);
+        o.insert("phase", t.phase); o.insert("dutyCycle", t.dutyCycle); o.insert("active", t.active);
+        waveArr.append(o);
+    }
+    root.insert("waveforms", waveArr);
+    
+    QFile f("autoscene.json");
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(root).toJson());
+        f.close();
+    }
+}
+
+void MainWindow::loadAutoScene()
+{
+    QFile f("autoscene.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll()); f.close();
+    if (doc.isNull() || !doc.isObject()) return;
+    QJsonObject root = doc.object();
+
+    auto loadDeviceHolding = [this](ModbusSlave *dev, QTableWidget *table, QJsonObject &obj) {
+        if (!dev || !table) return;
+        QJsonObject valuesObj = obj.contains("values") ? obj.value("values").toObject() : obj;
+        for (auto it = valuesObj.begin(); it != valuesObj.end(); ++it) {
+            dev->setRegister(it.key().toUInt(), (quint16)it.value().toInt());
+        }
+        if (obj.contains("formats")) {
+            QJsonObject formatsObj = obj.value("formats").toObject();
+            for (auto it = formatsObj.begin(); it != formatsObj.end(); ++it) {
+                int row = it.key().toInt();
+                QString fmt = it.value().toString();
+                simTableFormats[table][row] = fmt;
+                if (fmt.startsWith("32-bit") && row+1 < table->rowCount()) {
+                    simDisabledRowsOwner[table][row+1] = row;
+                    setSimRowEnabled(table, row+1, false);
+                }
+                refreshSimRowDisplay(table, row);
+            }
+        }
+    };
+    if (root.contains("main")) {
+        QJsonObject mainObj = root.value("main").toObject();
+        loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
+    }
+    if (root.contains("agv")) {
+        QJsonObject agvObj = root.value("agv").toObject();
+        loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
+    }
+    
+    if (root.contains("waveforms")) {
+        simCyclicTimers.clear();
+        QJsonArray waveArr = root.value("waveforms").toArray();
+        for (auto v : waveArr) {
+            QJsonObject o = v.toObject();
+            CyclicTimer t;
+            t.device = o.value("device").toString(); t.addr = (quint16)o.value("addr").toInt();
+            t.type = o.value("type").toString(); t.amplitude = o.value("amplitude").toDouble();
+            t.offset = o.value("offset").toDouble(); t.period = o.value("period").toDouble();
+            t.phase = o.value("phase").toDouble(); t.dutyCycle = o.value("dutyCycle").toDouble();
+            t.currentTicks = 0; t.active = o.value("active").toBool();
+            simCyclicTimers.append(t);
+        }
+        if (tblWaveChannels) {
+            tblWaveChannels->setRowCount(simCyclicTimers.size());
+            for (int i=0; i<simCyclicTimers.size(); ++i) {
+                const auto &ct = simCyclicTimers[i];
+                tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device=="Main"?"主设备":"AGV"));
+                tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
+                tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
+                tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active?"运行中":"停止"));
+                QPushButton *btn = new QPushButton("删除");
+                tblWaveChannels->setCellWidget(i, 4, btn);
+                connect(btn, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
+            }
+        }
+    }
 }
