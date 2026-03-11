@@ -2296,10 +2296,18 @@ void MainWindow::runGitCommand(const QStringList &args) {
     QByteArray stderrData = process.readAllStandardError();
     
     if (!stdoutData.isEmpty()) {
+#ifdef Q_OS_WIN
+        txtGitLog->append(QString::fromUtf8(stdoutData));
+#else
         txtGitLog->append(QString::fromLocal8Bit(stdoutData));
+#endif
     }
     if (!stderrData.isEmpty()) {
+#ifdef Q_OS_WIN
+        txtGitLog->append(QString("<font color='orange'>%1</font>").arg(QString::fromUtf8(stderrData)));
+#else
         txtGitLog->append(QString("<font color='orange'>%1</font>").arg(QString::fromLocal8Bit(stderrData)));
+#endif
     }
     
     txtGitLog->moveCursor(QTextCursor::End);
@@ -2319,7 +2327,11 @@ void MainWindow::onGitRefreshBranchesClicked() {
 #endif
     process.waitForFinished();
     
+#ifdef Q_OS_WIN
+    QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
     QStringList lines = output.split('\n', Qt::SkipEmptyParts);
     
     cmbGitBranches->clear();
@@ -2568,7 +2580,11 @@ void MainWindow::onGitRefreshLogClicked() {
 #endif
     process.waitForFinished();
     
+#ifdef Q_OS_WIN
+    QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
     QStringList lines = output.split('\n', Qt::SkipEmptyParts);
     
     cmbGitHistory->clear();
