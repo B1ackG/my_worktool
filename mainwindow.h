@@ -3,6 +3,8 @@
 
 #include <QMainWindow>
 #include <QTcpSocket>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -32,7 +34,43 @@
 #include <QAction>
 #include <QJsonObject>
 #include <QDirIterator>
+#include <QPainter>
+#include <QPolygonF>
 #include "modbusslave.h"
+
+// A simple sparkline widget to show recent usage
+class MonitorChart : public QWidget {
+    Q_OBJECT
+public:
+    explicit MonitorChart(QWidget *parent = nullptr) : QWidget(parent) {
+        setFixedSize(100, 30);
+    }
+    void addValue(double val) {
+        values.append(val);
+        if (values.size() > 20) values.removeFirst();
+        update();
+    }
+    void clear() { values.clear(); update(); }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.fillRect(rect(), Qt::black);
+        if (values.isEmpty()) return;
+        
+        double maxVal = 100.0;
+        QPolygonF poly;
+        for (int i = 0; i < values.size(); ++i) {
+            double x = i * (width() / 20.0);
+            double y = height() - (values[i] / maxVal * height());
+            poly << QPointF(x, y);
+        }
+        p.setPen(QPen(Qt::cyan, 2));
+        p.drawPolyline(poly);
+    }
+private:
+    QList<double> values;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -92,8 +130,13 @@ private slots:
     void onGitCheckIgnoreClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
+    void onGitSoftResetClicked();   // <--- 新增
     void onGitCopyForDailyReportClicked();
     void onScpTransferClicked();
+    void onRebootTargetClicked();
+    void onMonitorUsageToggled();
+    void onMonitorTimer();
+    void runDiagnosticCommands(int pid);
 
     // Common
     void onClearLogClicked();
@@ -122,6 +165,7 @@ private:
     QWidget* createSerialPage();
     QWidget* createGitPage();
     QWidget* createSimulatorPage();
+    QWidget* createTcpAssistantPage();
 
     // --- Main UI Structure ---
     QWidget *centralWidget;
@@ -132,6 +176,7 @@ private:
     QWidget *serialPageWidget;
     QWidget *gitPageWidget;
     QWidget *simulatorPageWidget;
+    QWidget *tcpAssistantPageWidget;
 
     // --- Modbus Widgets ---
     // Register Map Tables
@@ -240,11 +285,32 @@ private:
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
+    QPushButton *btnGitSoftReset; // <--- 新增
     QPushButton *btnGitCopyDaily;
+    QTextEdit *txtGitLog;
     QLineEdit *txtScpTargetIp;
     QLineEdit *txtScpPassword;
     QPushButton *btnScpTransfer;
-    QTextEdit *txtGitLog;
+    QPushButton *btnRebootTarget;
+    QPushButton *btnMonitorUsage;
+    QSpinBox *spinCpuThreshold;
+    QPushButton *btnApplyThreshold;
+    double cpuThresholdValue;
+    int lastKnownPid = -1; 
+    bool ulimitSet = false;
+    void runCrashDiagnostics(); 
+    MonitorChart *chartCpu;
+    MonitorChart *chartMem;
+    QTimer *monitorTimer;
+    QLabel *lblCpuUsage;
+    QLabel *lblMemUsage;
+    QString currentMonitoringProcess;
+    int currentMonitoringPid;
+    quint64 prevProcJiffies;
+    quint64 prevTotalJiffies;
+    bool hasPrevCpuSample;
+    QFile *monitorFile;
+    QTextStream *monitorStream;
 
     // --- Logic Objects ---
     
@@ -352,6 +418,18 @@ private:
     void refreshSimRowDisplay(QTableWidget *table, int row);
     void setSimRowEnabled(QTableWidget *table, int row, bool enabled);
 
+    // --- TCP Assistant Slots ---
+    void onTcpConnectClicked();
+    void onTcpDisconnectClicked();
+    void onTcpSendClicked();
+    void onTcpModeChanged(int index);
+    void onTcpServerNewConnection();
+    void onTcpClientConnected();
+    void onTcpClientDisconnected();
+    void onTcpReadyRead();
+    void onTcpCyclicTimerTick();
+    void onTcpClearRecvClicked();
+
     struct CyclicTimer {
         QString device; // "Main" or "AGV"
         quint16 addr;
@@ -387,6 +465,28 @@ private:
     QMap<QTableWidget*, QMap<int, QString>> simTableFormats;
     // 被 32-bit 显示占用并禁用的行：Key=tablePtr, Value=Map<lockedRow, ownerRow>
     QMap<QTableWidget*, QMap<int, int>> simDisabledRowsOwner;
+
+    // TCP Assistant Widgets
+    QComboBox *cmbTcpMode;
+    QLabel *lblTcpLocalIP;
+    QLineEdit *txtTcpLocalPort;
+    QLineEdit *txtTcpRemoteIP;
+    QLineEdit *txtTcpRemotePort;
+    QPushButton *btnTcpConnect;
+    QPushButton *btnTcpDisconnect;
+    QLabel *lblTcpStatus;
+    QTextEdit *txtTcpRecv;
+    QTextEdit *txtTcpSend;
+    QCheckBox *chkTcpHexRecv;
+    QCheckBox *chkTcpHexSend;
+    QCheckBox *chkTcpCyclicSend;
+    QSpinBox *spinTcpInterval;
+    QPushButton *btnTcpSend;
+    QPushButton *btnTcpClearRecv;
+    
+    QTcpServer *tcpServer;
+    QTcpSocket *tcpAssistantSocket; // For Client or the connected client for Server
+    QTimer *tcpCyclicTimer;
 
     // History
     static const int MAX_HISTORY = 10;

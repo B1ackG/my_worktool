@@ -19,6 +19,7 @@
 #include <QAction>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QNetworkInterface>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -29,6 +30,14 @@ MainWindow::MainWindow(QWidget *parent)
     , simMainDevice(nullptr)
     , simAGVDevice(nullptr)
     , serialPort(nullptr)
+    , monitorTimer(nullptr)
+    , currentMonitoringPid(-1)
+    , prevProcJiffies(0)
+    , prevTotalJiffies(0)
+    , hasPrevCpuSample(false)
+    , monitorFile(nullptr)
+    , monitorStream(nullptr)
+    , cpuThresholdValue(90.0)
 {
     setWindowTitle("李晨阳的linux工作助手");
     resize(1200, 720);
@@ -39,6 +48,10 @@ MainWindow::MainWindow(QWidget *parent)
     serialPort = new QSerialPort(this);
     simMainDevice = new ModbusSlave(this);
     simAGVDevice = new ModbusSlave(this);
+    monitorTimer = new QTimer(this);
+    tcpServer = new QTcpServer(this);
+    tcpAssistantSocket = nullptr; // Initialize in connect/onNewConnection
+    tcpCyclicTimer = new QTimer(this);
 
     // Create UI
     createWidgets();
@@ -129,6 +142,7 @@ void MainWindow::createWidgets()
     navWidget->addItem("串口调试助手");
     navWidget->addItem("Git 工作流助手");
     navWidget->addItem("Modbus 从站模拟器");
+    navWidget->addItem("TCP 通讯助手");
     navWidget->setFixedWidth(160);
     navWidget->setStyleSheet("QListWidget::item { height: 50px; padding-left: 10px; font-size: 14px; } "
                              "QListWidget::item:selected { background-color: #3399ff; color: white; }");
@@ -285,6 +299,39 @@ void MainWindow::createWidgets()
     
     refreshSerialPorts();
 
+    // --- Page 5: TCP Assistant Widgets ---
+    cmbTcpMode = new QComboBox();
+    cmbTcpMode->addItems(QStringList() << "TCP Server" << "TCP Client");
+    
+    lblTcpLocalIP = new QLabel("本地IP: 0.0.0.0");
+    txtTcpLocalPort = new QLineEdit("6000");
+    txtTcpLocalPort->setValidator(new QIntValidator(1, 65535, this));
+    
+    txtTcpRemoteIP = new QLineEdit("127.0.0.1");
+    txtTcpRemotePort = new QLineEdit("6000");
+    txtTcpRemotePort->setValidator(new QIntValidator(1, 65535, this));
+    
+    btnTcpConnect = new QPushButton("监听"); // For Server
+    btnTcpDisconnect = new QPushButton("停止");
+    btnTcpDisconnect->setEnabled(false);
+    lblTcpStatus = new QLabel("未运行");
+    lblTcpStatus->setStyleSheet("color: red; font-weight: bold;");
+    
+    txtTcpRecv = new QTextEdit();
+    txtTcpRecv->setReadOnly(true);
+    txtTcpSend = new QTextEdit();
+    txtTcpSend->setMaximumHeight(100);
+    
+    chkTcpHexRecv = new QCheckBox("Hex显示");
+    chkTcpHexSend = new QCheckBox("Hex发送");
+    chkTcpCyclicSend = new QCheckBox("循环发送");
+    spinTcpInterval = new QSpinBox();
+    spinTcpInterval->setRange(10, 60000);
+    spinTcpInterval->setValue(1000);
+    
+    btnTcpSend = new QPushButton("发送");
+    btnTcpClearRecv = new QPushButton("清空接收");
+
     // --- Page 3: Git Widgets ---
     // txtGitDir removed, using cmbGitDir
     // cmbGitDir initialized in createGitPage or here?
@@ -326,6 +373,11 @@ void MainWindow::createWidgets()
     btnGitRefreshLog = new QPushButton("刷新历史");
     btnGitReset = new QPushButton("硬回退 (Reset)");
     btnGitReset->setStyleSheet("color: red; font-weight: bold;");
+    
+    btnGitSoftReset = new QPushButton("软回退 (SoftReset)");
+    btnGitSoftReset->setStyleSheet("color: #FF8C00; font-weight: bold;");
+    btnGitSoftReset->setToolTip("执行 git reset --soft HEAD^ (撤回最后一次提交，保留代码修改)");
+
     btnGitCopyDaily = new QPushButton("复制到日报");
     btnGitCopyDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
 
@@ -337,6 +389,9 @@ void MainWindow::createWidgets()
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
     
+    btnRebootTarget = new QPushButton("重启目标");
+    btnRebootTarget->setStyleSheet("background-color: #ffccbc; font-weight: bold; color: #d84315;");
+
     txtGitLog = new QTextEdit();
     txtGitLog->setReadOnly(true);
     txtGitLog->setStyleSheet("background: #1e1e1e; color: #d4d4d4; font-family: Monospace; font-size: 12px;");
@@ -573,6 +628,7 @@ QWidget* MainWindow::createGitPage()
     layHist->addWidget(new QLabel("版本历史:"));
     layHist->addWidget(cmbGitHistory, 1);
     layHist->addWidget(btnGitRefreshLog);
+    layHist->addWidget(btnGitSoftReset); // <--- Add Here
     layHist->addWidget(btnGitReset);
     layHist->addWidget(btnGitCopyDaily);
     layOps->addLayout(layHist);
@@ -584,7 +640,37 @@ QWidget* MainWindow::createGitPage()
     layScp->addWidget(new QLabel("密码:"));
     layScp->addWidget(txtScpPassword, 1);
     layScp->addWidget(btnScpTransfer);
+    layScp->addWidget(btnRebootTarget);
     layOps->addLayout(layScp);
+
+    // Monitoring Section
+    QHBoxLayout *layMon = new QHBoxLayout();
+    btnMonitorUsage = new QPushButton("开启检测占用");
+    btnMonitorUsage->setCheckable(true);
+    
+    layMon->addWidget(btnMonitorUsage);
+    
+    layMon->addWidget(new QLabel("阈值:"));
+    spinCpuThreshold = new QSpinBox();
+    spinCpuThreshold->setRange(1, 100);
+    spinCpuThreshold->setValue(90);
+    spinCpuThreshold->setSuffix("%");
+    layMon->addWidget(spinCpuThreshold);
+    
+    btnApplyThreshold = new QPushButton("确认");
+    layMon->addWidget(btnApplyThreshold);
+    
+    lblCpuUsage = new QLabel("CPU: 0%");
+    chartCpu = new MonitorChart();
+    lblMemUsage = new QLabel("MEM: 0%");
+    chartMem = new MonitorChart();
+    
+    layMon->addWidget(lblCpuUsage);
+    layMon->addWidget(chartCpu);
+    layMon->addWidget(lblMemUsage);
+    layMon->addWidget(chartMem);
+    layMon->addStretch();
+    layOps->addLayout(layMon);
     
     grpOps->setLayout(layOps);
     layout->addWidget(grpOps);
@@ -796,11 +882,13 @@ void MainWindow::createLayouts()
     serialPageWidget = createSerialPage();
     gitPageWidget = createGitPage();
     simulatorPageWidget = createSimulatorPage();
+    tcpAssistantPageWidget = createTcpAssistantPage();
     
     stackedWidget->addWidget(modbusPageWidget);
     stackedWidget->addWidget(serialPageWidget);
     stackedWidget->addWidget(gitPageWidget);
     stackedWidget->addWidget(simulatorPageWidget);
+    stackedWidget->addWidget(tcpAssistantPageWidget);
     
     mainLayout->addWidget(navWidget);
     mainLayout->addWidget(stackedWidget);
@@ -821,6 +909,15 @@ void MainWindow::createConnections()
     connect(tcpSocket, &QTcpSocket::connected, this, &MainWindow::onSocketConnected);
     connect(tcpSocket, &QTcpSocket::disconnected, this, &MainWindow::onSocketDisconnected);
     connect(tcpSocket, &QTcpSocket::readyRead, this, &MainWindow::onSocketReadyRead);
+
+    // --- TCP Assistant Connections ---
+    connect(btnTcpConnect, &QPushButton::clicked, this, &MainWindow::onTcpConnectClicked);
+    connect(btnTcpDisconnect, &QPushButton::clicked, this, &MainWindow::onTcpDisconnectClicked);
+    connect(btnTcpSend, &QPushButton::clicked, this, &MainWindow::onTcpSendClicked);
+    connect(btnTcpClearRecv, &QPushButton::clicked, this, &MainWindow::onTcpClearRecvClicked);
+    connect(cmbTcpMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onTcpModeChanged);
+    connect(tcpServer, &QTcpServer::newConnection, this, &MainWindow::onTcpServerNewConnection);
+    connect(tcpCyclicTimer, &QTimer::timeout, this, &MainWindow::onTcpCyclicTimerTick);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     connect(tcpSocket, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::errorOccurred), this, &MainWindow::onSocketError);
 #else
@@ -872,8 +969,17 @@ void MainWindow::createConnections()
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
+    connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
+    connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
+    connect(btnApplyThreshold, &QPushButton::clicked, this, [this](){
+        cpuThresholdValue = spinCpuThreshold->value();
+        txtGitLog->append(QString("[Monitor] CPU 阈值已更新为: %1%").arg(cpuThresholdValue));
+    });
+    connect(btnMonitorUsage, &QPushButton::toggled, this, &MainWindow::onMonitorUsageToggled);
+    connect(monitorTimer, &QTimer::timeout, this, &MainWindow::onMonitorTimer);
+    monitorTimer->setInterval(2000); // 2 seconds update interval
     
     // Waveform Controls
     connect(btnWaveAdd, &QPushButton::clicked, this, &MainWindow::onSimAddCyclicTimerClicked);
@@ -1095,6 +1201,14 @@ void MainWindow::onSimTimerTick()
                                  .arg(t.type)
                                  .arg(fmt);
                 txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(logMsg));
+                
+                // 限制日志行数，防止长时间运行卡死
+                if (txtSimLog->document()->blockCount() > 1000) {
+                    QTextCursor cursor = txtSimLog->textCursor();
+                    cursor.movePosition(QTextCursor::Start);
+                    cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, 100);
+                    cursor.removeSelectedText();
+                }
             }
         }
     }
@@ -1887,11 +2001,19 @@ void MainWindow::onSimRunScriptClicked()
 {
     QString txt = txtSimScript->toPlainText();
     if (txt.trimmed().isEmpty()) return;
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
     QStringList lines = txt.split('\n', Qt::SkipEmptyParts);
+#else
+    QStringList lines = txt.split('\n', QString::SkipEmptyParts);
+#endif
     for (QString raw : lines) {
         QString line = raw.trimmed();
         if (line.isEmpty()) continue;
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
         QStringList tok = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+#else
+        QStringList tok = line.split(QRegularExpression("\\s+"), QString::SkipEmptyParts);
+#endif
         if (tok.size() < 4) continue;
         if (tok[0].toLower() != "after") continue;
         int ms = tok[1].toInt();
@@ -2005,6 +2127,7 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
     entry.insert("operation", opType);
     
     registerHistory.append(entry);
+    if (registerHistory.size() > 5000) registerHistory.removeFirst();
     
     // 1. 同步到 UI 寄存器表整数列
     if (table) {
@@ -2332,7 +2455,11 @@ void MainWindow::onGitRefreshBranchesClicked() {
 #else
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
 #endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
     QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+#else
+    QStringList lines = output.split('\n', QString::SkipEmptyParts);
+#endif
     
     cmbGitBranches->clear();
     QString currentBranch;
@@ -2585,7 +2712,11 @@ void MainWindow::onGitRefreshLogClicked() {
 #else
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
 #endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
     QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+#else
+    QStringList lines = output.split('\n', QString::SkipEmptyParts);
+#endif
     
     cmbGitHistory->clear();
     for (const QString &line : lines) {
@@ -2609,6 +2740,18 @@ void MainWindow::onGitResetClicked() {
     
     if (reply == QMessageBox::Yes) {
         runGitCommand(QStringList() << "reset" << "--hard" << hash);
+    }
+}
+
+void MainWindow::onGitSoftResetClicked() {
+    QMessageBox::StandardButton reply;
+    reply = QMessageBox::question(this, "确认操作", 
+                                  "确定要执行 git reset --soft HEAD^ 吗?\n这将撤销最后一次提交，但保留您的代码原始修改在暂存区。",
+                                  QMessageBox::Yes|QMessageBox::No);
+    
+    if (reply == QMessageBox::Yes) {
+        runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
+        onGitRefreshLogClicked(); // 自动刷新历史记录
     }
 }
 
@@ -2644,7 +2787,12 @@ void MainWindow::onGitCopyForDailyReportClicked() {
         return;
     }
 
-    QString finalContent = todayCommits.join("\n");
+    QString finalContent;
+    for (int i = 0; i < todayCommits.size(); ++i) {
+        finalContent += QString("%1. %2\n").arg(i + 1).arg(todayCommits[i]);
+    }
+    finalContent = finalContent.trimmed();
+
     QGuiApplication::clipboard()->setText(finalContent);
     txtGitLog->append(QString("已拼接今日(%1)共 %2 条提交并复制:").arg(today).arg(todayCommits.size()));
     txtGitLog->append(finalContent);
@@ -2756,6 +2904,7 @@ void MainWindow::onScpTransferClicked() {
         connect(scpProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, scpProcess, fileName](int exitCode, QProcess::ExitStatus exitStatus) {
             if (exitStatus == QProcess::NormalExit && exitCode == 0) {
                 txtGitLog->append(QString("传输成功: %1 已上传至 /userfs/app").arg(fileName));
+                currentMonitoringProcess = fileName; // 记录当前传输的文件名以便监测
             } else {
                 QString error = scpProcess->readAllStandardError();
                 txtGitLog->append(QString("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
@@ -2766,6 +2915,453 @@ void MainWindow::onScpTransferClicked() {
     });
 
     stopProcess->start("sh", QStringList() << "-c" << fullRemoteCmd);
+}
+
+void MainWindow::onRebootTargetClicked() {
+    QString targetIp = txtScpTargetIp->text().trimmed();
+    if (targetIp.isEmpty()) {
+        txtGitLog->append("错误: 请输入目标设备地址");
+        return;
+    }
+
+    QString password = txtScpPassword->text();
+
+    QMessageBox::StandardButton reply;
+    reply = QMessageBox::question(this, "重启确认", 
+                                  QString("确定要重启目标设备 [%1] 吗？").arg(targetIp), 
+                                  QMessageBox::Yes | QMessageBox::No);
+    if (reply == QMessageBox::No) {
+        return;
+    }
+
+    txtGitLog->append(QString("正在向 [%1] 发送重启命令...").arg(targetIp));
+
+    QProcess *process = new QProcess(this);
+    connect(process, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, process, targetIp](int exitCode, QProcess::ExitStatus) {
+        if (exitCode == 0) {
+            txtGitLog->append(QString("成功向 [%1] 发送重启命令。").arg(targetIp));
+        } else {
+            QString err = process->readAllStandardError();
+            txtGitLog->append(QString("发送重启命令失败: %1").arg(err));
+        }
+        process->deleteLater();
+    });
+
+    if (!password.isEmpty()) {
+        QStringList args;
+        args << "-p" << password
+             << "ssh"
+             << "-o" << "StrictHostKeyChecking=no"
+             << "-o" << "PreferredAuthentications=password"
+             << "-o" << "PubkeyAuthentication=no"
+             << "-o" << "NumberOfPasswordPrompts=1"
+             << QString("root@%1").arg(targetIp)
+             << "reboot";
+        process->start("sshpass", args);
+    } else {
+        QStringList args;
+        args << "-o" << "StrictHostKeyChecking=no"
+             << "-o" << "BatchMode=yes"
+             << QString("root@%1").arg(targetIp)
+             << "reboot";
+        process->start("ssh", args);
+    }
+}
+
+void MainWindow::onMonitorUsageToggled() {
+    if (btnMonitorUsage->isChecked()) {
+        ulimitSet = false; // 每次开启监测重新标记需要设置 ulimit
+        lastKnownPid = -1; // 重置最近 PID
+        QString targetIp = txtScpTargetIp->text().trimmed();
+        if (targetIp.isEmpty()) {
+            txtGitLog->append("错误: 请先在脚本传输中输入目标设备 IP");
+            btnMonitorUsage->setChecked(false);
+            return;
+        }
+
+        // 如果没有当前传输记录，尝试从路径历史中推测
+        if (currentMonitoringProcess.isEmpty()) {
+            QString dir = cmbGitDir->currentText();
+            if (!dir.isEmpty() && QDir(dir).exists()) {
+                QDirIterator it(dir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
+                QDateTime latestTime;
+                while (it.hasNext()) {
+                    it.next();
+                    QFileInfo fileInfo = it.fileInfo();
+                    if (fileInfo.fileName() == "ModbusTCPAssistant") continue;
+                    if (fileInfo.fileName().startsWith(".") || fileInfo.fileName().endsWith(".so")) continue;
+                    if (fileInfo.fileName().contains(".") && !fileInfo.fileName().endsWith(".sh")) continue;
+                    if (currentMonitoringProcess.isEmpty() || fileInfo.lastModified() > latestTime) {
+                        currentMonitoringProcess = fileInfo.fileName();
+                        latestTime = fileInfo.lastModified();
+                    }
+                }
+            }
+        }
+
+        if (currentMonitoringProcess.isEmpty()) {
+            txtGitLog->append("错误: 未找到可监测的运行程序");
+            btnMonitorUsage->setChecked(false);
+            return;
+        }
+
+        // 打印正在尝试监测的进程名，方便调试
+        txtGitLog->append(QString("[Monitor] 尝试监测进程名: %1").arg(currentMonitoringProcess));
+
+        txtGitLog->append(QString("开始监测进程: %1 (%2)").arg(currentMonitoringProcess).arg(targetIp));
+
+        // 初始化文件记录
+        QString logDir = QCoreApplication::applicationDirPath() + "/monitor_logs";
+        QDir().mkpath(logDir);
+        QString fileName = QString("%1/monitor_%2_%3.csv")
+                               .arg(logDir)
+                               .arg(currentMonitoringProcess)
+                               .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+        monitorFile = new QFile(fileName, this);
+        if (monitorFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
+            monitorStream = new QTextStream(monitorFile);
+            *monitorStream << "Timestamp,CPU_Usage(%),Mem_Usage(%)\n";
+            txtGitLog->append(QString("[Monitor] 记录已开启, 保存至: %1").arg(fileName));
+        } else {
+            txtGitLog->append("[Monitor] 无法创建日志文件: " + fileName);
+            delete monitorFile;
+            monitorFile = nullptr;
+        }
+
+        btnMonitorUsage->setText("停止检测占用");
+        currentMonitoringPid = -1;
+        prevProcJiffies = 0;
+        prevTotalJiffies = 0;
+        hasPrevCpuSample = false;
+        monitorTimer->start();
+    } else {
+        txtGitLog->append("停止资源占用监测");
+        
+        if (monitorFile) {
+            monitorFile->close();
+            delete monitorStream;
+            delete monitorFile;
+            monitorFile = nullptr;
+            monitorStream = nullptr;
+            txtGitLog->append("[Monitor] 资源记录已保存并关闭");
+        }
+
+        btnMonitorUsage->setText("开启检测占用");
+        monitorTimer->stop();
+        currentMonitoringPid = -1;
+        prevProcJiffies = 0;
+        prevTotalJiffies = 0;
+        hasPrevCpuSample = false;
+        lblCpuUsage->setText("CPU: 0%");
+        lblMemUsage->setText("MEM: 0%");
+        chartCpu->clear();
+        chartMem->clear();
+    }
+}
+
+void MainWindow::onMonitorTimer() {
+    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString password = txtScpPassword->text();
+    
+    if (targetIp.isEmpty() || currentMonitoringProcess.isEmpty()) return;
+
+    // 首先获取 PID (如果未知)
+    if (currentMonitoringPid <= 0) {
+        QString pidCmd = QString("pidof %1").arg(currentMonitoringProcess);
+        QString sshTarget = QString("root@%1").arg(targetIp);
+        QStringList sshArgs;
+        if (!password.isEmpty()) {
+            sshArgs << "-p" << password << "ssh" << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << pidCmd;
+        } else {
+            sshArgs << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << pidCmd;
+        }
+
+        QProcess *pidProc = new QProcess(this);
+        connect(pidProc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, pidProc, targetIp, password](int exitCode, QProcess::ExitStatus) {
+            QString out = pidProc->readAllStandardOutput().trimmed();
+            QString err = pidProc->readAllStandardError().trimmed();
+            if (exitCode == 0 && !out.isEmpty()) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+                QStringList pids = out.split(' ', Qt::SkipEmptyParts);
+#else
+                QStringList pids = out.split(' ', QString::SkipEmptyParts);
+#endif
+                if (!pids.isEmpty()) {
+                    int newPid = pids[0].toInt();
+                    if (newPid > 0) {
+                        currentMonitoringPid = newPid;
+                        lastKnownPid = newPid; // 同步记录
+                        txtGitLog->append(QString("[Monitor] 找到进程 PID: %1").arg(newPid));
+                        prevProcJiffies = 0;
+                        prevTotalJiffies = 0;
+                        hasPrevCpuSample = false;
+
+                        // 执行 ulimit 配置
+                        if (!ulimitSet) {
+                            QString ulimitCmd = "ulimit -c unlimited && echo CorePattern: && echo 'core.%e.%p' > /proc/sys/kernel/core_pattern";
+                            QString sshTarget = QString("root@%1").arg(targetIp);
+                            QStringList sshArgs;
+                            if (!password.isEmpty()) {
+                                sshArgs << "-p" << password << "ssh" << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << ulimitCmd;
+                            } else {
+                                sshArgs << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << ulimitCmd;
+                            }
+                            QProcess *uProc = new QProcess(this);
+                            connect(uProc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, uProc](int code, QProcess::ExitStatus) {
+                                if (code == 0) {
+                                    ulimitSet = true;
+                                    txtGitLog->append("[Monitor] 已在远程设置 ulimit -c unlimited");
+                                }
+                                uProc->deleteLater();
+                            });
+                            if (!password.isEmpty()) uProc->start("sshpass", sshArgs); 
+                            else uProc->start("ssh", sshArgs);
+                        }
+                    }
+                }
+            } else {
+                currentMonitoringPid = -1;
+                lblCpuUsage->setText("CPU: 未找到");
+                lblMemUsage->setText("MEM: 未找到");
+                if (!err.isEmpty()) txtGitLog->append("[Monitor] pidof 错误: " + err);
+            }
+            pidProc->deleteLater();
+        });
+        if (!password.isEmpty()) {
+            pidProc->start("sshpass", sshArgs);
+        } else {
+            pidProc->start("ssh", sshArgs);
+        }
+        return; 
+    }
+
+    // 使用更基础、更通用的 sh/awk 指令，避免 dash 兼容性问题和变量转义干扰
+    QString checkCmd = QString(
+        "cat /proc/%1/stat | awk '{print $14+$15}'; "
+        "grep '^cpu ' /proc/stat | awk '{s=0; for(i=2;i<=NF;i++) s+=$i; print s}'; "
+        "grep -c '^cpu[0-9]' /proc/stat; "
+        "grep -E '^(MemTotal|VmRSS):' /proc/meminfo /proc/%1/status | awk '{print $2}' | xargs echo"
+    ).arg(currentMonitoringPid);
+
+    QString sshTarget = QString("root@%1").arg(targetIp);
+    QStringList sshArgs;
+    if (!password.isEmpty()) {
+        sshArgs << "-p" << password << "ssh" << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << checkCmd;
+    } else {
+        sshArgs << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << checkCmd;
+    }
+
+    QProcess *proc = new QProcess(this);
+    connect(proc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, proc](int exitCode, QProcess::ExitStatus) {
+        QString stdoutData = proc->readAllStandardOutput().trimmed();
+        QString stderrData = proc->readAllStandardError().trimmed();
+        
+        if (exitCode == 0) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+            QStringList lines = stdoutData.split('\n', Qt::SkipEmptyParts);
+#else
+            QStringList lines = stdoutData.split('\n', QString::SkipEmptyParts);
+#endif
+
+            if (lines.size() >= 4) {
+                quint64 procJiffies = lines[0].trimmed().toULongLong();
+                quint64 totalJiffies = lines[1].trimmed().toULongLong();
+                int cpuCores = qMax(1, lines[2].trimmed().toInt());
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+                QStringList memParts = lines[3].split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+#else
+                QStringList memParts = lines[3].split(QRegularExpression("\\s+"), QString::SkipEmptyParts);
+#endif
+
+                double memPercent = 0.0;
+                if (memParts.size() >= 2) {
+                    double memTotalKb = memParts[0].toDouble();
+                    double vmRssKb = memParts[1].toDouble();
+                    if (memTotalKb > 0.0) {
+                        memPercent = (vmRssKb * 100.0) / memTotalKb;
+                    }
+                }
+
+                double cpuPercent = 0.0;
+                if (hasPrevCpuSample && totalJiffies > prevTotalJiffies && procJiffies >= prevProcJiffies) {
+                    quint64 deltaProc = procJiffies - prevProcJiffies;
+                    quint64 deltaTotal = totalJiffies - prevTotalJiffies;
+                    if (deltaTotal > 0) {
+                        cpuPercent = (static_cast<double>(deltaProc) * 100.0 * cpuCores) / static_cast<double>(deltaTotal);
+                    }
+                }
+
+                prevProcJiffies = procJiffies;
+                prevTotalJiffies = totalJiffies;
+                hasPrevCpuSample = true;
+
+                lblCpuUsage->setText(QString("CPU: %1%").arg(QString::number(qMax(0.0, cpuPercent), 'f', 1)));
+                lblMemUsage->setText(QString("MEM: %1%").arg(QString::number(qMax(0.0, memPercent), 'f', 1)));
+                chartCpu->addValue(qBound(0.0, cpuPercent, 100.0));
+                chartMem->addValue(qBound(0.0, memPercent, 100.0));
+
+                if (monitorStream) {
+                    *monitorStream << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << ","
+                                   << QString::number(cpuPercent, 'f', 2) << ","
+                                   << QString::number(memPercent, 'f', 2) << "\n";
+                    monitorStream->flush(); // 实时写入文件
+                }
+
+                // 检测 CPU 使用率是否超过设定阈值
+                if (cpuPercent > cpuThresholdValue) {
+                    txtGitLog->append(QString("[Monitor] 警告: CPU 使用率 (%1%) 超过阈值 (%2%)！正在停止监测并收集诊断信息...").arg(QString::number(cpuPercent, 'f', 1)).arg(cpuThresholdValue));
+                    
+                    int pidToDebug = currentMonitoringPid;
+
+                    // 1. 停止监测
+                    btnMonitorUsage->setChecked(false); // 这会触发 onMonitorUsageToggled() 并停止 timer
+
+                    // 2. 执行诊断命令
+                    runDiagnosticCommands(pidToDebug);
+                }
+            } else {
+                // 如果 lines.size() < 4 且没有其他明显错误，说明 /proc/%1/status 已经读取不到了
+                // 这种情况即便 ssh 命令执行成功，但结果缺失，意味着进程已经在退出过程中或已彻底消失
+                lblCpuUsage->setText("CPU: 进程丢失");
+                lblMemUsage->setText("MEM: 进程丢失");
+                txtGitLog->append(QString("[Monitor] 数据输出不完整 (收到 %1 行)，判定进程 %2 已崩溃/退出!").arg(lines.size()).arg(currentMonitoringProcess));
+                
+                currentMonitoringPid = -1; // 标记失效
+                runCrashDiagnostics();    // 立即执行 Core Dump 深度分析
+                
+                chartCpu->addValue(0);
+                chartMem->addValue(0);
+            }
+        } else {
+            // 进到这里说明 PID 失效，即程序崩溃或退出
+            int crashedPid = lastKnownPid;
+            currentMonitoringPid = -1; 
+            hasPrevCpuSample = false;
+            lblCpuUsage->setText("CPU: 进程丢失");
+            lblMemUsage->setText("MEM: 进程丢失");
+            txtGitLog->append(QString("[Monitor] 监测到进程 %1 已退出/崩溃!").arg(currentMonitoringProcess));
+            
+            // 触发 Core Dump 诊断
+            runCrashDiagnostics();
+
+            chartCpu->addValue(0);
+            chartMem->addValue(0);
+        }
+        proc->deleteLater();
+    });
+    if (!password.isEmpty()) {
+        proc->start("sshpass", sshArgs);
+    } else {
+        proc->start("ssh", sshArgs);
+    }
+}
+
+void MainWindow::runDiagnosticCommands(int pid) {
+    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString password = txtScpPassword->text();
+    if (targetIp.isEmpty() || pid <= 0) return;
+
+    QString sshTarget = QString("root@%1").arg(targetIp);
+    
+    // 组合所有诊断命令
+    // 1. top (1次全线程快照，查看各线程 CPU)
+    // 2. gdb stack trace (附加到进程，打印所有线程的完整调用栈及其变量，然后分离)
+    // 3. strace 深度追踪 (追踪网络、读写，带耗时统计，输出到 /tmp/190.strace)
+    
+    QString diagCmd = QString(
+        "echo '--- TOP SNAPSHOT (Threads) ---'; top -H -p %1 -b -n 1; "
+        "echo '\n--- GDB LIVE DEEP ANALYSIS (Full Stack) ---'; "
+        "gdb -batch -ex \"set confirm off\" -ex \"add-auto-load-safe-path /\" "
+        "-ex \"thread apply all bt full\" -ex \"detach\" -ex \"quit\" -p %1; "
+        "echo '\n--- STRACE NETWORK/IO TRACE (3s) ---'; "
+        "timeout 3 strace -tt -f -p %1 -o /tmp/190.strace -T -e trace=network,read,write -s 128 2>&1; "
+        "echo 'Done. Trace saved to /tmp/190.strace on target. First 20 lines of trace:'; "
+        "head -n 20 /tmp/190.strace"
+    ).arg(pid);
+
+    QStringList sshArgs;
+    if (!password.isEmpty()) {
+        sshArgs << "-p" << password << "ssh" << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << diagCmd;
+    } else {
+        sshArgs << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << diagCmd;
+    }
+
+    QProcess *diagProc = new QProcess(this);
+    connect(diagProc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, diagProc](int exitCode, QProcess::ExitStatus) {
+        QString out = QString::fromUtf8(diagProc->readAllStandardOutput());
+        QString err = QString::fromUtf8(diagProc->readAllStandardError());
+        
+        txtGitLog->append("\n========== [Diagnostic Output] ==========");
+        if (!out.isEmpty()) txtGitLog->append(out);
+        if (!err.isEmpty()) txtGitLog->append("ERROR:\n" + err);
+        txtGitLog->append("=========================================\n");
+        
+        diagProc->deleteLater();
+    });
+
+    txtGitLog->append(QString("[Monitor] 正在远程执行诊断命令 (PID: %1)...").arg(pid));
+    if (!password.isEmpty()) {
+        diagProc->start("sshpass", sshArgs);
+    } else {
+        diagProc->start("ssh", sshArgs);
+    }
+}
+
+void MainWindow::runCrashDiagnostics() {
+    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString password = txtScpPassword->text();
+    QString processName = currentMonitoringProcess;
+    if (targetIp.isEmpty() || processName.isEmpty()) return;
+
+    QString sshTarget = QString("root@%1").arg(targetIp);
+    
+    // 自动寻找匹配进程名的 core 文件：崩溃后给系统一点落盘时间，重试搜索。
+    // 去掉对 file 命令的依赖，通过文件名和 gdb 尝试加载
+    QString diagCmd = QString(
+        "CORE_FILE=''; "
+        "for i in 1 2 3 4 5; do "
+        "  CORE_FILE=$(find / /tmp /userfs -maxdepth 2 -name \"core.%1.*\" -mmin -20 2>/dev/null | xargs ls -t 2>/dev/null | head -n 1); "
+        "  [ -n \"$CORE_FILE\" ] && break; "
+        "  sleep 1; "
+        "done; "
+        "if [ -n \"$CORE_FILE\" ] && [ -f \"$CORE_FILE\" ]; then "
+        "  echo \"--- FOUND CORE DUMP: $CORE_FILE ---\"; "
+        "  gdb -batch -ex \"set confirm off\" -ex \"add-auto-load-safe-path /\" "
+        "  -ex \"thread apply all bt full\" -ex \"quit\" /userfs/app/%1 \"$CORE_FILE\"; "
+        "else "
+        "  echo \"--- NO VALID CORE DUMP FOUND (Checked /, /tmp and /userfs with retry) ---\"; "
+        "  echo \"--- Candidate files (last 20 min) ---\"; "
+        "  find / /tmp /userfs -maxdepth 2 -name \"core.%1.*\" -mmin -20 2>/dev/null | head -n 20; "
+        "fi "
+    ).arg(processName);
+
+    QStringList sshArgs;
+    if (!password.isEmpty()) {
+        sshArgs << "-p" << password << "ssh" << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << diagCmd;
+    } else {
+        sshArgs << "-n" << "-o" << "StrictHostKeyChecking=no" << sshTarget << diagCmd;
+    }
+
+    QProcess *diagProc = new QProcess(this);
+    connect(diagProc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, diagProc](int exitCode, QProcess::ExitStatus) {
+        QString out = QString::fromUtf8(diagProc->readAllStandardOutput());
+        QString err = QString::fromUtf8(diagProc->readAllStandardError());
+        
+        txtGitLog->append("\n========== [CRASH ANALYSYS] ==========");
+        if (!out.isEmpty()) txtGitLog->append(out);
+        if (!err.isEmpty()) txtGitLog->append("ERROR:\n" + err);
+        txtGitLog->append("========================================\n");
+        btnMonitorUsage->setChecked(false); // 停止监测
+        diagProc->deleteLater();
+    });
+
+    txtGitLog->append("[Monitor] 进程已退出，正在尝试检索 Core Dump 并分析...");
+    if (!password.isEmpty()) {
+        diagProc->start("sshpass", sshArgs);
+    } else {
+        diagProc->start("ssh", sshArgs);
+    }
 }
 
 void MainWindow::saveGitHistory(const QString &dir) {
@@ -3424,18 +4020,259 @@ void MainWindow::loadAutoScene()
             t.currentTicks = 0; t.active = o.value("active").toBool();
             simCyclicTimers.append(t);
         }
-        if (tblWaveChannels) {
-            tblWaveChannels->setRowCount(simCyclicTimers.size());
-            for (int i=0; i<simCyclicTimers.size(); ++i) {
-                const auto &ct = simCyclicTimers[i];
-                tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device=="Main"?"主设备":"AGV"));
-                tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
-                tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
-                tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active?"运行中":"停止"));
-                QPushButton *btn = new QPushButton("删除");
-                tblWaveChannels->setCellWidget(i, 4, btn);
-                connect(btn, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
-            }
-        }
     }
 }
+
+// --- TCP Assistant Implementation ---
+
+QWidget* MainWindow::createTcpAssistantPage()
+{
+    QWidget *page = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(10);
+
+    // 1. Connection Settings
+    QGroupBox *grpSettings = new QGroupBox("TCP 设置");
+    QGridLayout *laySet = new QGridLayout();
+    
+    laySet->addWidget(new QLabel("运行方式:"), 0, 0); laySet->addWidget(cmbTcpMode, 0, 1);
+    
+    // Server Panel
+    QWidget *pnlServer = new QWidget();
+    QHBoxLayout *layPnlServer = new QHBoxLayout(pnlServer);
+    layPnlServer->setContentsMargins(0, 0, 0, 0);
+    layPnlServer->addWidget(lblTcpLocalIP);
+    layPnlServer->addWidget(new QLabel("端口:"));
+    layPnlServer->addWidget(txtTcpLocalPort);
+    laySet->addWidget(pnlServer, 1, 0, 1, 6);
+    
+    // Client Panel
+    QWidget *pnlClient = new QWidget();
+    QHBoxLayout *layPnlClient = new QHBoxLayout(pnlClient);
+    layPnlClient->setContentsMargins(0, 0, 0, 0);
+    layPnlClient->addWidget(new QLabel("远端IP:"));
+    layPnlClient->addWidget(txtTcpRemoteIP);
+    layPnlClient->addWidget(new QLabel("端口:"));
+    layPnlClient->addWidget(txtTcpRemotePort);
+    laySet->addWidget(pnlClient, 2, 0, 1, 6);
+    
+    // Initial visibility
+    pnlClient->hide();
+    connect(cmbTcpMode, QOverload<int>::of(&QComboBox::currentIndexChanged), [pnlServer, pnlClient, this](int index){
+        if (index == 0) { // Server
+            pnlServer->show();
+            pnlClient->hide();
+            btnTcpConnect->setText("监听");
+        } else { // Client
+            pnlServer->hide();
+            pnlClient->show();
+            btnTcpConnect->setText("连接");
+        }
+    });
+
+    QHBoxLayout *layActs = new QHBoxLayout();
+    layActs->addWidget(btnTcpConnect);
+    layActs->addWidget(btnTcpDisconnect);
+    layActs->addWidget(lblTcpStatus);
+    layActs->addStretch();
+    laySet->addLayout(layActs, 3, 0, 1, 6);
+    
+    grpSettings->setLayout(laySet);
+    layout->addWidget(grpSettings);
+    
+    // 2. Data Area
+    QGroupBox *grpData = new QGroupBox("数据收发");
+    QVBoxLayout *layData = new QVBoxLayout();
+    
+    QHBoxLayout *layOpts = new QHBoxLayout();
+    layOpts->addWidget(chkTcpHexRecv);
+    layOpts->addWidget(btnTcpClearRecv);
+    layOpts->addStretch();
+    layData->addLayout(layOpts);
+    
+    layData->addWidget(new QLabel("接收区:"));
+    layData->addWidget(txtTcpRecv);
+    
+    layData->addWidget(new QLabel("发送区:"));
+    layData->addWidget(txtTcpSend);
+    
+    QHBoxLayout *laySend = new QHBoxLayout();
+    laySend->addWidget(chkTcpHexSend);
+    laySend->addWidget(chkTcpCyclicSend);
+    laySend->addWidget(new QLabel("间隔(ms):"));
+    laySend->addWidget(spinTcpInterval);
+    laySend->addStretch();
+    laySend->addWidget(btnTcpSend);
+    layData->addLayout(laySend);
+    
+    grpData->setLayout(layData);
+    layout->addWidget(grpData);
+    
+    layout->setStretch(0, 0);
+    layout->setStretch(1, 1);
+    
+    return page;
+}
+
+void MainWindow::onTcpModeChanged(int index)
+{
+    onTcpDisconnectClicked(); // Ensure closed before switching mode
+}
+
+void MainWindow::onTcpConnectClicked()
+{
+    if (cmbTcpMode->currentIndex() == 0) { // Server Mode
+        quint16 port = txtTcpLocalPort->text().toUShort();
+        if (tcpServer->listen(QHostAddress::Any, port)) {
+            lblTcpStatus->setText("正在监听...");
+            lblTcpStatus->setStyleSheet("color: green; font-weight: bold;");
+            btnTcpConnect->setEnabled(false);
+            btnTcpDisconnect->setEnabled(true);
+            cmbTcpMode->setEnabled(false);
+        } else {
+            QMessageBox::critical(this, "错误", "监听失败: " + tcpServer->errorString());
+        }
+    } else { // Client Mode
+        QString ip = txtTcpRemoteIP->text();
+        quint16 port = txtTcpRemotePort->text().toUShort();
+        if (!tcpAssistantSocket) {
+            tcpAssistantSocket = new QTcpSocket(this);
+            connect(tcpAssistantSocket, &QTcpSocket::connected, this, &MainWindow::onTcpClientConnected);
+            connect(tcpAssistantSocket, &QTcpSocket::disconnected, this, &MainWindow::onTcpClientDisconnected);
+            connect(tcpAssistantSocket, &QTcpSocket::readyRead, this, &MainWindow::onTcpReadyRead);
+        }
+        tcpAssistantSocket->connectToHost(ip, port);
+        lblTcpStatus->setText("正在连接...");
+        lblTcpStatus->setStyleSheet("color: orange; font-weight: bold;");
+        btnTcpConnect->setEnabled(false);
+        btnTcpDisconnect->setEnabled(true);
+        cmbTcpMode->setEnabled(false);
+    }
+}
+
+void MainWindow::onTcpDisconnectClicked()
+{
+    if (tcpServer->isListening()) {
+        tcpServer->close();
+    }
+    if (tcpAssistantSocket) {
+        tcpAssistantSocket->disconnectFromHost();
+    }
+    
+    tcpCyclicTimer->stop();
+    chkTcpCyclicSend->setChecked(false);
+    btnTcpSend->setText("发送");
+    
+    lblTcpStatus->setText("未运行");
+    lblTcpStatus->setStyleSheet("color: red; font-weight: bold;");
+    btnTcpConnect->setEnabled(true);
+    btnTcpDisconnect->setEnabled(false);
+    cmbTcpMode->setEnabled(true);
+}
+
+void MainWindow::onTcpServerNewConnection()
+{
+    if (tcpAssistantSocket) {
+        tcpAssistantSocket->disconnectFromHost();
+        tcpAssistantSocket->deleteLater();
+    }
+    tcpAssistantSocket = tcpServer->nextPendingConnection();
+    connect(tcpAssistantSocket, &QTcpSocket::disconnected, this, &MainWindow::onTcpClientDisconnected);
+    connect(tcpAssistantSocket, &QTcpSocket::readyRead, this, &MainWindow::onTcpReadyRead);
+    
+    lblTcpStatus->setText(QString("已连接: %1").arg(tcpAssistantSocket->peerAddress().toString()));
+    lblTcpStatus->setStyleSheet("color: green; font-weight: bold;");
+}
+
+void MainWindow::onTcpClientConnected()
+{
+    lblTcpStatus->setText("已连接到服务器");
+    lblTcpStatus->setStyleSheet("color: green; font-weight: bold;");
+}
+
+void MainWindow::onTcpClientDisconnected()
+{
+    if (cmbTcpMode->currentIndex() == 0) { // Server Mode
+        lblTcpStatus->setText("正在监听 (等待连接)");
+        lblTcpStatus->setStyleSheet("color: blue; font-weight: bold;");
+    } else {
+        lblTcpStatus->setText("连接断开");
+        lblTcpStatus->setStyleSheet("color: red; font-weight: bold;");
+        btnTcpConnect->setEnabled(true);
+        btnTcpDisconnect->setEnabled(false);
+        cmbTcpMode->setEnabled(true);
+    }
+    
+    tcpCyclicTimer->stop();
+    chkTcpCyclicSend->setChecked(false);
+    btnTcpSend->setText("发送");
+}
+
+void MainWindow::onTcpReadyRead()
+{
+    if (!tcpAssistantSocket) return;
+    QByteArray data = tcpAssistantSocket->readAll();
+    if (data.isEmpty()) return;
+
+    QString display;
+    if (chkTcpHexRecv->isChecked()) {
+        display = data.toHex(' ').toUpper();
+    } else {
+        display = QString::fromLocal8Bit(data);
+    }
+    
+    txtTcpRecv->append(QString("[%1] Recv: %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz")).arg(display));
+}
+
+void MainWindow::onTcpSendClicked()
+{
+    if (chkTcpCyclicSend->isChecked()) {
+        if (tcpCyclicTimer->isActive()) {
+            tcpCyclicTimer->stop();
+            btnTcpSend->setText("发送");
+        } else {
+            if (!tcpAssistantSocket || tcpAssistantSocket->state() != QAbstractSocket::ConnectedState) {
+                QMessageBox::warning(this, "警告", "未连接到远程主机");
+                return;
+            }
+            tcpCyclicTimer->start(spinTcpInterval->value());
+            btnTcpSend->setText("停止发送");
+            onTcpCyclicTimerTick(); // Send immediately
+        }
+    } else {
+        if (!tcpAssistantSocket || tcpAssistantSocket->state() != QAbstractSocket::ConnectedState) {
+            QMessageBox::warning(this, "警告", "未连接到远程主机");
+            return;
+        }
+        onTcpCyclicTimerTick();
+    }
+}
+
+void MainWindow::onTcpCyclicTimerTick()
+{
+    if (!tcpAssistantSocket || tcpAssistantSocket->state() != QAbstractSocket::ConnectedState) {
+        tcpCyclicTimer->stop();
+        btnTcpSend->setText("发送");
+        chkTcpCyclicSend->setChecked(false);
+        return;
+    }
+
+    QString text = txtTcpSend->toPlainText();
+    QByteArray data;
+    if (chkTcpHexSend->isChecked()) {
+        data = QByteArray::fromHex(text.toUtf8());
+    } else {
+        data = text.toUtf8();
+    }
+
+    if (!data.isEmpty()) {
+        tcpAssistantSocket->write(data);
+    }
+}
+
+void MainWindow::onTcpClearRecvClicked()
+{
+    txtTcpRecv->clear();
+}
+

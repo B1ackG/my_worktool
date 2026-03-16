@@ -17,6 +17,7 @@ ModbusTCPAssistant
 # OS files
 .DS_Store
 Thumbs.db
+*.csv
 
 # Automatically added by Assistant
 build_log.txt
