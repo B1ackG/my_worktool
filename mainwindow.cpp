@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QDateTime>
 #include <QDate>
 #include <QDataStream>
@@ -350,6 +351,8 @@ void MainWindow::createWidgets()
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
     btnGitCheckout = new QPushButton("切换分支");
+    btnGitCreateBranch = new QPushButton("创建分支");
+    btnGitDeleteBranch = new QPushButton("删除分支");
     
     txtGitCommitMsg = new QLineEdit();
     txtGitCommitMsg->setPlaceholderText("Git Commit Message...");
@@ -602,6 +605,8 @@ QWidget* MainWindow::createGitPage()
     layBranch->addWidget(cmbGitBranches, 1);
     layBranch->addWidget(btnGitRefreshBranches);
     layBranch->addWidget(btnGitCheckout);
+    layBranch->addWidget(btnGitCreateBranch);
+    layBranch->addWidget(btnGitDeleteBranch);
     layOps->addLayout(layBranch);
     
     // Commit Msg
@@ -959,6 +964,8 @@ void MainWindow::createConnections()
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
     connect(btnGitRefreshBranches, &QPushButton::clicked, this, &MainWindow::onGitRefreshBranchesClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
+    connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
+    connect(btnGitDeleteBranch, &QPushButton::clicked, this, &MainWindow::onGitDeleteBranchClicked);
     connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
     connect(btnGitCommit, &QPushButton::clicked, this, &MainWindow::onGitCommitClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
@@ -2492,6 +2499,51 @@ void MainWindow::onGitCheckoutClicked() {
     onGitRefreshLogClicked();
 }
 
+void MainWindow::onGitCreateBranchClicked() {
+    bool ok;
+    QString branchName = QInputDialog::getText(this, "创建新分支", 
+                                              "输入新分支名称:", QLineEdit::Normal, 
+                                              QString(), &ok);
+    if (!ok || branchName.trimmed().isEmpty()) {
+        return;
+    }
+
+    branchName = branchName.trimmed();
+    // 执行 git checkout -b <branchName>
+    runGitCommand(QStringList() << "checkout" << "-b" << branchName);
+    
+    // 刷新 UI
+    onGitRefreshBranchesClicked();
+    onGitRefreshLogClicked();
+    
+    // 将新分支设置为下拉框当前项
+    int index = cmbGitBranches->findText(branchName);
+    if (index >= 0) {
+        cmbGitBranches->setCurrentIndex(index);
+    }
+}
+
+void MainWindow::onGitDeleteBranchClicked() {
+    QString branch = cmbGitBranches->currentText().trimmed();
+    if (branch.isEmpty()) {
+       txtGitLog->append("<font color='red'>错误: 请先选择要删除的分支</font>");
+       return;
+    }
+
+    if (QMessageBox::question(this, "确认删除", 
+                              QString("确定要删除本地分支 %1 吗？\n(注意：如果分支未合并，删除可能会失败)").arg(branch)) 
+        != QMessageBox::Yes) {
+        return;
+    }
+
+    // 执行 git branch -d <branch>
+    runGitCommand(QStringList() << "branch" << "-d" << branch);
+    
+    // 刷新 UI
+    onGitRefreshBranchesClicked();
+    onGitRefreshLogClicked();
+}
+
 void MainWindow::onGitAddClicked() {
     runGitCommand(QStringList() << "add" << ".");
 }
@@ -2526,25 +2578,55 @@ void MainWindow::onGitPullClicked() {
 }
 
 void MainWindow::onGitMergeClicked() {
-    QString branch = cmbGitBranches->currentText();
-    QString currentBranch; 
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
     
-    // Detect current branch again to identify if we are merging "buffer" into "current"
-    // Usually user selects the branch they want to merge INTO current branch
-    // Or maybe selects the target branch? 
-    // Simplified logic: Merge the selected combo box branch into current checked out branch??
-    // BUT typical workflow: checkout target, then merge source. 
-    // Let's assume user is on correct branch, and selects "branch to merge from" in combo?
-    // Or maybe we ask user?
+    // Detect current branch
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start("git.exe", QStringList() << "rev-parse" << "--abbrev-ref" << "HEAD");
+#else
+    process.start("git", QStringList() << "rev-parse" << "--abbrev-ref" << "HEAD");
+#endif
+    process.waitForFinished();
+    QString currentBranch = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
     
-    // Let's implement: Merge selected branch in ComboBox INTO current active branch
-    if (branch.isEmpty()) return;
+    if (currentBranch == "master" || currentBranch == "main") {
+        QMessageBox::warning(this, "合并限制", "当前是主分支 (" + currentBranch + ")，无法以此方式合并。请切换到功能分支。");
+        return;
+    }
     
+    // Check if master or main exists to merge INTO
+    bool hasMaster = false;
+    bool hasMain = false;
+    for (int i = 0; i < cmbGitBranches->count(); ++i) {
+        QString b = cmbGitBranches->itemText(i);
+        if (b == "master") hasMaster = true;
+        if (b == "main") hasMain = true;
+    }
+    
+    QString targetMain = hasMain ? "main" : (hasMaster ? "master" : "");
+    if (targetMain.isEmpty()) {
+        QMessageBox::critical(this, "错误", "未找到本地 master 或 main 分支。");
+        return;
+    }
+
     QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "确认合并", QString("确定要将分支 '%1' 合并到当前分支吗?").arg(branch),
+    reply = QMessageBox::question(this, "确认合并", 
+                                  QString("确定要将当前分支 '%1' 合并到 '%2' 分支吗?\n操作将包括: 切换到 %2 -> 合并 %1 -> 返回 %1")
+                                  .arg(currentBranch).arg(targetMain),
                                   QMessageBox::Yes|QMessageBox::No);
+    
     if (reply == QMessageBox::Yes) {
-        runGitCommand(QStringList() << "merge" << branch);
+        // Step 1: Checkout targetMain
+        runGitCommand(QStringList() << "checkout" << targetMain);
+        // Step 2: Merge currentBranch
+        runGitCommand(QStringList() << "merge" << currentBranch);
+        // Step 3: Checkout back to currentBranch
+        runGitCommand(QStringList() << "checkout" << currentBranch);
+        
+        txtGitLog->append("<font color='green'>合并流程执行完毕 (需检查日志是否有冲突)。</font>");
     }
 }
 
@@ -3266,14 +3348,14 @@ void MainWindow::runDiagnosticCommands(int pid) {
     
     // 组合所有诊断命令
     // 1. top (1次全线程快照，查看各线程 CPU)
-    // 2. gdb stack trace (附加到进程，打印所有线程的完整调用栈及其变量，然后分离)
+    // 2. gdb stack trace (附加到进程，打印所有线程的调用栈，然后分离)
     // 3. strace 深度追踪 (追踪网络、读写，带耗时统计，输出到 /tmp/190.strace)
     
     QString diagCmd = QString(
         "echo '--- TOP SNAPSHOT (Threads) ---'; top -H -p %1 -b -n 1; "
-        "echo '\n--- GDB LIVE DEEP ANALYSIS (Full Stack) ---'; "
-        "gdb -batch -ex \"set confirm off\" -ex \"add-auto-load-safe-path /\" "
-        "-ex \"thread apply all bt full\" -ex \"detach\" -ex \"quit\" -p %1; "
+        "echo '\n--- GDB LIVE ANALYSIS (Backtrace) ---'; "
+        "gdb -batch -ex \"set confirm off\" -ex \"set auto-load safe-path /\" "
+        "-ex \"thread apply all bt\" -ex \"detach\" -ex \"quit\" -p %1; "
         "echo '\n--- STRACE NETWORK/IO TRACE (3s) ---'; "
         "timeout 3 strace -tt -f -p %1 -o /tmp/190.strace -T -e trace=network,read,write -s 128 2>&1; "
         "echo 'Done. Trace saved to /tmp/190.strace on target. First 20 lines of trace:'; "

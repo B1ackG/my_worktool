@@ -120,6 +120,8 @@ private slots:
     void onGitSelectDirClicked();
     void onGitRefreshBranchesClicked();
     void onGitCheckoutClicked();
+    void onGitCreateBranchClicked(); // 新增：创建新分支
+    void onGitDeleteBranchClicked(); // 新增：删除分支
     void onGitAddClicked();
     void onGitCommitClicked();
     void onGitPushClicked();
@@ -272,6 +274,8 @@ private:
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
+    QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
+    QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
