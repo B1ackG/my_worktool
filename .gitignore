@@ -13,11 +13,15 @@ ModbusTCPAssistant
 *.user
 *.user.*
 .qtc_clangd/
+build_error_*.txt
+config.ini
+documents/
 
 # OS files
 .DS_Store
 Thumbs.db
 *.csv
+monitor_logs/
 
 # Automatically added by Assistant
 build_log.txt
