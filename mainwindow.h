@@ -120,6 +120,7 @@ private slots:
     void onGitSelectDirClicked();
     void onGitRefreshBranchesClicked();
     void onGitCheckoutClicked();
+    void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
     void onGitDeleteBranchClicked(); // 新增：删除分支
     void onGitAddClicked();
@@ -139,6 +140,10 @@ private slots:
     void onMonitorUsageToggled();
     void onMonitorTimer();
     void runDiagnosticCommands(int pid);
+
+    // Performance Monitor Slots
+    void onPerformanceMonitorToggled(bool checked);
+    void onPerformanceTimer();
 
     // Common
     void onClearLogClicked();
@@ -168,6 +173,7 @@ private:
     QWidget* createGitPage();
     QWidget* createSimulatorPage();
     QWidget* createTcpAssistantPage();
+    QWidget* createPerformancePage();
 
     // --- Main UI Structure ---
     QWidget *centralWidget;
@@ -179,18 +185,23 @@ private:
     QWidget *gitPageWidget;
     QWidget *simulatorPageWidget;
     QWidget *tcpAssistantPageWidget;
+    QWidget *performancePageWidget;
 
     // --- Modbus Widgets ---
     // Register Map Tables
     QTabWidget *tabRegisterMaps;
     QTableWidget *tblAGV;
     QTableWidget *tblRobot;
+    QPushButton *btnExportRegisterMap;
+    QPushButton *btnImportRegisterMap;
     void setupRegisterTable(QTableWidget *table);
     void onRegisterTableCellClicked(int row, int column);
     void onRegisterTabChanged(int index);   // Tab switch handler
     void onRegisterTableChanged(int row, int column); // Auto-save handler
     void saveRegisterTables();
     void loadRegisterTables();
+    void onExportRegisterMapClicked();
+    void onImportRegisterMapClicked();
 
     // Connection
     QLabel *lblIP;
@@ -274,6 +285,7 @@ private:
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
+    QPushButton *btnGitSyncRemote;   // 同步远程分支
     QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
@@ -332,7 +344,9 @@ private:
     enum DisplayFormat {
         FormatDecimal = 0,
         FormatHex = 1,
-        FormatBinary = 2
+        FormatBinary = 2,
+        FormatFloat = 3,
+        FormatDouble = 4
     };
     DisplayFormat displayFormat;
 
@@ -495,6 +509,17 @@ private:
     // History
     static const int MAX_HISTORY = 10;
     QString lastScenePath; // 添加此行
+
+    // --- Performance Monitor Widgets ---
+    QPushButton *btnTogglePerfMonitor;
+    MonitorChart *chartLocalCpu;
+    MonitorChart *chartLocalMem;
+    QLabel *lblLocalCpu;
+    QLabel *lblLocalMem;
+    QTextEdit *txtPerfLog;
+    QTimer *perfTimer;
+    quint64 lastTotalUser, lastTotalUserLow, lastTotalSys, lastTotalIdle;
+    bool hasLastPerfSample;
 };
 
 #endif // MAINWINDOW_H

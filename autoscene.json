@@ -1,0 +1,295 @@
+{
+    "agv": {
+        "formats": {
+        },
+        "values": {
+            "0": 64,
+            "102": 65,
+            "103": 65,
+            "104": 542,
+            "19": 1,
+            "2": 4,
+            "3": 500,
+            "4": 2,
+            "50": 332,
+            "6": 2
+        }
+    },
+    "main": {
+        "formats": {
+            "0": "32-bit Float",
+            "18": "32-bit Float",
+            "2": "32-bit Float",
+            "20": "32-bit Float",
+            "22": "32-bit Float",
+            "24": "32-bit Float",
+            "26": "32-bit Float",
+            "28": "32-bit Float",
+            "30": "32-bit Float",
+            "32": "32-bit Float",
+            "34": "32-bit Float",
+            "36": "32-bit Float",
+            "38": "32-bit Float",
+            "4": "32-bit Float",
+            "40": "32-bit Float",
+            "6": "32-bit Float"
+        },
+        "values": {
+            "19": 1,
+            "201": 16912,
+            "203": 17377,
+            "205": 17416,
+            "206": 32768,
+            "207": 16984,
+            "29": 1,
+            "44": 1,
+            "612": 16880,
+            "614": 16880,
+            "616": 49981,
+            "617": 6596,
+            "618": 16880,
+            "620": 16880,
+            "622": 16880,
+            "624": 16880,
+            "626": 16880,
+            "628": 16880,
+            "630": 16880,
+            "632": 16880,
+            "634": 16880,
+            "79": 50
+        }
+    },
+    "waveforms": [
+        {
+            "active": true,
+            "addr": 201,
+            "amplitude": 90,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -90,
+            "period": 30,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 0,
+            "amplitude": 1000,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 2,
+            "phase": 0,
+            "type": "正弦波"
+        },
+        {
+            "active": true,
+            "addr": 203,
+            "amplitude": 1150,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -850,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 205,
+            "amplitude": 840,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 207,
+            "amplitude": 180,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -180,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 104,
+            "amplitude": 834,
+            "device": "AGV",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 50,
+            "amplitude": 511,
+            "device": "AGV",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 612,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 614,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 616,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "正弦波"
+        },
+        {
+            "active": true,
+            "addr": 618,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 620,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 622,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 624,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 626,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 628,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 630,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 632,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 634,
+            "amplitude": 100,
+            "device": "Main",
+            "dutyCycle": 0.5,
+            "offset": -100,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 102,
+            "amplitude": 100,
+            "device": "AGV",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        },
+        {
+            "active": true,
+            "addr": 103,
+            "amplitude": 100,
+            "device": "AGV",
+            "dutyCycle": 0.5,
+            "offset": 0,
+            "period": 60,
+            "phase": 0,
+            "type": "来回增减"
+        }
+    ]
+}

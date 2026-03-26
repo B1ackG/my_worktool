@@ -144,6 +144,7 @@ void MainWindow::createWidgets()
     navWidget->addItem("Git 工作流助手");
     navWidget->addItem("Modbus 从站模拟器");
     navWidget->addItem("TCP 通讯助手");
+    navWidget->addItem("性能监控器");
     navWidget->setFixedWidth(160);
     navWidget->setStyleSheet("QListWidget::item { height: 50px; padding-left: 10px; font-size: 14px; } "
                              "QListWidget::item:selected { background-color: #3399ff; color: white; }");
@@ -196,6 +197,9 @@ void MainWindow::createWidgets()
     tabRegisterMaps->addTab(tblAGV, "AGV");
     tabRegisterMaps->addTab(tblRobot, "机器人");
 
+    btnExportRegisterMap = new QPushButton("导出");
+    btnImportRegisterMap = new QPushButton("导入");
+
     // Read Group
     lblReadStartAddr = new QLabel("起始地址:");
     spinReadStartAddr = new QSpinBox();
@@ -215,7 +219,7 @@ void MainWindow::createWidgets()
 
     lblDisplayFormat = new QLabel("格式:");
     cmbDisplayFormat = new QComboBox();
-    cmbDisplayFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制");
+    cmbDisplayFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数");
 
     btnReadCoils = new QPushButton("读线圈(01)");
     btnReadInputs = new QPushButton("读输入(02)");
@@ -351,6 +355,9 @@ void MainWindow::createWidgets()
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
     btnGitCheckout = new QPushButton("切换分支");
+    btnGitSyncRemote = new QPushButton("同步远程");
+    btnGitSyncRemote->setToolTip("将选中的远程分支同步并签出到本地");
+    btnGitSyncRemote->setStyleSheet("background-color: #e3f2fd; font-weight: bold;");
     btnGitCreateBranch = new QPushButton("创建分支");
     btnGitDeleteBranch = new QPushButton("删除分支");
     
@@ -394,6 +401,30 @@ void MainWindow::createWidgets()
     
     btnRebootTarget = new QPushButton("重启目标");
     btnRebootTarget->setStyleSheet("background-color: #ffccbc; font-weight: bold; color: #d84315;");
+
+    // --- Page 6: Performance Monitor Widgets ---
+    btnTogglePerfMonitor = new QPushButton("开始监控本机性能");
+    btnTogglePerfMonitor->setCheckable(true);
+    btnTogglePerfMonitor->setStyleSheet("font-weight: bold; min-height: 40px;");
+    
+    chartLocalCpu = new MonitorChart();
+    chartLocalCpu->setMinimumHeight(200);
+    chartLocalMem = new MonitorChart();
+    chartLocalMem->setMinimumHeight(200);
+    
+    lblLocalCpu = new QLabel("CPU 使用率: 0%");
+    lblLocalCpu->setStyleSheet("font-size: 16px; font-weight: bold; color: #008080;");
+    lblLocalMem = new QLabel("内存 使用率: 0%");
+    lblLocalMem->setStyleSheet("font-size: 16px; font-weight: bold; color: #008080;");
+    
+    txtPerfLog = new QTextEdit();
+    txtPerfLog->setReadOnly(true);
+    txtPerfLog->setPlaceholderText("性能监控日志 (检测到异常卡顿时会在此记录)...");
+
+    perfTimer = new QTimer(this);
+    perfTimer->setInterval(1000);
+    hasLastPerfSample = false;
+    lastTotalUser = lastTotalUserLow = lastTotalSys = lastTotalIdle = 0;
 
     txtGitLog = new QTextEdit();
     txtGitLog->setReadOnly(true);
@@ -508,6 +539,13 @@ QWidget* MainWindow::createModbusPage()
     // RIGHT SIDE: Register Maps
     QGroupBox *grpMaps = new QGroupBox("地址映射表 (点击行自动填入地址)");
     QVBoxLayout *layMaps = new QVBoxLayout();
+    
+    QHBoxLayout *layMapBtns = new QHBoxLayout();
+    layMapBtns->addWidget(btnExportRegisterMap);
+    layMapBtns->addWidget(btnImportRegisterMap);
+    layMapBtns->addStretch();
+    
+    layMaps->addLayout(layMapBtns);
     layMaps->addWidget(tabRegisterMaps);
     grpMaps->setLayout(layMaps);
     
@@ -605,6 +643,7 @@ QWidget* MainWindow::createGitPage()
     layBranch->addWidget(cmbGitBranches, 1);
     layBranch->addWidget(btnGitRefreshBranches);
     layBranch->addWidget(btnGitCheckout);
+    layBranch->addWidget(btnGitSyncRemote);
     layBranch->addWidget(btnGitCreateBranch);
     layBranch->addWidget(btnGitDeleteBranch);
     layOps->addLayout(layBranch);
@@ -888,12 +927,14 @@ void MainWindow::createLayouts()
     gitPageWidget = createGitPage();
     simulatorPageWidget = createSimulatorPage();
     tcpAssistantPageWidget = createTcpAssistantPage();
+    performancePageWidget = createPerformancePage();
     
     stackedWidget->addWidget(modbusPageWidget);
     stackedWidget->addWidget(serialPageWidget);
     stackedWidget->addWidget(gitPageWidget);
     stackedWidget->addWidget(simulatorPageWidget);
     stackedWidget->addWidget(tcpAssistantPageWidget);
+    stackedWidget->addWidget(performancePageWidget);
     
     mainLayout->addWidget(navWidget);
     mainLayout->addWidget(stackedWidget);
@@ -938,6 +979,8 @@ void MainWindow::createConnections()
     connect(tblAGV, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
     connect(tblRobot, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
     connect(tabRegisterMaps, &QTabWidget::currentChanged, this, &MainWindow::onRegisterTabChanged);
+    connect(btnExportRegisterMap, &QPushButton::clicked, this, &MainWindow::onExportRegisterMapClicked);
+    connect(btnImportRegisterMap, &QPushButton::clicked, this, &MainWindow::onImportRegisterMapClicked);
 
     connect(btnReadCoils, &QPushButton::clicked, this, &MainWindow::onReadCoilsClicked);
     connect(btnReadInputs, &QPushButton::clicked, this, &MainWindow::onReadInputsClicked);
@@ -964,6 +1007,7 @@ void MainWindow::createConnections()
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
     connect(btnGitRefreshBranches, &QPushButton::clicked, this, &MainWindow::onGitRefreshBranchesClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
+    connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
     connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
     connect(btnGitDeleteBranch, &QPushButton::clicked, this, &MainWindow::onGitDeleteBranchClicked);
     connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
@@ -987,6 +1031,10 @@ void MainWindow::createConnections()
     connect(btnMonitorUsage, &QPushButton::toggled, this, &MainWindow::onMonitorUsageToggled);
     connect(monitorTimer, &QTimer::timeout, this, &MainWindow::onMonitorTimer);
     monitorTimer->setInterval(2000); // 2 seconds update interval
+
+    // Performance Monitor Connections
+    connect(btnTogglePerfMonitor, &QPushButton::toggled, this, &MainWindow::onPerformanceMonitorToggled);
+    connect(perfTimer, &QTimer::timeout, this, &MainWindow::onPerformanceTimer);
     
     // Waveform Controls
     connect(btnWaveAdd, &QPushButton::clicked, this, &MainWindow::onSimAddCyclicTimerClicked);
@@ -1255,6 +1303,7 @@ void MainWindow::onSimGenerateReportClicked()
 
 void MainWindow::onNavSelectionChanged(QListWidgetItem *current, QListWidgetItem *previous)
 {
+    Q_UNUSED(previous);
     if (!current) return;
     int index = navWidget->row(current);
     stackedWidget->setCurrentIndex(index);
@@ -1436,10 +1485,35 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
         quint8 byteCount;
         stream >> byteCount;
         QStringList regs;
-        for (int i=0; i<byteCount/2; ++i) {
-            quint16 val;
-            stream >> val;
-            regs << formatValue(val);
+        
+        if (displayFormat == FormatFloat && byteCount >= 4) {
+            for (int i = 0; i < byteCount / 4; ++i) {
+                quint16 low, high;
+                stream >> high >> low; // 假设大端序存储: [High, Low] -> ABCD
+                quint32 raw = (quint32(high) << 16) | low;
+                float f;
+                memcpy(&f, &raw, 4);
+                regs << QString::number(f, 'f', 4);
+            }
+        } 
+        else if (displayFormat == FormatDouble && byteCount >= 8) {
+            for (int i = 0; i < byteCount / 8; ++i) {
+                quint16 r1, r2, r3, r4;
+                stream >> r1 >> r2 >> r3 >> r4; 
+                // [r4, r3, r2, r1] -> 64-bit IEEE 754 (Little-Endian / DCBA FEHG)
+                // 对应输入: 0:0x720E, 1:0x4049, 2:0xD907, 3:0x4070 -> 269.56
+                quint64 raw = (quint64(r4) << 48) | (quint64(r3) << 32) | (quint64(r2) << 16) | quint64(r1);
+                double d;
+                memcpy(&d, &raw, 8);
+                regs << QString::number(d, 'g', 8);
+            }
+        }
+        else {
+            for (int i=0; i<byteCount/2; ++i) {
+                quint16 val;
+                stream >> val;
+                regs << formatValue(val);
+            }
         }
         resultStr = regs.join(", ");
     }
@@ -1519,6 +1593,17 @@ void MainWindow::onContinuousReadTimer() {
 
 void MainWindow::onDisplayFormatChanged(int index) {
     displayFormat = (DisplayFormat)index;
+    
+    // 根据格式自动锁定读取数量
+    if (displayFormat == FormatFloat) {
+        spinReadQuantity->setValue(2);
+        // spinReadQuantity->setEnabled(false); // 可选：禁用调整，以免用户误改
+    } else if (displayFormat == FormatDouble) {
+        spinReadQuantity->setValue(4);
+        // spinReadQuantity->setEnabled(false);
+    } else {
+        // spinReadQuantity->setEnabled(true);
+    }
 }
 
 void MainWindow::logMessage(const QString &msg, bool isError) {
@@ -2447,13 +2532,23 @@ void MainWindow::onGitRefreshBranchesClicked() {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
     
-    // Get local branches
+    // 1. 先进行 fetch 获取最新远程分支信息
+    QProcess fetchProcess;
+    fetchProcess.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    fetchProcess.start("git.exe", QStringList() << "fetch" << "--prune");
+#else
+    fetchProcess.start("git", QStringList() << "fetch" << "--prune");
+#endif
+    fetchProcess.waitForFinished();
+
+    // 2. 获取所有本地和远程分支 (git branch -a)
     QProcess process;
     process.setWorkingDirectory(workDir);
 #ifdef Q_OS_WIN
-    process.start("git.exe", QStringList() << "branch");
+    process.start("git.exe", QStringList() << "branch" << "-a");
 #else
-    process.start("git", QStringList() << "branch");
+    process.start("git", QStringList() << "branch" << "-a");
 #endif
     process.waitForFinished();
     
@@ -2473,18 +2568,62 @@ void MainWindow::onGitRefreshBranchesClicked() {
     
     for (QString line : lines) {
         line = line.trimmed();
-        if (line.startsWith("* ")) {
-            currentBranch = line.mid(2);
-            cmbGitBranches->addItem(currentBranch);
+        bool isCurrent = line.startsWith("* ");
+        if (isCurrent) {
+            line = line.mid(2).trimmed();
+            currentBranch = line;
+        }
+
+        bool isRemote = line.startsWith("remotes/");
+        cmbGitBranches->addItem(line);
+        int lastIndex = cmbGitBranches->count() - 1;
+
+        if (isRemote) {
+            // 远程分支设为红色
+            cmbGitBranches->setItemData(lastIndex, QBrush(Qt::red), Qt::ForegroundRole);
         } else {
-            cmbGitBranches->addItem(line);
+            // 本地分支设为黑色
+            cmbGitBranches->setItemData(lastIndex, QBrush(Qt::black), Qt::ForegroundRole);
         }
     }
     
     if (!currentBranch.isEmpty())
         cmbGitBranches->setCurrentText(currentBranch);
-        
-    txtGitLog->append("已刷新分支列表");
+
+    txtGitLog->append("<font color='gray'>已刷新本地及远程分支（红色为远程分支）。</font>");
+}
+
+void MainWindow::onGitSyncRemoteClicked() {
+    QString branch = cmbGitBranches->currentText().trimmed();
+    if (branch.isEmpty()) return;
+
+    if (!branch.startsWith("remotes/")) {
+        QMessageBox::information(this, "提示", "该分支已在本地或不是远程分支标识，请直接使用'切换分支'。");
+        return;
+    }
+
+    // 从 remotes/origin/branch-name 提取 branch-name
+    // 通常格式是 remotes/[remote-name]/[branch-name]
+    QStringList parts = branch.split('/');
+    if (parts.size() < 3) {
+        QMessageBox::critical(this, "错误", "无法解析远程分支路径: " + branch);
+        return;
+    }
+
+    // 重新拼接真正的分支名 (处理分支名中包含 / 的情况)
+    QString branchName = parts.mid(2).join('/');
+    
+    QMessageBox::StandardButton reply;
+    reply = QMessageBox::question(this, "确认同步", 
+                                  QString("确定要将远程分支 '%1' 同步到本地并签出吗?").arg(branchName),
+                                  QMessageBox::Yes|QMessageBox::No);
+    
+    if (reply == QMessageBox::Yes) {
+        // 执行 git checkout -b branch-name --track remotes/origin/branch-name
+        // 或者简单的 git checkout branch-name (如果 fetch 过，git 会自动建立追踪)
+        runGitCommand(QStringList() << "checkout" << "-b" << branchName << "--track" << branch);
+        onGitRefreshBranchesClicked(); // 刷新列表以变为黑色
+    }
 }
 
 void MainWindow::onGitCheckoutClicked() {
@@ -3832,6 +3971,125 @@ void MainWindow::loadRegisterTables() {
     syncSimulatorTablesFromMaps();
 }
 
+void MainWindow::onExportRegisterMapClicked() {
+    QString fn = QFileDialog::getSaveFileName(this, "导出地址映射表", QString(), "CSV Files (*.csv)");
+    if (fn.isEmpty()) return;
+
+    QFile f(fn);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "错误", "无法保存文件");
+        return;
+    }
+
+    QTextStream out(&f);
+    out.setGenerateByteOrderMark(true); // 保证 Excel 正常打开中文
+    out << "Tab,Address,Comment\n";
+
+    auto exportTable = [&](QTableWidget *table, const QString &tabName) {
+        if (!table) return;
+        for (int i = 0; i < table->rowCount(); ++i) {
+            QString addr = table->item(i, 0) ? table->item(i, 0)->text() : "";
+            QString cmt = table->item(i, 1) ? table->item(i, 1)->text() : "";
+            
+            if (addr.isEmpty() && cmt.isEmpty()) continue;
+            
+            // CSV 规范：如果内容包含逗号或双引号，需要用双引号包围，双引号需转义为两个双引号
+            if (cmt.contains(",") || cmt.contains("\"")) {
+                cmt = "\"" + cmt.replace("\"", "\"\"") + "\"";
+            }
+            
+            out << tabName << "," << addr << "," << cmt << "\n";
+        }
+    };
+
+    exportTable(tblAGV, "AGV");
+    exportTable(tblRobot, "Robot");
+
+    f.close();
+    QMessageBox::information(this, "成功", "地址映射表已以 CSV 格式导出。");
+}
+
+void MainWindow::onImportRegisterMapClicked() {
+    QString fn = QFileDialog::getOpenFileName(this, "导入地址映射表", QString(), "CSV Files (*.csv);;All Files (*)");
+    if (fn.isEmpty()) return;
+
+    QFile f(fn);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "错误", "无法打开文件");
+        return;
+    }
+
+    QTextStream in(&f);
+    QString header = in.readLine();
+    
+    auto clearTable = [&](QTableWidget* table) {
+        table->blockSignals(true);
+        for(int i=0; i<table->rowCount(); i++) {
+            if(table->item(i, 0)) table->item(i, 0)->setText(QString::number(i));
+            if(table->item(i, 1)) table->item(i, 1)->setText("");
+        }
+        table->blockSignals(false);
+    };
+
+    clearTable(tblAGV);
+    clearTable(tblRobot);
+
+    QMap<QString, int> tabRowCounters;
+    tabRowCounters["agv"] = 0;
+    tabRowCounters["robot"] = 0;
+
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        if (line.trimmed().isEmpty()) continue;
+        
+        // 健壮的 CSV 解析逻辑
+        QStringList parts;
+        bool inQuotes = false;
+        QString field;
+        for (int i = 0; i < line.length(); ++i) {
+            QChar c = line[i];
+            if (c == '"') {
+                if (inQuotes && i + 1 < line.length() && line[i+1] == '"') {
+                    field += '"'; // 处理转义的双引号
+                    i++;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (c == ',' && !inQuotes) {
+                parts.append(field);
+                field.clear();
+            } else {
+                field += c;
+            }
+        }
+        parts.append(field);
+
+        if (parts.size() < 3) continue;
+
+        QString tabStr = parts[0].trimmed().toLower();
+        QString addr = parts[1].trimmed();
+        QString cmt = parts[2].trimmed();
+
+        QTableWidget *table = (tabStr == "robot" || tabStr == "机器人") ? tblRobot : tblAGV;
+        QString key = (tabStr == "robot" || tabStr == "机器人") ? "robot" : "agv";
+        int row = tabRowCounters[key]++;
+
+        if (row >= table->rowCount()) table->setRowCount(row + 1);
+        
+        table->blockSignals(true);
+        if (!table->item(row, 0)) table->setItem(row, 0, new QTableWidgetItem());
+        if (!table->item(row, 1)) table->setItem(row, 1, new QTableWidgetItem());
+        table->item(row, 0)->setText(addr);
+        table->item(row, 1)->setText(cmt);
+        table->blockSignals(false);
+    }
+
+    f.close();
+    saveRegisterTables();
+    syncSimulatorTablesFromMaps();
+    QMessageBox::information(this, "成功", "地址映射表 CSV 导入成功。");
+}
+
 void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
     if (!table) return;
@@ -4305,6 +4563,132 @@ void MainWindow::onTcpReadyRead()
     }
     
     txtTcpRecv->append(QString("[%1] Recv: %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz")).arg(display));
+}
+
+QWidget* MainWindow::createPerformancePage()
+{
+    QWidget *page = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(page);
+
+    QLabel *header = new QLabel("电脑性能实时监控器");
+    header->setStyleSheet("font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;");
+    layout->addWidget(header);
+
+    layout->addWidget(btnTogglePerfMonitor);
+
+    QGroupBox *chartGroup = new QGroupBox("监控图表");
+    QGridLayout *grid = new QGridLayout(chartGroup);
+    
+    grid->addWidget(lblLocalCpu, 0, 0);
+    grid->addWidget(chartLocalCpu, 1, 0);
+    
+    grid->addWidget(lblLocalMem, 0, 1);
+    grid->addWidget(chartLocalMem, 1, 1);
+    
+    layout->addWidget(chartGroup);
+
+    layout->addWidget(new QLabel("异常日志 (当系统负载过高导致卡顿时，将记录可能的原因):"));
+    layout->addWidget(txtPerfLog);
+
+    return page;
+}
+
+void MainWindow::onPerformanceMonitorToggled(bool checked)
+{
+    if (checked) {
+        btnTogglePerfMonitor->setText("停止监控");
+        btnTogglePerfMonitor->setStyleSheet("font-weight: bold; min-height: 40px; background-color: #ffcccc;");
+        txtPerfLog->append(QString("[%1] 性能监控已开始...").arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
+        hasLastPerfSample = false;
+        perfTimer->start();
+    } else {
+        btnTogglePerfMonitor->setText("开始监控本机性能");
+        btnTogglePerfMonitor->setStyleSheet("font-weight: bold; min-height: 40px;");
+        txtPerfLog->append(QString("[%1] 性能监控已停止").arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
+        perfTimer->stop();
+        lblLocalCpu->setText("CPU 使用率: 0%");
+        lblLocalMem->setText("内存 使用率: 0%");
+        chartLocalCpu->clear();
+        chartLocalMem->clear();
+    }
+}
+
+void MainWindow::onPerformanceTimer()
+{
+    // --- CPU Usage Calculation (Linux /proc/stat) ---
+    QFile statFile("/proc/stat");
+    if (statFile.open(QIODevice::ReadOnly)) {
+        QTextStream stream(&statFile);
+        QString line = stream.readLine();
+        if (line.startsWith("cpu ")) {
+            QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (parts.size() >= 5) {
+                quint64 user = parts[1].toULongLong();
+                quint64 nice = parts[2].toULongLong();
+                quint64 system = parts[3].toULongLong();
+                quint64 idle = parts[4].toULongLong();
+
+                if (hasLastPerfSample) {
+                    quint64 totalDiff = (user + nice + system + idle) - (lastTotalUser + lastTotalUserLow + lastTotalSys + lastTotalIdle);
+                    quint64 idleDiff = idle - lastTotalIdle;
+                    if (totalDiff > 0) {
+                        double usage = 100.0 * (1.0 - (double)idleDiff / totalDiff);
+                        lblLocalCpu->setText(QString("CPU 使用率: %1%").arg(usage, 0, 'f', 1));
+                        chartLocalCpu->addValue(usage);
+
+                        // Detection of "Lag" (High CPU)
+                        if (usage > 90.0) {
+                            txtPerfLog->append(QString("<font color='red'>[%1] 警告: CPU 负载过高 (%2%)，可能导致系统卡顿。</font>")
+                                .arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(usage, 0, 'f', 1));
+                        }
+                    }
+                }
+                lastTotalUser = user;
+                lastTotalUserLow = nice;
+                lastTotalSys = system;
+                lastTotalIdle = idle;
+                hasLastPerfSample = true;
+            }
+        }
+        statFile.close();
+    }
+
+    // --- Memory Usage Calculation (Linux /proc/meminfo) ---
+    QFile memFile("/proc/meminfo");
+    if (memFile.open(QIODevice::ReadOnly)) {
+        QTextStream stream(&memFile);
+        quint64 memTotal = 0, memAvailable = 0;
+        int found = 0;
+        while (!stream.atEnd() && found < 2) {
+            QString line = stream.readLine();
+            if (line.startsWith("MemTotal:")) {
+                memTotal = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts).at(1).toULongLong();
+                found++;
+            } else if (line.startsWith("MemAvailable:")) {
+                memAvailable = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts).at(1).toULongLong();
+                found++;
+            }
+        }
+        if (memTotal > 0) {
+            double usage = 100.0 * (1.0 - (double)memAvailable / memTotal);
+            lblLocalMem->setText(QString("内存 使用率: %1%").arg(usage, 0, 'f', 1));
+            chartLocalMem->addValue(usage);
+
+            if (usage > 95.0) {
+                txtPerfLog->append(QString("<font color='red'>[%1] 严重警告: 内存几乎耗尽 (%2%)，极易导致系统卡死 (Swap Thrashing)。</font>")
+                    .arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(usage, 0, 'f', 1));
+            }
+        }
+        memFile.close();
+    }
+
+    // Try to find top CPU consumers if lagging
+    // This is optional but helpful
+    static int checkCounter = 0;
+    if (++checkCounter % 5 == 0) { // check every 5 seconds or if lagging?
+        // If we want to automatically find the culprit:
+        // Run: ps -eo pid,pcpu,comm --sort=-pcpu | head -n 3
+    }
 }
 
 void MainWindow::onTcpSendClicked()
