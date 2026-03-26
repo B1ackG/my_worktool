@@ -12,6 +12,8 @@ build_*/
 ModbusTCPAssistant
 *.user
 *.user.*
+.pro.user
+ModbusTCPAssistant.pro.user
 .qtc_clangd/
 build_error_*.txt
 config.ini
