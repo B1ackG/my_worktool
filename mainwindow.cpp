@@ -199,6 +199,7 @@ void MainWindow::createWidgets()
 
     btnExportRegisterMap = new QPushButton("导出");
     btnImportRegisterMap = new QPushButton("导入");
+    btnImportStandardFile = new QPushButton("导入标准文件");
 
     // Read Group
     lblReadStartAddr = new QLabel("起始地址:");
@@ -245,6 +246,10 @@ void MainWindow::createWidgets()
     lblWriteValues = new QLabel("多值(逗号隔开):");
     txtWriteValues = new QLineEdit();
     txtWriteValues->setPlaceholderText("e.g. 100,200,300");
+
+    lblWriteFormat = new QLabel("格式:");
+    cmbWriteFormat = new QComboBox();
+    cmbWriteFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数");
 
     btnWriteSingleCoil = new QPushButton("写单线圈(05)");
     btnWriteSingleRegister = new QPushButton("写单Reg(06)");
@@ -369,12 +374,31 @@ void MainWindow::createWidgets()
     cmbGitRemote->addItem("github");
     cmbGitRemote->setEditable(true); // Allow custom remotes
     
-    btnGitAdd = new QPushButton("git add .");
-    btnGitCommit = new QPushButton("git commit");
-    btnGitPush = new QPushButton("git push");
-    btnGitPull = new QPushButton("git pull");
-    btnGitMerge = new QPushButton("git merge");
-    btnGitStatus = new QPushButton("git status");
+    btnGitAdd = new QPushButton("git add . (暂存全部)");
+    btnGitCommit = new QPushButton("git commit (提交)");
+    btnGitPush = new QPushButton("git push (推送)");
+    btnGitPull = new QPushButton("git pull (拉取)");
+    btnGitMerge = new QPushButton("git merge (合并)");
+    btnGitStatus = new QPushButton("git status (状态)");
+    btnGitDiff = new QPushButton("git diff (差异)");
+    btnGitDiff->setToolTip("显示工作区与暂存区的差异");
+    btnGitFetch = new QPushButton("git fetch --prune (同步远端)");
+    btnGitStash = new QPushButton("git stash (临时存档)");
+    btnGitStashPop = new QPushButton("git stash pop (恢复临存)");
+    btnGitSetDiffRule = new QPushButton("设置Diff提醒标准");
+    btnGitAutoDiffReminder = new QPushButton("开启每小时Diff提醒");
+    btnGitAutoDiffReminder->setCheckable(true);
+    btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
+    spinGitDiffIntervalMinutes = new QSpinBox();
+    spinGitDiffIntervalMinutes->setRange(1, 24 * 60);
+    spinGitDiffIntervalMinutes->setValue(60);
+    spinGitDiffIntervalMinutes->setSuffix(" 分钟");
+    spinGitDiffFileThreshold = new QSpinBox();
+    spinGitDiffFileThreshold->setRange(1, 5000);
+    spinGitDiffFileThreshold->setValue(5);
+    spinGitDiffLineThreshold = new QSpinBox();
+    spinGitDiffLineThreshold->setRange(1, 200000);
+    spinGitDiffLineThreshold->setValue(100);
     btnGitOpenIgnore = new QPushButton("管理 .gitignore");
     btnGitCheckIgnore = new QPushButton("检查 .gitignore");
     btnGitCheckIgnore->setToolTip("检查是否存在常用的 .gitignore 规则");
@@ -503,11 +527,14 @@ QWidget* MainWindow::createModbusPage()
     QHBoxLayout *w3 = new QHBoxLayout();
     w3->addWidget(lblWriteValues); w3->addWidget(txtWriteValues);
     
+    QHBoxLayout *wFormat = new QHBoxLayout();
+    wFormat->addWidget(lblWriteFormat); wFormat->addWidget(cmbWriteFormat);
+
     QGridLayout *w4 = new QGridLayout();
     w4->addWidget(btnWriteSingleCoil, 0, 0); w4->addWidget(btnWriteSingleRegister, 0, 1);
     w4->addWidget(btnWriteMultipleCoils, 1, 0); w4->addWidget(btnWriteMultipleRegisters, 1, 1);
     
-    layWrite->addLayout(w1); layWrite->addLayout(w2); layWrite->addLayout(w3); layWrite->addLayout(w4);
+    layWrite->addLayout(w1); layWrite->addLayout(w2); layWrite->addLayout(w3); layWrite->addLayout(wFormat); layWrite->addLayout(w4);
     grpWrite->setLayout(layWrite);
     layOps->addWidget(grpWrite);
     
@@ -543,6 +570,7 @@ QWidget* MainWindow::createModbusPage()
     QHBoxLayout *layMapBtns = new QHBoxLayout();
     layMapBtns->addWidget(btnExportRegisterMap);
     layMapBtns->addWidget(btnImportRegisterMap);
+    layMapBtns->addWidget(btnImportStandardFile);
     layMapBtns->addStretch();
     
     layMaps->addLayout(layMapBtns);
@@ -606,7 +634,7 @@ QWidget* MainWindow::createSerialPage()
     
     grpData->setLayout(layData);
     layout->addWidget(grpData);
-    
+
     layout->setStretch(0, 0);
     layout->setStretch(1, 1);
     
@@ -654,13 +682,37 @@ QWidget* MainWindow::createGitPage()
     layCommit->addWidget(txtGitCommitMsg, 1);
     layOps->addLayout(layCommit);
     
-    // Buttons Grid
+    // Common actions grouped by scenario
     QGridLayout *layBtns = new QGridLayout();
-    layBtns->addWidget(new QLabel("远程仓库:"), 0, 0); layBtns->addWidget(cmbGitRemote, 0, 1, 1, 2);
-    layBtns->addWidget(btnGitAdd, 1, 0); layBtns->addWidget(btnGitCommit, 1, 1); layBtns->addWidget(btnGitStatus, 1, 2);
-    layBtns->addWidget(btnGitPush, 2, 0); layBtns->addWidget(btnGitPull, 2, 1); layBtns->addWidget(btnGitMerge, 2, 2);
-    layBtns->addWidget(btnGitCheckIgnore, 3, 0, 1, 1); layBtns->addWidget(btnGitOpenIgnore, 3, 1, 1, 2);
+    layBtns->addWidget(btnGitAdd, 0, 0);
+    layBtns->addWidget(btnGitCommit, 0, 1);
+    layBtns->addWidget(btnGitStatus, 0, 2);
+    layBtns->addWidget(btnGitDiff, 0, 3);
+    layBtns->addWidget(btnGitFetch, 0, 4);
+
+    layBtns->addWidget(new QLabel("远程仓库:"), 1, 0);
+    layBtns->addWidget(cmbGitRemote, 1, 1, 1, 2);
+    layBtns->addWidget(btnGitPush, 1, 3);
+    layBtns->addWidget(btnGitPull, 1, 4);
+    layBtns->addWidget(btnGitMerge, 1, 5);
+
+    layBtns->addWidget(btnGitStash, 2, 0);
+    layBtns->addWidget(btnGitStashPop, 2, 1);
+    layBtns->addWidget(btnGitCheckIgnore, 2, 2);
+    layBtns->addWidget(btnGitOpenIgnore, 2, 3);
     layOps->addLayout(layBtns);
+
+    QHBoxLayout *layReminder = new QHBoxLayout();
+    layReminder->addWidget(btnGitAutoDiffReminder);
+    layReminder->addWidget(btnGitSetDiffRule);
+    layReminder->addWidget(new QLabel("间隔:"));
+    layReminder->addWidget(spinGitDiffIntervalMinutes);
+    layReminder->addWidget(new QLabel("文件阈值:"));
+    layReminder->addWidget(spinGitDiffFileThreshold);
+    layReminder->addWidget(new QLabel("行数阈值:"));
+    layReminder->addWidget(spinGitDiffLineThreshold);
+    layReminder->addStretch();
+    layOps->addLayout(layReminder);
     
     // History Section
     QFrame *line = new QFrame();
@@ -708,6 +760,8 @@ QWidget* MainWindow::createGitPage()
     chartCpu = new MonitorChart();
     lblMemUsage = new QLabel("MEM: 0%");
     chartMem = new MonitorChart();
+    gitDiffReminderTimer = new QTimer(this);
+    gitDiffReminderTimer->setInterval(60 * 60 * 1000);
     
     layMon->addWidget(lblCpuUsage);
     layMon->addWidget(chartCpu);
@@ -981,6 +1035,7 @@ void MainWindow::createConnections()
     connect(tabRegisterMaps, &QTabWidget::currentChanged, this, &MainWindow::onRegisterTabChanged);
     connect(btnExportRegisterMap, &QPushButton::clicked, this, &MainWindow::onExportRegisterMapClicked);
     connect(btnImportRegisterMap, &QPushButton::clicked, this, &MainWindow::onImportRegisterMapClicked);
+    connect(btnImportStandardFile, &QPushButton::clicked, this, &MainWindow::onImportStandardFileClicked);
 
     connect(btnReadCoils, &QPushButton::clicked, this, &MainWindow::onReadCoilsClicked);
     connect(btnReadInputs, &QPushButton::clicked, this, &MainWindow::onReadInputsClicked);
@@ -993,6 +1048,13 @@ void MainWindow::createConnections()
     connect(btnWriteMultipleRegisters, &QPushButton::clicked, this, &MainWindow::onWriteMultipleRegistersClicked);
 
     connect(cmbDisplayFormat, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onDisplayFormatChanged);
+    connect(cmbWriteFormat, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
+        if (index == FormatFloat) {
+            spinWriteQuantity->setValue(2);
+        } else if (index == FormatDouble) {
+            spinWriteQuantity->setValue(4);
+        }
+    });
     connect(btnClearLog, &QPushButton::clicked, this, &MainWindow::onClearLogClicked);
 
     // Serial Connections
@@ -1019,6 +1081,20 @@ void MainWindow::createConnections()
     connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
+    connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
+    connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
+    connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
+    connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
+    connect(btnGitSetDiffRule, &QPushButton::clicked, this, &MainWindow::onGitSetDiffRuleClicked);
+    connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
+    connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
+    connect(spinGitDiffIntervalMinutes, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int minutes){
+        int ms = qMax(1, minutes) * 60 * 1000;
+        gitDiffReminderTimer->setInterval(ms);
+        if (btnGitAutoDiffReminder->isChecked()) {
+            txtGitLog->append(QString("[Diff提醒] 间隔已更新为 %1 分钟").arg(minutes));
+        }
+    });
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
@@ -1219,6 +1295,14 @@ void MainWindow::onSimTimerTick()
                 uint32_t val32 = (fmt == "32-bit Signed") ? (uint32_t)(int32_t)val : (uint32_t)val;
                 target->setRegister(t.addr, (quint16)(val32 >> 16));
                 target->setRegister(t.addr + 1, (quint16)(val32 & 0xFFFF));
+            } else if (fmt == "64-bit Float") {
+                double d = val;
+                quint64 raw = 0;
+                memcpy(&raw, &d, sizeof(double));
+                target->setRegister(t.addr,     (quint16)(raw & 0xFFFF));
+                target->setRegister(t.addr + 1, (quint16)((raw >> 16) & 0xFFFF));
+                target->setRegister(t.addr + 2, (quint16)((raw >> 32) & 0xFFFF));
+                target->setRegister(t.addr + 3, (quint16)((raw >> 48) & 0xFFFF));
             } else {
                 // 普通 16 位模式
                 quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
@@ -1228,21 +1312,28 @@ void MainWindow::onSimTimerTick()
             // 更新 UI 表格显示
             if (table && foundRow >= 0) {
                 refreshSimRowDisplay(table, foundRow);
-                // 如果是 32 位格式，还需要刷新下一行
-                if (fmt.startsWith("32-bit")) {
-                    refreshSimRowDisplay(table, foundRow + 1);
+                // 多字格式按首地址顺序转换，需要刷新其占用的连续行显示。
+                int wordCount = 1;
+                if (fmt.startsWith("64-bit")) wordCount = 4;
+                else if (fmt.startsWith("32-bit")) wordCount = 2;
+                for (int w = 1; w < wordCount; ++w) {
+                    refreshSimRowDisplay(table, foundRow + w);
                 }
                 
-                // 检查是否有其他 32 位格式也引用了这些地址（反向同步）
+                // 检查是否有其他多字格式也引用了这些地址（反向同步）
                 for (int k = 0; k < table->rowCount(); ++k) {
                     if (k == foundRow) continue;
                     QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
-                    if (!fmtk.startsWith("32-bit")) continue;
+                    if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit")) continue;
                     QTableWidgetItem *aItem = table->item(k, 0);
                     if (!aItem) continue;
                     quint16 a = (quint16)aItem->text().toUInt();
-                    if (a == t.addr || (quint16)(a + 1) == t.addr) {
-                        refreshSimRowDisplay(table, k);
+                    int wordsK = fmtk.startsWith("64-bit") ? 4 : 2;
+                    for (int w = 0; w < wordsK; ++w) {
+                        if ((quint16)(a + w) == t.addr) {
+                            refreshSimRowDisplay(table, k);
+                            break;
+                        }
                     }
                 }
             }
@@ -1522,9 +1613,46 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
     }
     
     txtResult->setText(QDateTime::currentDateTime().toString("[HH:mm:ss] ") + resultStr);
-    
-    if (!chkContinuousRead->isChecked())
-        logMessage("收到响应: " + resultStr);
+
+    // 构建详细日志信息：包含 SlaveID、寄存器类型（线圈/输入/保持/输入寄存器/写操作）、起始地址、数量及数据值
+    QString typeDesc;
+    if (funcCode == 1) typeDesc = "Coils (01)";
+    else if (funcCode == 2) typeDesc = "Discrete Inputs (02)";
+    else if (funcCode == 3) typeDesc = "Holding Registers (03)";
+    else if (funcCode == 4) typeDesc = "Input Registers (04)";
+    else if (funcCode == 5) typeDesc = "Write Single Coil (05)";
+    else if (funcCode == 6) typeDesc = "Write Single Register (06)";
+    else if (funcCode == 15) typeDesc = "Write Multiple Coils (15)";
+    else if (funcCode == 16) typeDesc = "Write Multiple Registers (16)";
+    else typeDesc = QString("Func %1").arg(funcCode);
+
+    QString detail;
+    // 对于读操作，使用 currentReadParams 保存的起始地址和数量
+    if (funcCode == 1 || funcCode == 2 || funcCode == 3 || funcCode == 4) {
+        detail = QString("Slave=%1, %2, Start=%3, Qty=%4, Values=[%5]")
+                    .arg(uId)
+                    .arg(typeDesc)
+                    .arg(currentReadParams.startAddress)
+                    .arg(currentReadParams.quantity)
+                    .arg(resultStr);
+    } else if (funcCode == 5 || funcCode == 6) {
+        // 写单项：响应回显地址和值
+        quint16 addrEcho = 0, valEcho = 0;
+        stream >> addrEcho >> valEcho;
+        detail = QString("Slave=%1, %2, Addr=%3, Value=%4")
+                    .arg(uId).arg(typeDesc).arg(addrEcho).arg(valEcho);
+    } else if (funcCode == 15 || funcCode == 16) {
+        // 写多项：响应回显起始地址和数量
+        quint16 startEcho = 0, qtyEcho = 0;
+        stream >> startEcho >> qtyEcho;
+        detail = QString("Slave=%1, %2, Start=%3, Qty=%4")
+                    .arg(uId).arg(typeDesc).arg(startEcho).arg(qtyEcho);
+    } else {
+        detail = QString("Slave=%1, %2, Details=%3").arg(uId).arg(typeDesc).arg(resultStr);
+    }
+
+    // 始终记录详细日志（包括连续读取场景，以便审计）
+    logMessage(QString("收到响应: %1").arg(detail));
 }
 
 void MainWindow::onReadCoilsClicked() {
@@ -1549,20 +1677,71 @@ void MainWindow::onWriteSingleCoilClicked() {
     sendModbusRequest(5, spinWriteStartAddr->value(), 1, v);
 }
 void MainWindow::onWriteSingleRegisterClicked() {
-    QVector<quint16> v; v << spinWriteValue->value();
+    quint16 val = 0;
+    QString txt = spinWriteValue->cleanText();
+    int format = cmbWriteFormat->currentIndex();
+
+    if (format == FormatHex) {
+        val = txt.toUShort(nullptr, 16);
+    } else if (format == FormatBinary) {
+        val = txt.toUShort(nullptr, 2);
+    } else if (format == FormatFloat || format == FormatDouble) {
+        // 对于单寄存器写入，浮点数通常没有意义，但我们可以尝试处理第一个寄存器
+        float f = txt.toFloat();
+        quint32 raw;
+        memcpy(&raw, &f, 4);
+        val = (quint16)(raw >> 16); // 取高16位作为示例，或者直接按十进制处理
+        if (format == FormatDecimal) val = txt.toUShort();
+    } else {
+        val = (quint16)spinWriteValue->value();
+    }
+
+    QVector<quint16> v; v << val;
     sendModbusRequest(6, spinWriteStartAddr->value(), 1, v);
 }
 void MainWindow::onWriteMultipleCoilsClicked() {
     // Basic CSV parsing needed here, simplifying for brevity
-     QStringList items = txtWriteValues->text().split(',');
+     QStringList items = txtWriteValues->text().split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
      QVector<quint16> vals;
      for(auto s : items) vals << (s.toInt() > 0 ? 1 : 0);
      sendModbusRequest(15, spinWriteStartAddr->value(), vals.size(), vals);
 }
 void MainWindow::onWriteMultipleRegistersClicked() {
-     QStringList items = txtWriteValues->text().split(',');
+     QStringList items = txtWriteValues->text().split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
      QVector<quint16> vals;
-     for(auto s : items) vals << s.toUShort();
+     int format = cmbWriteFormat->currentIndex();
+
+     if (format == FormatFloat) {
+         for (const QString &s : items) {
+             float f = s.toFloat();
+             quint32 raw;
+             memcpy(&raw, &f, 4);
+             vals << (quint16)(raw >> 16); // High
+             vals << (quint16)(raw & 0xFFFF); // Low
+         }
+     } else if (format == FormatDouble) {
+         for (const QString &s : items) {
+             double d = s.toDouble();
+             quint64 raw;
+             memcpy(&raw, &d, 8);
+             vals << (quint16)(raw & 0xFFFF);         // r1
+             vals << (quint16)((raw >> 16) & 0xFFFF); // r2
+             vals << (quint16)((raw >> 32) & 0xFFFF); // r3
+             vals << (quint16)((raw >> 48) & 0xFFFF); // r4
+         }
+     } else {
+         for(auto s : items) {
+             if (format == FormatHex) {
+                 vals << s.toUShort(nullptr, 16);
+             } else if (format == FormatBinary) {
+                 vals << s.toUShort(nullptr, 2);
+             } else {
+                 vals << s.toUShort();
+             }
+         }
+     }
+     
+     if (vals.isEmpty()) return;
      sendModbusRequest(16, spinWriteStartAddr->value(), vals.size(), vals);
 }
 
@@ -2061,13 +2240,6 @@ void MainWindow::onSimImportCsvClicked()
         // 更新格式和值
         simTableFormats[table][row] = fmt;
         
-        // 特殊处理 32-bit 格式的行锁定逻辑
-        if (fmt.startsWith("32-bit") && row + 1 < table->rowCount()) {
-            int lockedRow = row + 1;
-            simDisabledRowsOwner[table][lockedRow] = row;
-            setSimRowEnabled(table, lockedRow, false);
-        }
-        
         // 尝试解析并设置寄存器值
         bool ok = false;
         if (fmt == "32-bit Float") {
@@ -2076,6 +2248,16 @@ void MainWindow::onSimImportCsvClicked()
             uint32_t v32 = valStr.toUInt(&ok);
             slave->setRegister(addr, (quint16)(v32 >> 16));
             slave->setRegister(addr + 1, (quint16)(v32 & 0xFFFF));
+        } else if (fmt == "64-bit Float") {
+            double d = valStr.toDouble(&ok);
+            if (ok) {
+                quint64 raw = 0;
+                memcpy(&raw, &d, sizeof(double));
+                slave->setRegister(addr,     (quint16)(raw & 0xFFFF));
+                slave->setRegister(addr + 1, (quint16)((raw >> 16) & 0xFFFF));
+                slave->setRegister(addr + 2, (quint16)((raw >> 32) & 0xFFFF));
+                slave->setRegister(addr + 3, (quint16)((raw >> 48) & 0xFFFF));
+            }
         } else {
             slave->setRegister(addr, (quint16)valStr.toUInt(&ok));
         }
@@ -2229,12 +2411,16 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
                 refreshSimRowDisplay(table, r);
                 for (int k = 0; k < table->rowCount(); ++k) {
                     QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
-                    if (!fmtk.startsWith("32-bit")) continue;
+                    if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit")) continue;
                     QTableWidgetItem *aItem = table->item(k, 0);
                     if (!aItem) continue;
                     quint16 a = (quint16)aItem->text().toUInt();
-                    if (a == addr || (quint16)(a + 1) == addr) {
-                        refreshSimRowDisplay(table, k);
+                    int words = fmtk.startsWith("64-bit") ? 4 : 2;
+                    for (int w = 0; w < words; ++w) {
+                        if ((quint16)(a + w) == addr) {
+                            refreshSimRowDisplay(table, k);
+                            break;
+                        }
                     }
                 }
                 break;
@@ -2593,6 +2779,209 @@ void MainWindow::onGitRefreshBranchesClicked() {
     txtGitLog->append("<font color='gray'>已刷新本地及远程分支（红色为远程分支）。</font>");
 }
 
+void MainWindow::onGitDiffClicked() {
+    // 显示当前工作区与暂存区差异；如果需要可扩展为接受参数（如 --staged）
+    runGitCommand(QStringList() << "diff");
+}
+
+void MainWindow::onGitFetchClicked() {
+    runGitCommand(QStringList() << "fetch" << "--prune");
+}
+
+void MainWindow::onGitStashClicked() {
+    runGitCommand(QStringList() << "stash");
+}
+
+void MainWindow::onGitStashPopClicked() {
+    runGitCommand(QStringList() << "stash" << "pop");
+}
+
+void MainWindow::onGitSetDiffRuleClicked() {
+    int fileThreshold = spinGitDiffFileThreshold->value();
+    int lineThreshold = spinGitDiffLineThreshold->value();
+
+    QStringList options;
+    options << "只要有改动就提醒"
+            << QString("改动文件数 >= %1 时提醒").arg(fileThreshold)
+            << QString("新增+删除总行数 >= %1 时提醒").arg(lineThreshold)
+            << "涉及配置文件改动时提醒"
+            << "涉及源码文件改动时提醒";
+
+    int defaultIndex = (gitDiffReminderRule >= 0 && gitDiffReminderRule < options.size()) ? gitDiffReminderRule : 0;
+    bool ok = false;
+    QString selected = QInputDialog::getItem(this,
+                                             "Diff 提醒标准",
+                                             "请选择每小时检查 git diff 的判断标准:",
+                                             options,
+                                             defaultIndex,
+                                             false,
+                                             &ok);
+    if (!ok) return;
+
+    gitDiffReminderRule = options.indexOf(selected);
+    txtGitLog->append(QString("[Diff提醒] 已设置标准: %1").arg(selected));
+}
+
+void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
+    if (checked) {
+        if (gitDiffReminderRule < 0) {
+            onGitSetDiffRuleClicked();
+        }
+
+        if (gitDiffReminderRule < 0) {
+            btnGitAutoDiffReminder->blockSignals(true);
+            btnGitAutoDiffReminder->setChecked(false);
+            btnGitAutoDiffReminder->blockSignals(false);
+            return;
+        }
+
+        btnGitAutoDiffReminder->setText("关闭每小时Diff提醒");
+    gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
+        gitDiffReminderTimer->start();
+    txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
+                  .arg(spinGitDiffIntervalMinutes->value()));
+        onGitAutoDiffReminderTick();
+    } else {
+        gitDiffReminderTimer->stop();
+        btnGitAutoDiffReminder->setText("开启每小时Diff提醒");
+        txtGitLog->append("[Diff提醒] 已关闭。");
+    }
+}
+
+void MainWindow::onGitAutoDiffReminderTick() {
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty() || !QDir(workDir).exists()) {
+        txtGitLog->append("[Diff提醒] 失败: Git 仓库目录无效，已停止提醒。");
+        gitDiffReminderTimer->stop();
+        if (btnGitAutoDiffReminder->isChecked()) {
+            btnGitAutoDiffReminder->blockSignals(true);
+            btnGitAutoDiffReminder->setChecked(false);
+            btnGitAutoDiffReminder->setText("开启每小时Diff提醒");
+            btnGitAutoDiffReminder->blockSignals(false);
+        }
+        return;
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start("git.exe", QStringList() << "diff" << "--numstat");
+#else
+    process.start("git", QStringList() << "diff" << "--numstat");
+#endif
+
+    if (!process.waitForFinished(15000)) {
+        txtGitLog->append("[Diff提醒] git diff --numstat 执行超时。");
+        return;
+    }
+
+#ifdef Q_OS_WIN
+    QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
+    QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+#else
+    QStringList lines = output.split('\n', QString::SkipEmptyParts);
+#endif
+
+    int changedFiles = 0;
+    int addedLines = 0;
+    int removedLines = 0;
+    int sourceTouched = 0;
+    int configTouched = 0;
+    int binaryTouched = 0;
+
+    for (const QString &rawLine : lines) {
+        QString line = rawLine;
+        if (line.endsWith('\r')) line.chop(1);
+        QStringList parts = line.split('\t');
+        if (parts.size() < 3) continue;
+
+        changedFiles++;
+
+        bool okAdd = false;
+        bool okDel = false;
+        int add = parts[0].toInt(&okAdd);
+        int del = parts[1].toInt(&okDel);
+        if (okAdd) addedLines += add; else binaryTouched++;
+        if (okDel) removedLines += del; else binaryTouched++;
+
+        QString path = parts.mid(2).join("\t").toLower();
+        if (path.endsWith(".cpp") || path.endsWith(".c") || path.endsWith(".h") ||
+            path.endsWith(".hpp") || path.endsWith(".cc") || path.endsWith(".py") ||
+            path.endsWith(".js") || path.endsWith(".ts") || path.endsWith(".java")) {
+            sourceTouched++;
+        }
+        if (path.endsWith(".json") || path.endsWith(".yaml") || path.endsWith(".yml") ||
+            path.endsWith(".ini") || path.endsWith(".toml") || path.endsWith(".conf") ||
+            path.endsWith(".pro") || path.contains("cmakelists.txt")) {
+            configTouched++;
+        }
+    }
+
+    if (changedFiles <= 0) {
+        txtGitLog->append("[Diff提醒] 当前无未提交改动。");
+        return;
+    }
+
+    int totalLines = addedLines + removedLines;
+    int fileThreshold = spinGitDiffFileThreshold->value();
+    int lineThreshold = spinGitDiffLineThreshold->value();
+    txtGitLog->append(QString("[Diff分析] 文件:%1, +%2/-%3, 总变更:%4, 源码文件:%5, 配置文件:%6, 二进制变更项:%7")
+                          .arg(changedFiles)
+                          .arg(addedLines)
+                          .arg(removedLines)
+                          .arg(totalLines)
+                          .arg(sourceTouched)
+                          .arg(configTouched)
+                          .arg(binaryTouched));
+
+    bool shouldRemind = false;
+    QString ruleDesc;
+    switch (gitDiffReminderRule) {
+    case 0:
+        shouldRemind = changedFiles > 0;
+        ruleDesc = "只要有改动就提醒";
+        break;
+    case 1:
+        shouldRemind = changedFiles >= fileThreshold;
+        ruleDesc = QString("改动文件数 >= %1").arg(fileThreshold);
+        break;
+    case 2:
+        shouldRemind = totalLines >= lineThreshold;
+        ruleDesc = QString("新增+删除总行数 >= %1").arg(lineThreshold);
+        break;
+    case 3:
+        shouldRemind = configTouched > 0;
+        ruleDesc = "涉及配置文件改动";
+        break;
+    case 4:
+        shouldRemind = sourceTouched > 0;
+        ruleDesc = "涉及源码文件改动";
+        break;
+    default:
+        shouldRemind = false;
+        ruleDesc = "未设置";
+        break;
+    }
+
+    if (!shouldRemind) return;
+
+    QString tips = QString("检测到改动达到提醒标准：%1\n\n"
+                           "建议执行存档操作（如 git commit / git tag / 导出补丁）以避免修改丢失。\n"
+                           "统计: 文件 %2 个, +%3/-%4, 总变更 %5 行。")
+                       .arg(ruleDesc)
+                       .arg(changedFiles)
+                       .arg(addedLines)
+                       .arg(removedLines)
+                       .arg(totalLines);
+    QMessageBox::information(this, "Git 存档提醒", tips);
+    txtGitLog->append(QString("[Diff提醒] 已触发存档提醒，标准: %1").arg(ruleDesc));
+}
+
 void MainWindow::onGitSyncRemoteClicked() {
     QString branch = cmbGitBranches->currentText().trimmed();
     if (branch.isEmpty()) return;
@@ -2866,7 +3255,8 @@ void MainWindow::onGitCheckIgnoreClicked() {
                 {"build/", "build/ (默认构建目录)"},
                 {"build_*/", "build_*/ (通配构建目录)"},
                 {"*.o", "*.o (中间对象文件)"},
-                {"*.user", "*.user (用户本地配置)"}
+                {"*.user", "*.user (用户本地配置)"},
+                {"*.pro.user", "*.pro.user (Qt .pro 文件的本地用户配置，如 ModbusTCPAssistant.pro.user)"}
             };
 
             QStringList missingPatterns;
@@ -3033,6 +3423,46 @@ void MainWindow::onScpTransferClicked() {
     }
 
     QString password = txtScpPassword->text();
+
+    // 每次“搜索并传输”前自动执行 add + commit，确保代码状态可追溯。
+    runGitCommand(QStringList() << "add" << ".");
+
+    if (spinGitDiffIntervalMinutes && spinGitDiffIntervalMinutes->value() < 10) {
+        if (QMessageBox::question(this,
+                                  "传输前检查",
+                                  "当前间隔设置小于10分钟，是否先执行一次软回退 (git reset --soft HEAD^)？",
+                                  QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+            runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
+            onGitRefreshLogClicked();
+        }
+    }
+
+    bool ok = false;
+    QString defaultMsg = txtGitCommitMsg->text().trimmed();
+    QString commitMsg = QInputDialog::getText(
+        this,
+        "Git 提交信息",
+        "请输入本次传输前的提交信息:",
+        QLineEdit::Normal,
+        defaultMsg,
+        &ok
+    ).trimmed();
+
+    if (!ok || commitMsg.isEmpty()) {
+        txtGitLog->append("已取消传输：未提供提交信息，未执行 git commit。");
+        return;
+    }
+
+    if (QMessageBox::question(this,
+                              "确认提交",
+                              QString("确认执行 git commit -m \"%1\" 并继续传输吗？").arg(commitMsg),
+                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        txtGitLog->append("已取消传输：用户取消 git commit。");
+        return;
+    }
+
+    txtGitCommitMsg->setText(commitMsg);
+    runGitCommand(QStringList() << "commit" << "-m" << commitMsg);
 
     // 递归查找目录下最深层、最新的可执行文件
     QString latestFile;
@@ -3623,18 +4053,26 @@ void MainWindow::loadGitHistory() {
 
 void MainWindow::setupRegisterTable(QTableWidget *table) {
     if(!table) return;
-    table->setColumnCount(2);
-    table->setHorizontalHeaderLabels(QStringList() << "地址" << "注释");
+    table->setColumnCount(3);
+    table->setHorizontalHeaderLabels(QStringList() << "地址" << "注释" << "寄存器格式");
     table->horizontalHeader()->setStretchLastSection(true);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+    table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(table, &QTableWidget::customContextMenuRequested, this, &MainWindow::onRegisterMapContextMenu);
     
     // Add some default rows for testing
-    table->setRowCount(50);
+    table->setRowCount(51);
     for(int i=0; i<50; i++) {
         table->setItem(i, 0, new QTableWidgetItem(QString::number(i)));
         table->setItem(i, 1, new QTableWidgetItem(""));
+        table->setItem(i, 2, new QTableWidgetItem(QString::number(i)));
     }
+
+    // Keep one blank row at bottom for direct data entry.
+    table->setItem(50, 0, new QTableWidgetItem(""));
+    table->setItem(50, 1, new QTableWidgetItem(""));
+    table->setItem(50, 2, new QTableWidgetItem(""));
 }
 
 void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
@@ -3695,6 +4133,15 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
             memcpy(&f, &val32, 4);
             display = QString::number(f, 'f', 2);
         }
+    } else if (fmt == "64-bit Float") {
+        quint64 raw = 0;
+        raw |= (quint64)target->getRegister(addr);
+        raw |= ((quint64)target->getRegister(addr + 1) << 16);
+        raw |= ((quint64)target->getRegister(addr + 2) << 32);
+        raw |= ((quint64)target->getRegister(addr + 3) << 48);
+        double d = 0.0;
+        memcpy(&d, &raw, sizeof(double));
+        display = QString::number(d, 'f', 6);
     }
     if (display.isEmpty()) display = QString::number(val);
 
@@ -3747,7 +4194,7 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             float f = valStr.toFloat(&ok);
             if (ok) {
                 target->setFloat(addr, f);
-                // 强制刷新当前行和下一行（因为 setFloat 修改了两个寄存器）
+                // 只需要填写首寄存器，后续寄存器按地址顺序自动参与转换。
                 refreshSimRowDisplay(table, row);
                 refreshSimRowDisplay(table, row + 1);
             }
@@ -3763,6 +4210,20 @@ void MainWindow::onSimTableRowChanged(int row, int column)
                 refreshSimRowDisplay(table, row);
                 refreshSimRowDisplay(table, row + 1);
                 ok = true; // 标记为已处理
+            }
+        } else if (fmt == "64-bit Float") {
+            double d = valStr.toDouble(&ok);
+            if (ok) {
+                quint64 raw = 0;
+                memcpy(&raw, &d, sizeof(double));
+                target->setRegister(addr,     (quint16)(raw & 0xFFFF));
+                target->setRegister(addr + 1, (quint16)((raw >> 16) & 0xFFFF));
+                target->setRegister(addr + 2, (quint16)((raw >> 32) & 0xFFFF));
+                target->setRegister(addr + 3, (quint16)((raw >> 48) & 0xFFFF));
+                refreshSimRowDisplay(table, row);
+                refreshSimRowDisplay(table, row + 1);
+                refreshSimRowDisplay(table, row + 2);
+                refreshSimRowDisplay(table, row + 3);
             }
         } else {
             // 原有的 16 位逻辑
@@ -3781,7 +4242,7 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             }
         }
 
-        if (!ok && fmt != "32-bit Float" && !fmt.startsWith("32-bit")) {
+        if (!ok && fmt != "32-bit Float" && fmt != "64-bit Float" && !fmt.startsWith("32-bit")) {
             // 如果解析失败且不是32位格式，还原显示
             refreshSimRowDisplay(table, row);
         }
@@ -3915,9 +4376,135 @@ void MainWindow::onRegisterTabChanged(int index) {
     }
 }
 
+bool MainWindow::isRegisterMapRowEmpty(const QTableWidget *table, int row) const {
+    if (!table || row < 0 || row >= table->rowCount()) return true;
+
+    QString addr = table->item(row, 0) ? table->item(row, 0)->text().trimmed() : "";
+    QString cmt = table->item(row, 1) ? table->item(row, 1)->text().trimmed() : "";
+    QString regFmt = table->item(row, 2) ? table->item(row, 2)->text().trimmed() : "";
+    return addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty();
+}
+
+void MainWindow::ensureRegisterMapEditableTailRow(QTableWidget *table) {
+    if (!table) return;
+    if (table->rowCount() <= 0) table->setRowCount(1);
+
+    table->blockSignals(true);
+
+    int rows = table->rowCount();
+    while (rows > 1 && isRegisterMapRowEmpty(table, rows - 1) && isRegisterMapRowEmpty(table, rows - 2)) {
+        table->removeRow(rows - 1);
+        rows = table->rowCount();
+    }
+
+    rows = table->rowCount();
+    if (rows <= 0 || !isRegisterMapRowEmpty(table, rows - 1)) {
+        int newRow = rows;
+        table->insertRow(newRow);
+        table->setItem(newRow, 0, new QTableWidgetItem(""));
+        table->setItem(newRow, 1, new QTableWidgetItem(""));
+        table->setItem(newRow, 2, new QTableWidgetItem(""));
+    } else {
+        if (!table->item(rows - 1, 0)) table->setItem(rows - 1, 0, new QTableWidgetItem(""));
+        if (!table->item(rows - 1, 1)) table->setItem(rows - 1, 1, new QTableWidgetItem(""));
+        if (!table->item(rows - 1, 2)) table->setItem(rows - 1, 2, new QTableWidgetItem(""));
+    }
+
+    table->blockSignals(false);
+}
+
+void MainWindow::copyRegisterMapSelection(QTableWidget *table) {
+    if (!table) return;
+
+    QList<QTableWidgetSelectionRange> ranges = table->selectedRanges();
+    if (ranges.isEmpty()) return;
+
+    QTableWidgetSelectionRange r = ranges.first();
+    QStringList lines;
+    for (int row = r.topRow(); row <= r.bottomRow(); ++row) {
+        QStringList cols;
+        for (int col = r.leftColumn(); col <= r.rightColumn(); ++col) {
+            QTableWidgetItem *item = table->item(row, col);
+            cols << (item ? item->text() : "");
+        }
+        lines << cols.join("\t");
+    }
+
+    QGuiApplication::clipboard()->setText(lines.join("\n"));
+}
+
+void MainWindow::pasteRegisterMapFromClipboard(QTableWidget *table, int startRow, int startColumn) {
+    if (!table) return;
+    if (startColumn < 0) startColumn = 0;
+    if (startColumn >= table->columnCount()) return;
+
+    QString text = QGuiApplication::clipboard()->text();
+    if (text.isEmpty()) return;
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    QStringList rows = text.split('\n', Qt::SkipEmptyParts);
+#else
+    QStringList rows = text.split('\n', QString::SkipEmptyParts);
+#endif
+    if (rows.isEmpty()) return;
+
+    table->blockSignals(true);
+    for (int r = 0; r < rows.size(); ++r) {
+        QString rowText = rows[r];
+        if (rowText.endsWith('\r')) rowText.chop(1);
+        QStringList cols = rowText.split('\t');
+
+        int targetRow = startRow + r;
+        if (targetRow >= table->rowCount()) {
+            table->setRowCount(targetRow + 1);
+        }
+
+        for (int c = 0; c < cols.size(); ++c) {
+            int targetCol = startColumn + c;
+            if (targetCol >= table->columnCount()) break;
+            if (!table->item(targetRow, targetCol)) {
+                table->setItem(targetRow, targetCol, new QTableWidgetItem());
+            }
+            table->item(targetRow, targetCol)->setText(cols[c]);
+        }
+    }
+    table->blockSignals(false);
+
+    ensureRegisterMapEditableTailRow(table);
+    syncSimulatorTablesFromMaps();
+}
+
+void MainWindow::onRegisterMapContextMenu(const QPoint &pos) {
+    QTableWidget *table = qobject_cast<QTableWidget*>(sender());
+    if (!table) return;
+
+    QModelIndex index = table->indexAt(pos);
+    int targetRow = index.isValid() ? index.row() : table->currentRow();
+    int targetCol = index.isValid() ? index.column() : table->currentColumn();
+    if (targetRow < 0) targetRow = table->rowCount() > 0 ? table->rowCount() - 1 : 0;
+    if (targetCol < 0) targetCol = 0;
+
+    QMenu menu(this);
+    QAction *copyAction = menu.addAction("复制");
+    QAction *pasteAction = menu.addAction("粘贴");
+
+    copyAction->setEnabled(!table->selectedRanges().isEmpty());
+
+    QAction *selected = menu.exec(table->viewport()->mapToGlobal(pos));
+    if (selected == copyAction) {
+        copyRegisterMapSelection(table);
+    } else if (selected == pasteAction) {
+        pasteRegisterMapFromClipboard(table, targetRow, targetCol);
+    }
+}
+
 void MainWindow::onRegisterTableChanged(int row, int column) {
     Q_UNUSED(row);
     Q_UNUSED(column);
+    QTableWidget *table = qobject_cast<QTableWidget*>(sender());
+    if (table) {
+        ensureRegisterMapEditableTailRow(table);
+    }
     syncSimulatorTablesFromMaps();
 }
 
@@ -3931,8 +4518,10 @@ void MainWindow::saveRegisterTables() {
             settings.setArrayIndex(i);
             QTableWidgetItem *addrItem = table->item(i, 0);
             QTableWidgetItem *cmtItem = table->item(i, 1);
+            QTableWidgetItem *regFmtItem = table->item(i, 2);
             settings.setValue("addr", addrItem ? addrItem->text() : "");
             settings.setValue("cmt", cmtItem ? cmtItem->text() : "");
+            settings.setValue("regfmt", regFmtItem ? regFmtItem->text() : "");
         }
         settings.endArray();
     };
@@ -3950,24 +4539,33 @@ void MainWindow::loadRegisterTables() {
             // Adjust row count if needed, or keep fixed 50?
             // User might want dynamic, but let's stick to max(50, size)
             if (size > table->rowCount()) table->setRowCount(size);
+
+            table->blockSignals(true);
             
             for (int i = 0; i < size; ++i) {
                 settings.setArrayIndex(i);
                 QString addr = settings.value("addr").toString();
                 QString cmt = settings.value("cmt").toString();
+                QString regfmt = settings.value("regfmt").toString();
                 
                 if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem());
                 if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem());
+                if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem());
                 
                 table->item(i, 0)->setText(addr);
                 table->item(i, 1)->setText(cmt);
+                table->item(i, 2)->setText(regfmt);
             }
+
+            table->blockSignals(false);
         }
         settings.endArray();
     };
 
     loadTable(tblAGV, "Map_AGV");
     loadTable(tblRobot, "Map_Robot");
+    ensureRegisterMapEditableTailRow(tblAGV);
+    ensureRegisterMapEditableTailRow(tblRobot);
     syncSimulatorTablesFromMaps();
 }
 
@@ -3983,22 +4581,26 @@ void MainWindow::onExportRegisterMapClicked() {
 
     QTextStream out(&f);
     out.setGenerateByteOrderMark(true); // 保证 Excel 正常打开中文
-    out << "Tab,Address,Comment\n";
+    out << "Tab,Address,Comment,RegisterFormat\n";
 
     auto exportTable = [&](QTableWidget *table, const QString &tabName) {
         if (!table) return;
         for (int i = 0; i < table->rowCount(); ++i) {
             QString addr = table->item(i, 0) ? table->item(i, 0)->text() : "";
             QString cmt = table->item(i, 1) ? table->item(i, 1)->text() : "";
+            QString regFmt = table->item(i, 2) ? table->item(i, 2)->text() : "";
             
-            if (addr.isEmpty() && cmt.isEmpty()) continue;
+            if (addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty()) continue;
             
             // CSV 规范：如果内容包含逗号或双引号，需要用双引号包围，双引号需转义为两个双引号
             if (cmt.contains(",") || cmt.contains("\"")) {
                 cmt = "\"" + cmt.replace("\"", "\"\"") + "\"";
             }
+            if (regFmt.contains(",") || regFmt.contains("\"")) {
+                regFmt = "\"" + regFmt.replace("\"", "\"\"") + "\"";
+            }
             
-            out << tabName << "," << addr << "," << cmt << "\n";
+            out << tabName << "," << addr << "," << cmt << "," << regFmt << "\n";
         }
     };
 
@@ -4025,8 +4627,12 @@ void MainWindow::onImportRegisterMapClicked() {
     auto clearTable = [&](QTableWidget* table) {
         table->blockSignals(true);
         for(int i=0; i<table->rowCount(); i++) {
-            if(table->item(i, 0)) table->item(i, 0)->setText(QString::number(i));
-            if(table->item(i, 1)) table->item(i, 1)->setText("");
+            if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem());
+            if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem());
+            if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem());
+            table->item(i, 0)->setText("");
+            table->item(i, 1)->setText("");
+            table->item(i, 2)->setText("");
         }
         table->blockSignals(false);
     };
@@ -4069,6 +4675,7 @@ void MainWindow::onImportRegisterMapClicked() {
         QString tabStr = parts[0].trimmed().toLower();
         QString addr = parts[1].trimmed();
         QString cmt = parts[2].trimmed();
+        QString regFmt = parts.size() > 3 ? parts[3].trimmed() : addr;
 
         QTableWidget *table = (tabStr == "robot" || tabStr == "机器人") ? tblRobot : tblAGV;
         QString key = (tabStr == "robot" || tabStr == "机器人") ? "robot" : "agv";
@@ -4079,12 +4686,16 @@ void MainWindow::onImportRegisterMapClicked() {
         table->blockSignals(true);
         if (!table->item(row, 0)) table->setItem(row, 0, new QTableWidgetItem());
         if (!table->item(row, 1)) table->setItem(row, 1, new QTableWidgetItem());
+        if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
         table->item(row, 0)->setText(addr);
         table->item(row, 1)->setText(cmt);
+        table->item(row, 2)->setText(regFmt);
         table->blockSignals(false);
     }
 
     f.close();
+    ensureRegisterMapEditableTailRow(tblAGV);
+    ensureRegisterMapEditableTailRow(tblRobot);
     saveRegisterTables();
     syncSimulatorTablesFromMaps();
     QMessageBox::information(this, "成功", "地址映射表 CSV 导入成功。");
@@ -4097,56 +4708,21 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     if (!index.isValid()) return;
     int row = index.row();
 
-    if (simDisabledRowsOwner.value(table).contains(row)) {
-        int owner = simDisabledRowsOwner.value(table).value(row);
-        if (txtSimLog) {
-            txtSimLog->append(QString("行 %1 已被行 %2 的 32-bit 格式占用，请先修改行 %2 的格式").arg(row).arg(owner));
-        }
-        return;
-    }
-
     QMenu menu(this);
     
     // Format Submenu
     QMenu *formatMenu = menu.addMenu("Format");
-    QStringList formats = {"Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary"};
+    QStringList formats = {
+        "Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary",
+        "32-bit Signed", "32-bit Unsigned", "32-bit Float", "64-bit Float"
+    };
     for (const QString &fmt : formats) {
         QAction *a = formatMenu->addAction(fmt);
         connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
-            QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
-            if (oldFmt.startsWith("32-bit")) {
-                int lockedRow = row + 1;
-                simDisabledRowsOwner[table].remove(lockedRow);
-                setSimRowEnabled(table, lockedRow, true);
-                refreshSimRowDisplay(table, lockedRow);
-            }
             simTableFormats[table][row] = fmt;
             refreshSimRowDisplay(table, row);
         });
     }
-    formatMenu->addSeparator();
-    QAction *af32 = formatMenu->addAction("32-bit Float");
-    connect(af32, &QAction::triggered, this, [this, table, row](){ 
-        QString fmt = "32-bit Float";
-        if (row + 1 >= table->rowCount()) {
-            if (txtSimLog) txtSimLog->append(QString("行 %1 无法设置 %2：缺少下一行").arg(row).arg(fmt));
-            return;
-        }
-
-        QString oldFmt = simTableFormats.value(table).value(row, "Unsigned");
-        if (oldFmt.startsWith("32-bit")) {
-            int prevLockedRow = row + 1;
-            simDisabledRowsOwner[table].remove(prevLockedRow);
-            setSimRowEnabled(table, prevLockedRow, true);
-            refreshSimRowDisplay(table, prevLockedRow);
-        }
-
-        simTableFormats[table][row] = fmt;
-        int lockedRow = row + 1;
-        simDisabledRowsOwner[table][lockedRow] = row;
-        setSimRowEnabled(table, lockedRow, false);
-        refreshSimRowDisplay(table, row);
-    });
 
     menu.addSeparator();
     QAction *actBit = menu.addAction("bit Edit");
@@ -4330,10 +4906,6 @@ void MainWindow::loadAutoScene()
                 int row = it.key().toInt();
                 QString fmt = it.value().toString();
                 simTableFormats[table][row] = fmt;
-                if (fmt.startsWith("32-bit") && row+1 < table->rowCount()) {
-                    simDisabledRowsOwner[table][row+1] = row;
-                    setSimRowEnabled(table, row+1, false);
-                }
                 refreshSimRowDisplay(table, row);
             }
         }
@@ -4453,6 +5025,255 @@ QWidget* MainWindow::createTcpAssistantPage()
     layout->setStretch(1, 1);
     
     return page;
+}
+
+void MainWindow::onImportStandardFileClicked()
+{
+    QString fn = QFileDialog::getOpenFileName(this,
+                                              "导入标准格式文件",
+                                              QString(),
+                                              "CSV Files (*.csv);;All Files (*)");
+    if (fn.isEmpty()) return;
+
+    QFile f(fn);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "导入失败", "无法打开 CSV 文件。");
+        return;
+    }
+
+    QTextStream in(&f);
+    in.setCodec("UTF-8");
+
+    auto parseCsvLine = [](const QString &line) {
+        QStringList parts;
+        bool inQuotes = false;
+        QString field;
+        for (int i = 0; i < line.length(); ++i) {
+            QChar c = line[i];
+            if (c == '"') {
+                if (inQuotes && i + 1 < line.length() && line[i + 1] == '"') {
+                    field += '"';
+                    ++i;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (c == ',' && !inQuotes) {
+                parts.append(field.trimmed());
+                field.clear();
+            } else {
+                field += c;
+            }
+        }
+        parts.append(field.trimmed());
+        return parts;
+    };
+
+    int nameCol = -1;
+    int addrCol = -1;
+    int typeCol = -1;
+    int cmtCol = -1;
+    int deviceCol = -1;
+    int tabCol = -1;
+    bool foundHeader = false;
+
+    QVector<QJsonObject> rows;
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        if (line.trimmed().isEmpty()) continue;
+        QStringList cols = parseCsvLine(line);
+
+        if (!foundHeader) {
+            QStringList lowerCols;
+            for (const QString &c : cols) lowerCols << c.trimmed().toLower();
+            nameCol = lowerCols.indexOf("name");
+            addrCol = lowerCols.indexOf("address");
+            typeCol = lowerCols.indexOf("datatype");
+            cmtCol = lowerCols.indexOf("comment");
+            deviceCol = lowerCols.indexOf("device");
+            tabCol = lowerCols.indexOf("tab");
+            if (tabCol < 0) tabCol = lowerCols.indexOf("sheet");
+            if (tabCol < 0) tabCol = lowerCols.indexOf("worksheet");
+            if (nameCol >= 0 && addrCol >= 0 && typeCol >= 0 && cmtCol >= 0) {
+                foundHeader = true;
+            }
+            continue;
+        }
+
+        QJsonObject item;
+        item.insert("Name", nameCol < cols.size() ? cols[nameCol] : "");
+        item.insert("Address", addrCol < cols.size() ? cols[addrCol] : "");
+        item.insert("DataType", typeCol < cols.size() ? cols[typeCol] : "");
+        item.insert("Comment", cmtCol < cols.size() ? cols[cmtCol] : "");
+        item.insert("Device", deviceCol >= 0 && deviceCol < cols.size() ? cols[deviceCol] : "");
+        item.insert("Tab", tabCol >= 0 && tabCol < cols.size() ? cols[tabCol] : "");
+        if (!item.value("Address").toString().trimmed().isEmpty()) {
+            rows.push_back(item);
+        }
+    }
+    f.close();
+
+    if (!foundHeader) {
+        QMessageBox::warning(this, "导入失败", "CSV 中未找到 Name/Address/DataType/Comment 表头。");
+        return;
+    }
+    if (rows.isEmpty()) {
+        QMessageBox::information(this, "导入结果", "未读取到可导入的数据行。");
+        return;
+    }
+
+    struct MergedRow {
+        QString address;
+        QString dataType;
+        QString comment;
+        QString registerFormat;
+    };
+
+    auto buildAddress = [](const QString &addrRaw, QString &finalAddr, QString &bitCommentPart) -> bool {
+        QString raw = addrRaw.trimmed();
+        QRegularExpression reMw("%MW\\s*([0-9]+)", QRegularExpression::CaseInsensitiveOption);
+        QRegularExpression reMb("%MB\\s*([0-9]+)", QRegularExpression::CaseInsensitiveOption);
+        QRegularExpression reMx("%MX\\s*([0-9]+)\\.([0-9]+)", QRegularExpression::CaseInsensitiveOption);
+
+        auto mMx = reMx.match(raw);
+        if (mMx.hasMatch()) {
+            int before = mMx.captured(1).toInt();
+            int after = mMx.captured(2).toInt();
+            int addr = before / 2;
+            if (before % 2 != 0) after += 8;
+            finalAddr = QString::number(addr);
+            bitCommentPart = QString::number(after);
+            return true;
+        }
+
+        auto mMw = reMw.match(raw);
+        if (mMw.hasMatch()) {
+            finalAddr = mMw.captured(1);
+            bitCommentPart.clear();
+            return true;
+        }
+
+        auto mMb = reMb.match(raw);
+        if (mMb.hasMatch()) {
+            int mb = mMb.captured(1).toInt();
+            finalAddr = QString::number(mb / 2);
+            bitCommentPart.clear();
+            return true;
+        }
+
+        // 兜底：没有匹配到 %M 前缀时，直接保留原始地址文本。
+        finalAddr = raw;
+        bitCommentPart.clear();
+        return !finalAddr.isEmpty();
+    };
+
+    QMap<QString, QVector<QJsonObject>> groupedRows;
+    QStringList groupOrder;
+    for (const QJsonObject &o : rows) {
+        QString key = o.value("Device").toString().trimmed();
+        if (key.isEmpty()) key = "未分类";
+        if (!groupedRows.contains(key)) groupOrder << key;
+        groupedRows[key].push_back(o);
+    }
+
+    auto applyGroupToTable = [&](const QVector<QJsonObject> &groupData, QTableWidget *targetTable) -> int {
+        if (!targetTable) return 0;
+
+        QMap<QString, int> rowIndexByAddr;
+        QVector<MergedRow> mergedRows;
+
+        for (const QJsonObject &o : groupData) {
+            QString name = o.value("Name").toString().trimmed();
+            QString addressRaw = o.value("Address").toString().trimmed();
+            QString dataType = o.value("DataType").toString().trimmed();
+            QString comment = o.value("Comment").toString().trimmed();
+
+            if (addressRaw.isEmpty()) continue;
+
+            QString finalAddr;
+            QString bitPart;
+            if (!buildAddress(addressRaw, finalAddr, bitPart)) continue;
+
+            QString note = QString("%1 %2").arg(name).arg(comment).simplified();
+            if (!bitPart.isEmpty()) {
+                note = QString("%1 %2").arg(bitPart).arg(note).simplified();
+            }
+
+            if (!rowIndexByAddr.contains(finalAddr)) {
+                MergedRow mr;
+                mr.address = finalAddr;
+                mr.dataType = dataType;
+                mr.comment = note;
+                mr.registerFormat = dataType;
+                rowIndexByAddr.insert(finalAddr, mergedRows.size());
+                mergedRows.push_back(mr);
+            } else {
+                int idx = rowIndexByAddr.value(finalAddr);
+                if (idx >= 0 && idx < mergedRows.size()) {
+                    if (mergedRows[idx].dataType.isEmpty()) {
+                        mergedRows[idx].dataType = dataType;
+                        mergedRows[idx].registerFormat = dataType;
+                    }
+                    mergedRows[idx].comment = QString("%1 %2").arg(mergedRows[idx].comment).arg(note).simplified();
+                }
+            }
+        }
+
+        targetTable->blockSignals(true);
+        targetTable->setRowCount(mergedRows.size());
+        for (int i = 0; i < mergedRows.size(); ++i) {
+            if (!targetTable->item(i, 0)) targetTable->setItem(i, 0, new QTableWidgetItem());
+            if (!targetTable->item(i, 1)) targetTable->setItem(i, 1, new QTableWidgetItem());
+            if (!targetTable->item(i, 2)) targetTable->setItem(i, 2, new QTableWidgetItem());
+            targetTable->item(i, 0)->setText(mergedRows[i].address);
+            targetTable->item(i, 1)->setText(mergedRows[i].comment);
+            targetTable->item(i, 2)->setText(mergedRows[i].registerFormat);
+        }
+        targetTable->blockSignals(false);
+
+        ensureRegisterMapEditableTailRow(targetTable);
+        return mergedRows.size();
+    };
+
+    if (!tabRegisterMaps) {
+        QMessageBox::warning(this, "导入失败", "未找到地址映射页签控件。");
+        return;
+    }
+
+    while (tabRegisterMaps->count() > 2) {
+        QWidget *w = tabRegisterMaps->widget(tabRegisterMaps->count() - 1);
+        tabRegisterMaps->removeTab(tabRegisterMaps->count() - 1);
+        if (w) w->deleteLater();
+    }
+
+    int totalImported = 0;
+    for (int i = 0; i < groupOrder.size(); ++i) {
+        QString groupName = groupOrder[i];
+        QTableWidget *targetTable = nullptr;
+
+        if (i == 0) {
+            targetTable = tblAGV;
+            tabRegisterMaps->setTabText(0, groupName);
+        } else if (i == 1) {
+            targetTable = tblRobot;
+            tabRegisterMaps->setTabText(1, groupName);
+        } else {
+            targetTable = new QTableWidget();
+            setupRegisterTable(targetTable);
+            connect(targetTable, &QTableWidget::cellClicked, this, &MainWindow::onRegisterTableCellClicked);
+            connect(targetTable, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
+            tabRegisterMaps->addTab(targetTable, groupName);
+        }
+
+        totalImported += applyGroupToTable(groupedRows.value(groupName), targetTable);
+    }
+
+    syncSimulatorTablesFromMaps();
+
+    QMessageBox::information(this,
+                             "导入完成",
+                             QString("标准格式导入成功：共导入 %1 个类型分组，%2 条记录（按地址合并后）。")
+                                 .arg(groupOrder.size())
+                                 .arg(totalImported));
 }
 
 void MainWindow::onTcpModeChanged(int index)

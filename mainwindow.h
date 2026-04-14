@@ -79,6 +79,7 @@ class MainWindow : public QMainWindow
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    void onImportStandardFileClicked();
 
 private slots:
     // Pages Navigation
@@ -129,6 +130,13 @@ private slots:
     void onGitPullClicked();
     void onGitMergeClicked();
     void onGitStatusClicked();
+    void onGitDiffClicked();
+    void onGitFetchClicked();
+    void onGitStashClicked();
+    void onGitStashPopClicked();
+    void onGitSetDiffRuleClicked();
+    void onGitAutoDiffReminderToggled(bool checked);
+    void onGitAutoDiffReminderTick();
     void onGitOpenIgnoreClicked();
     void onGitCheckIgnoreClicked();
     void onGitRefreshLogClicked();
@@ -194,10 +202,12 @@ private:
     QTableWidget *tblRobot;
     QPushButton *btnExportRegisterMap;
     QPushButton *btnImportRegisterMap;
+    QPushButton *btnImportStandardFile;
     void setupRegisterTable(QTableWidget *table);
     void onRegisterTableCellClicked(int row, int column);
     void onRegisterTabChanged(int index);   // Tab switch handler
     void onRegisterTableChanged(int row, int column); // Auto-save handler
+    void onRegisterMapContextMenu(const QPoint &pos);
     void saveRegisterTables();
     void loadRegisterTables();
     void onExportRegisterMapClicked();
@@ -244,6 +254,8 @@ private:
     QCheckBox *chkWriteCoil;
     QLabel *lblWriteValues;
     QLineEdit *txtWriteValues;
+    QLabel *lblWriteFormat;
+    QComboBox *cmbWriteFormat;
     QPushButton *btnWriteSingleCoil;
     QPushButton *btnWriteSingleRegister;
     QPushButton *btnWriteMultipleCoils;
@@ -296,6 +308,15 @@ private:
     QPushButton *btnGitPull;
     QPushButton *btnGitMerge;
     QPushButton *btnGitStatus;
+    QPushButton *btnGitDiff;
+    QPushButton *btnGitFetch;
+    QPushButton *btnGitStash;
+    QPushButton *btnGitStashPop;
+    QPushButton *btnGitSetDiffRule;
+    QPushButton *btnGitAutoDiffReminder;
+    QSpinBox *spinGitDiffIntervalMinutes;
+    QSpinBox *spinGitDiffFileThreshold;
+    QSpinBox *spinGitDiffLineThreshold;
     QPushButton *btnGitOpenIgnore;
     QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
@@ -327,6 +348,8 @@ private:
     bool hasPrevCpuSample;
     QFile *monitorFile;
     QTextStream *monitorStream;
+    QTimer *gitDiffReminderTimer;
+    int gitDiffReminderRule = -1;
 
     // --- Logic Objects ---
     
@@ -414,6 +437,10 @@ private:
     void runGitCommand(const QStringList &args); // Git helper
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
+    bool isRegisterMapRowEmpty(const QTableWidget *table, int row) const;
+    void ensureRegisterMapEditableTailRow(QTableWidget *table);
+    void copyRegisterMapSelection(QTableWidget *table);
+    void pasteRegisterMapFromClipboard(QTableWidget *table, int startRow, int startColumn);
     void setupSimulatorRegisterTable(QTableWidget *table);
     void syncSimulatorTablesFromMaps();
     void onSimRandomAndWriteClicked();
