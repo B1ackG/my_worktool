@@ -28,3 +28,6 @@ monitor_logs/
 # Automatically added by Assistant
 build_log.txt
 build/
+
+# Automatically added by Assistant
+*.pro.user
