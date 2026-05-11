@@ -138,6 +138,8 @@ private slots:
     void onGitAutoDiffReminderToggled(bool checked);
     void onGitAutoDiffReminderTick();
     void onGitOpenIgnoreClicked();
+    void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
+    void onGitRemoteAddClicked(); // 新增：链接远程仓库
     void onGitCheckIgnoreClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
@@ -203,6 +205,8 @@ private:
     QPushButton *btnExportRegisterMap;
     QPushButton *btnImportRegisterMap;
     QPushButton *btnImportStandardFile;
+    QCheckBox *chkAutoReadOnMapClick;
+    QCheckBox *chkAutoWriteOnMapClick;
     void setupRegisterTable(QTableWidget *table);
     void onRegisterTableCellClicked(int row, int column);
     void onRegisterTabChanged(int index);   // Tab switch handler
@@ -318,6 +322,8 @@ private:
     QSpinBox *spinGitDiffFileThreshold;
     QSpinBox *spinGitDiffLineThreshold;
     QPushButton *btnGitOpenIgnore;
+    QPushButton *btnGitGetSshKey; // 新增
+    QPushButton *btnGitRemoteAdd; // 新增
     QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;

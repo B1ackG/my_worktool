@@ -13,6 +13,10 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QRegularExpression>
+#include <QApplication>
+#include <QClipboard>
+#include <QDir>
+#include <QTextStream>
 #include <QTextStream>
 #include <QDesktopServices>
 #include <QUrl>
@@ -400,6 +404,14 @@ void MainWindow::createWidgets()
     spinGitDiffLineThreshold->setRange(1, 200000);
     spinGitDiffLineThreshold->setValue(100);
     btnGitOpenIgnore = new QPushButton("管理 .gitignore");
+    btnGitGetSshKey = new QPushButton("获取SSH公钥"); 
+    btnGitGetSshKey->setToolTip("获取本机 SSH 公钥并复制到剪贴板，用于上传 GitHub");
+    btnGitGetSshKey->setStyleSheet("background-color: #fce4ec; font-weight: bold;"); // 浅粉色
+
+    btnGitRemoteAdd = new QPushButton("链接远程仓库");
+    btnGitRemoteAdd->setToolTip("为本地目录添加远程仓库链接 (git remote add)");
+    btnGitRemoteAdd->setStyleSheet("background-color: #e8f5e9; font-weight: bold;"); // 浅绿色
+
     btnGitCheckIgnore = new QPushButton("检查 .gitignore");
     btnGitCheckIgnore->setToolTip("检查是否存在常用的 .gitignore 规则");
     
@@ -571,6 +583,10 @@ QWidget* MainWindow::createModbusPage()
     layMapBtns->addWidget(btnExportRegisterMap);
     layMapBtns->addWidget(btnImportRegisterMap);
     layMapBtns->addWidget(btnImportStandardFile);
+    chkAutoReadOnMapClick = new QCheckBox("点击自动读取");
+    chkAutoWriteOnMapClick = new QCheckBox("点击自动写入");
+    layMapBtns->addWidget(chkAutoReadOnMapClick);
+    layMapBtns->addWidget(chkAutoWriteOnMapClick);
     layMapBtns->addStretch();
     
     layMaps->addLayout(layMapBtns);
@@ -698,8 +714,10 @@ QWidget* MainWindow::createGitPage()
 
     layBtns->addWidget(btnGitStash, 2, 0);
     layBtns->addWidget(btnGitStashPop, 2, 1);
-    layBtns->addWidget(btnGitCheckIgnore, 2, 2);
-    layBtns->addWidget(btnGitOpenIgnore, 2, 3);
+    layBtns->addWidget(btnGitRemoteAdd, 2, 2);
+    layBtns->addWidget(btnGitGetSshKey, 2, 3);
+    layBtns->addWidget(btnGitCheckIgnore, 2, 4);
+    layBtns->addWidget(btnGitOpenIgnore, 2, 5);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -1079,6 +1097,8 @@ void MainWindow::createConnections()
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
     connect(btnGitStatus, &QPushButton::clicked, this, &MainWindow::onGitStatusClicked);
     connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
+    connect(btnGitGetSshKey, &QPushButton::clicked, this, &MainWindow::onGitGetSshKeyClicked);
+    connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
@@ -3076,6 +3096,88 @@ void MainWindow::onGitAddClicked() {
     runGitCommand(QStringList() << "add" << ".");
 }
 
+void MainWindow::onGitGetSshKeyClicked() {
+    QString homeDir = QDir::homePath();
+    QString sshPath = homeDir + "/.ssh";
+    QString keyFile = "";
+
+    // 常见的公钥文件名
+    QStringList potentialKeys = { "id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub", "id_dsa.pub" };
+    
+    for (const QString &key : potentialKeys) {
+        if (QFile::exists(sshPath + "/" + key)) {
+            keyFile = sshPath + "/" + key;
+            break;
+        }
+    }
+
+    if (keyFile.isEmpty()) {
+        QMessageBox::information(this, "SSH 公钥", "未找到常见的公钥文件 (id_ed25519.pub, id_rsa.pub等)。\n请确保已生成过 SSH Key (使用 ssh-keygen)。");
+        return;
+    }
+
+    QFile file(keyFile);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "错误", "无法读取公钥文件: " + keyFile);
+        return;
+    }
+
+    QString publicKey = QTextStream(&file).readAll().trimmed();
+    file.close();
+
+    if (publicKey.isEmpty()) {
+        QMessageBox::warning(this, "警告", "公钥文件内容为空。");
+        return;
+    }
+
+    // 复制到剪贴板
+    QClipboard *clipboard = QApplication::clipboard();
+    clipboard->setText(publicKey);
+
+    // 在日志中显示
+    txtGitLog->append("<font color='green'>[SSH] 公钥已获取并复制到剪贴板!</font>");
+    txtGitLog->append(QString("<font color='gray'>文件路径: %1</font>").arg(keyFile));
+    
+    // 弹窗提示
+    QMessageBox::information(this, "SSH 公钥", 
+        "SSH 公钥内容已复制到剪贴板！\n\n文件路径: " + keyFile + "\n\n您可以直接去 GitHub 设置中粘贴了。");
+}
+
+void MainWindow::onGitRemoteAddClicked() {
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, "提示", "请先选择本地 Git 仓库目录（或打算初始化的目录）。");
+        return;
+    }
+
+    // 检查是否已经是 Git 仓库，如果不是，询问是否初始化
+    if (!QFile::exists(workDir + "/.git")) {
+        QMessageBox::StandardButton reply = QMessageBox::question(this, "初始化", 
+            "当前目录尚未初始化为 Git 仓库，是否执行 'git init'？",
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+            runGitCommand(QStringList() << "init");
+        } else {
+            return;
+        }
+    }
+
+    bool ok;
+    QString remoteUrl = QInputDialog::getText(this, "添加远程仓库",
+                                         "请输入远程仓库 URL (例如 git@github.com:user/repo.git):",
+                                         QLineEdit::Normal, "", &ok);
+    if (!ok || remoteUrl.trimmed().isEmpty()) return;
+
+    QString remoteName = cmbGitRemote->currentText().trimmed();
+    if (remoteName.isEmpty()) remoteName = "origin";
+
+    // 执行 git remote add [name] [url]
+    runGitCommand(QStringList() << "remote" << "add" << remoteName << remoteUrl.trimmed());
+    
+    txtGitLog->append(QString("<font color='green'>[Remote] 已尝试链接远程仓库 '%1' 到 '%2'</font>")
+                      .arg(remoteName).arg(remoteUrl));
+}
+
 void MainWindow::onGitCommitClicked() {
     QString msg = txtGitCommitMsg->text().trimmed();
     if (msg.isEmpty()) {
@@ -4331,15 +4433,47 @@ void MainWindow::onRegisterTableCellClicked(int row, int column) {
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
     if(!table) return;
     
-    QTableWidgetItem *item = table->item(row, 0); // Address is col 0
+    QTableWidgetItem *item = table->item(row, 0); // Address
+    QTableWidgetItem *formatItem = table->item(row, 2); // Format is col 2
+    
+    bool ok;
     if(item) {
-        bool ok;
         int addr = item->text().toInt(&ok);
         if(ok) {
             spinReadStartAddr->setValue(addr);
             spinWriteStartAddr->setValue(addr);
         }
     }
+
+    if(formatItem) {
+        QString fmtText = formatItem->text().toUpper();
+        int readQty = 1;
+        int formatIndex = 0; // Default Decimal
+
+        if (fmtText.contains("LREAL")) {
+            formatIndex = 4; // 64-bit Float
+            readQty = 4;
+        } else if (fmtText.contains("REAL")) {
+            formatIndex = 3; // 32-bit Float
+            readQty = 2;
+        } else if (fmtText.contains("BOOL")) {
+            formatIndex = 2; // Binary
+            readQty = 1;
+        } else if (fmtText.contains("UINT") || fmtText.contains("INT")) {
+            formatIndex = 0; // Decimal
+            readQty = 1;
+        }
+
+        cmbDisplayFormat->setCurrentIndex(formatIndex);
+        cmbWriteFormat->setCurrentIndex(formatIndex);
+        spinReadQuantity->setValue(readQty);
+        spinWriteQuantity->setValue(readQty);
+    }
+
+    if (chkAutoReadOnMapClick && chkAutoReadOnMapClick->isChecked()) {
+        onReadHoldingRegistersClicked();
+    }
+    // Note: Writing is complex as it needs a value, so we only trigger if explicit.
 }
 
 void MainWindow::onRegisterTabChanged(int index) {
