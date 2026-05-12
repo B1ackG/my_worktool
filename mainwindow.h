@@ -141,6 +141,10 @@ private slots:
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
     void onGitRemoteAddClicked(); // 新增：链接远程仓库
     void onGitCheckIgnoreClicked();
+    void onGitWorktreeListClicked();
+    void onGitWorktreeAddClicked();
+    void onGitWorktreeRemoveClicked();
+    void onGitWorktreePruneClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
     void onGitSoftResetClicked();   // <--- 新增
@@ -324,6 +328,10 @@ private:
     QPushButton *btnGitOpenIgnore;
     QPushButton *btnGitGetSshKey; // 新增
     QPushButton *btnGitRemoteAdd; // 新增
+    QPushButton *btnGitWorktreeList;
+    QPushButton *btnGitWorktreeAdd;
+    QPushButton *btnGitWorktreeRemove;
+    QPushButton *btnGitWorktreePrune;
     QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;

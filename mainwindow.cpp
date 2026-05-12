@@ -414,6 +414,22 @@ void MainWindow::createWidgets()
 
     btnGitCheckIgnore = new QPushButton("检查 .gitignore");
     btnGitCheckIgnore->setToolTip("检查是否存在常用的 .gitignore 规则");
+
+    btnGitWorktreeList = new QPushButton("Worktree 列表");
+    btnGitWorktreeList->setToolTip("列出当前仓库的所有 git worktree (git worktree list)");
+    btnGitWorktreeList->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
+
+    btnGitWorktreeAdd = new QPushButton("添加 Worktree");
+    btnGitWorktreeAdd->setToolTip("基于当前分支添加一个新的工作树目录 (git worktree add)");
+    btnGitWorktreeAdd->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
+
+    btnGitWorktreeRemove = new QPushButton("移除 Worktree");
+    btnGitWorktreeRemove->setToolTip("安全移除一个工作树目录并清理引用 (git worktree remove)");
+    btnGitWorktreeRemove->setStyleSheet("background-color: #ffebee; font-weight: bold;");
+
+    btnGitWorktreePrune = new QPushButton("清理 Worktree");
+    btnGitWorktreePrune->setToolTip("清理已失效的工作树引用 (git worktree prune)");
+    btnGitWorktreePrune->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
     
     cmbGitHistory = new QComboBox();
     btnGitRefreshLog = new QPushButton("刷新历史");
@@ -715,9 +731,14 @@ QWidget* MainWindow::createGitPage()
     layBtns->addWidget(btnGitStash, 2, 0);
     layBtns->addWidget(btnGitStashPop, 2, 1);
     layBtns->addWidget(btnGitRemoteAdd, 2, 2);
-    layBtns->addWidget(btnGitGetSshKey, 2, 3);
-    layBtns->addWidget(btnGitCheckIgnore, 2, 4);
-    layBtns->addWidget(btnGitOpenIgnore, 2, 5);
+    layBtns->addWidget(btnGitWorktreeList, 2, 3);
+    layBtns->addWidget(btnGitWorktreeAdd, 2, 4);
+    layBtns->addWidget(btnGitWorktreeRemove, 2, 5);
+
+    layBtns->addWidget(btnGitWorktreePrune, 3, 0);
+    layBtns->addWidget(btnGitGetSshKey, 3, 1);
+    layBtns->addWidget(btnGitCheckIgnore, 3, 2);
+    layBtns->addWidget(btnGitOpenIgnore, 3, 3);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -1099,6 +1120,10 @@ void MainWindow::createConnections()
     connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
     connect(btnGitGetSshKey, &QPushButton::clicked, this, &MainWindow::onGitGetSshKeyClicked);
     connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
+    connect(btnGitWorktreeList, &QPushButton::clicked, this, &MainWindow::onGitWorktreeListClicked);
+    connect(btnGitWorktreeAdd, &QPushButton::clicked, this, &MainWindow::onGitWorktreeAddClicked);
+    connect(btnGitWorktreeRemove, &QPushButton::clicked, this, &MainWindow::onGitWorktreeRemoveClicked);
+    connect(btnGitWorktreePrune, &QPushButton::clicked, this, &MainWindow::onGitWorktreePruneClicked);
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
@@ -1319,10 +1344,10 @@ void MainWindow::onSimTimerTick()
                 double d = val;
                 quint64 raw = 0;
                 memcpy(&raw, &d, sizeof(double));
-                target->setRegister(t.addr,     (quint16)(raw & 0xFFFF));
-                target->setRegister(t.addr + 1, (quint16)((raw >> 16) & 0xFFFF));
-                target->setRegister(t.addr + 2, (quint16)((raw >> 32) & 0xFFFF));
-                target->setRegister(t.addr + 3, (quint16)((raw >> 48) & 0xFFFF));
+                target->setRegister(t.addr,     (quint16)((raw >> 48) & 0xFFFF));
+                target->setRegister(t.addr + 1, (quint16)((raw >> 32) & 0xFFFF));
+                target->setRegister(t.addr + 2, (quint16)((raw >> 16) & 0xFFFF));
+                target->setRegister(t.addr + 3, (quint16)(raw & 0xFFFF));
             } else {
                 // 普通 16 位模式
                 quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
@@ -1600,7 +1625,7 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
         if (displayFormat == FormatFloat && byteCount >= 4) {
             for (int i = 0; i < byteCount / 4; ++i) {
                 quint16 low, high;
-                stream >> high >> low; // 假设大端序存储: [High, Low] -> ABCD
+                stream >> low >> high; // CDAB: [Low, High]
                 quint32 raw = (quint32(high) << 16) | low;
                 float f;
                 memcpy(&f, &raw, 4);
@@ -1609,11 +1634,10 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
         } 
         else if (displayFormat == FormatDouble && byteCount >= 8) {
             for (int i = 0; i < byteCount / 8; ++i) {
-                quint16 r1, r2, r3, r4;
-                stream >> r1 >> r2 >> r3 >> r4; 
-                // [r4, r3, r2, r1] -> 64-bit IEEE 754 (Little-Endian / DCBA FEHG)
-                // 对应输入: 0:0x720E, 1:0x4049, 2:0xD907, 3:0x4070 -> 269.56
-                quint64 raw = (quint64(r4) << 48) | (quint64(r3) << 32) | (quint64(r2) << 16) | quint64(r1);
+                quint16 gh, ef, cd, ab;
+                stream >> gh >> ef >> cd >> ab;
+                // GHEFCDAB：寄存器序 GH, EF, CD, AB -> 与主机 memcpy 的 uint64 小端字序一致
+                quint64 raw = quint64(ab) | (quint64(cd) << 16) | (quint64(ef) << 32) | (quint64(gh) << 48);
                 double d;
                 memcpy(&d, &raw, 8);
                 regs << QString::number(d, 'g', 8);
@@ -1706,12 +1730,18 @@ void MainWindow::onWriteSingleRegisterClicked() {
     } else if (format == FormatBinary) {
         val = txt.toUShort(nullptr, 2);
     } else if (format == FormatFloat || format == FormatDouble) {
-        // 对于单寄存器写入，浮点数通常没有意义，但我们可以尝试处理第一个寄存器
-        float f = txt.toFloat();
-        quint32 raw;
-        memcpy(&raw, &f, 4);
-        val = (quint16)(raw >> 16); // 取高16位作为示例，或者直接按十进制处理
-        if (format == FormatDecimal) val = txt.toUShort();
+        // 单寄存器写浮点仅取字序中的首字：32 位 CDAB 取低位字，64 位 GHEFCDAB 取 GH
+        if (format == FormatFloat) {
+            float f = txt.toFloat();
+            quint32 raw;
+            memcpy(&raw, &f, sizeof(float));
+            val = (quint16)(raw & 0xFFFF);
+        } else {
+            double d = txt.toDouble();
+            quint64 raw;
+            memcpy(&raw, &d, sizeof(double));
+            val = (quint16)((raw >> 48) & 0xFFFF);
+        }
     } else {
         val = (quint16)spinWriteValue->value();
     }
@@ -1736,18 +1766,18 @@ void MainWindow::onWriteMultipleRegistersClicked() {
              float f = s.toFloat();
              quint32 raw;
              memcpy(&raw, &f, 4);
-             vals << (quint16)(raw >> 16); // High
-             vals << (quint16)(raw & 0xFFFF); // Low
+             vals << (quint16)(raw & 0xFFFF);         // CDAB: CD
+             vals << (quint16)((raw >> 16) & 0xFFFF); // AB
          }
      } else if (format == FormatDouble) {
          for (const QString &s : items) {
              double d = s.toDouble();
              quint64 raw;
              memcpy(&raw, &d, 8);
-             vals << (quint16)(raw & 0xFFFF);         // r1
-             vals << (quint16)((raw >> 16) & 0xFFFF); // r2
-             vals << (quint16)((raw >> 32) & 0xFFFF); // r3
-             vals << (quint16)((raw >> 48) & 0xFFFF); // r4
+             vals << (quint16)((raw >> 48) & 0xFFFF); // GH
+             vals << (quint16)((raw >> 32) & 0xFFFF); // EF
+             vals << (quint16)((raw >> 16) & 0xFFFF); // CD
+             vals << (quint16)(raw & 0xFFFF);         // AB
          }
      } else {
          for(auto s : items) {
@@ -2273,10 +2303,10 @@ void MainWindow::onSimImportCsvClicked()
             if (ok) {
                 quint64 raw = 0;
                 memcpy(&raw, &d, sizeof(double));
-                slave->setRegister(addr,     (quint16)(raw & 0xFFFF));
-                slave->setRegister(addr + 1, (quint16)((raw >> 16) & 0xFFFF));
-                slave->setRegister(addr + 2, (quint16)((raw >> 32) & 0xFFFF));
-                slave->setRegister(addr + 3, (quint16)((raw >> 48) & 0xFFFF));
+                slave->setRegister(addr,     (quint16)((raw >> 48) & 0xFFFF));
+                slave->setRegister(addr + 1, (quint16)((raw >> 32) & 0xFFFF));
+                slave->setRegister(addr + 2, (quint16)((raw >> 16) & 0xFFFF));
+                slave->setRegister(addr + 3, (quint16)(raw & 0xFFFF));
             }
         } else {
             slave->setRegister(addr, (quint16)valStr.toUInt(&ok));
@@ -3037,6 +3067,10 @@ void MainWindow::onGitSyncRemoteClicked() {
 
 void MainWindow::onGitCheckoutClicked() {
     QString branch = cmbGitBranches->currentText().trimmed();
+    if (branch.startsWith("+ ")) {
+        branch = branch.mid(2).trimmed();
+    }
+    
     if (branch.isEmpty()) {
        txtGitLog->append("<font color='red'>错误: 请先选择要切换的分支</font>");
        return;
@@ -3143,6 +3177,167 @@ void MainWindow::onGitGetSshKeyClicked() {
         "SSH 公钥内容已复制到剪贴板！\n\n文件路径: " + keyFile + "\n\n您可以直接去 GitHub 设置中粘贴了。");
 }
 
+void MainWindow::onGitWorktreeListClicked() {
+    runGitCommand(QStringList() << "worktree" << "list");
+}
+
+void MainWindow::onGitWorktreeAddClicked() {
+    QString currentBranch = cmbGitBranches->currentText().trimmed();
+    if (currentBranch.startsWith("+ ")) {
+        currentBranch = currentBranch.mid(2).trimmed();
+    }
+
+    if (currentBranch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 请先选择或输入一个分支来创建该分支的 Worktree!</font>");
+        return;
+    }
+
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
+
+    // 1. 检查该分支是否已被其他 Worktree 占用
+    QProcess checkProc;
+    checkProc.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    checkProc.start("git.exe", QStringList() << "worktree" << "list" << "--porcelain");
+#else
+    checkProc.start("git", QStringList() << "worktree" << "list" << "--porcelain");
+#endif
+    checkProc.waitForFinished();
+    QString listOut = QString::fromLocal8Bit(checkProc.readAllStandardOutput());
+    
+    bool branchUsed = listOut.contains("branch refs/heads/" + currentBranch + "\n") || 
+                      listOut.contains("branch refs/heads/" + currentBranch + "\r\n") ||
+                      listOut.endsWith("branch refs/heads/" + currentBranch);
+
+    QString branchToUse = currentBranch;
+    bool createNew = false;
+
+    if (branchUsed) {
+        QMessageBox::StandardButton reply;
+        reply = QMessageBox::question(this, "分支已被占用", 
+                                      QString("分支 [%1] 已在其他工作树中打开。\n\n是否基于此分支创建一个新分支（例如 %1_fix）来创建 Worktree?").arg(currentBranch),
+                                      QMessageBox::Yes|QMessageBox::No);
+        if (reply == QMessageBox::No) return;
+        
+        bool ok;
+        branchToUse = QInputDialog::getText(this, "创建新分支", 
+                                           "请输入新分支名称:", QLineEdit::Normal,
+                                           currentBranch + "_work", &ok);
+        if (!ok || branchToUse.trimmed().isEmpty()) return;
+        branchToUse = branchToUse.trimmed();
+        createNew = true;
+    }
+
+    // 2. 选择路径
+    QDir repoDir(workDir);
+    QString parentPath = repoDir.absolutePath();
+    if (parentPath.endsWith("/")) parentPath.chop(1);
+    
+    QString branchSeed = branchToUse.contains("/") ? branchToUse.split("/").last() : branchToUse;
+    QString suggestedPath = parentPath + "_worktree_" + branchSeed;
+
+    bool ok;
+    QString path = QInputDialog::getText(this, "添加 Git Worktree", 
+                                         "请输入新工作树的本地路径:", QLineEdit::Normal,
+                                         suggestedPath, &ok);
+    if (!ok || path.isEmpty()) return;
+
+    // 3. 执行命令
+    QStringList args;
+    args << "worktree" << "add";
+    if (createNew) {
+        args << "-b" << branchToUse << path << currentBranch; // 基于 currentBranch 创建新分支 branchToUse
+    } else {
+        args << path << branchToUse;
+    }
+    
+    runGitCommand(args);
+
+    // --- 新增：将新路径添加到记忆列表 ---
+    saveGitHistory(path);
+    txtGitLog->append(QString("<font color='gray'>[History] 已将新 Worktree 路径添加到记忆记录。</font>"));
+}
+
+void MainWindow::onGitWorktreePruneClicked() {
+    runGitCommand(QStringList() << "worktree" << "prune");
+    txtGitLog->append("<font color='gray'>[Worktree] 已执行清理。</font>");
+}
+
+void MainWindow::onGitWorktreeRemoveClicked() {
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
+
+    // 获取当前 Worktree 列表以便用户选择
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start("git.exe", QStringList() << "worktree" << "list" << "--porcelain");
+#else
+    process.start("git", QStringList() << "worktree" << "list" << "--porcelain");
+#endif
+    process.waitForFinished();
+    
+    QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+    QStringList lines = output.split("\n");
+    QStringList worktrees;
+    QString currentPath;
+    
+    // 解析 porcelain 输出获取路径
+    for (const QString &line : lines) {
+        if (line.startsWith("worktree ")) {
+            QString path = line.mid(9).trimmed();
+            // 排除主工作目录 (通常列表第一个)
+            if (path != workDir && QDir(path).absolutePath() != QDir(workDir).absolutePath()) {
+                worktrees << path;
+            }
+        }
+    }
+
+    if (worktrees.isEmpty()) {
+        QMessageBox::information(this, "移除 Worktree", "当前没有可移除的辅助工作树。");
+        return;
+    }
+
+    bool ok;
+    QString target = QInputDialog::getItem(this, "移除 Git Worktree", 
+                                           "请选择要永久移除的工作树路径:", worktrees, 0, false, &ok);
+    
+    if (ok && !target.isEmpty()) {
+        QMessageBox::StandardButton reply;
+        reply = QMessageBox::question(this, "确认移除", 
+                                      QString("确定要移除并删除目录 %1 吗?\n这将删除该目录下所有未提交的内容!").arg(target),
+                                      QMessageBox::Yes|QMessageBox::No);
+        
+        if (reply == QMessageBox::Yes) {
+            // --force 以防有未提交改动，慎重起见可以去掉 --force
+            runGitCommand(QStringList() << "worktree" << "remove" << target);
+
+            // --- 新增：从记忆路径中删除 ---
+            QSettings settings("LiChenYang", "LinuxHelper");
+            QStringList history = settings.value("GitHistory").toStringList();
+            QString targetPath = QDir(target).absolutePath();
+            
+            bool removed = false;
+            if (history.contains(targetPath)) {
+                history.removeAll(targetPath);
+                removed = true;
+            }
+            if (history.contains(target)) {
+                history.removeAll(target);
+                removed = true;
+            }
+            
+            if (removed) {
+                settings.setValue("GitHistory", history);
+                cmbGitDir->clear();
+                cmbGitDir->addItems(history);
+                txtGitLog->append(QString("<font color='gray'>[History] 已从记忆记录中同步移除此 Worktree 路径。</font>"));
+            }
+        }
+    }
+}
+
 void MainWindow::onGitRemoteAddClicked() {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) {
@@ -3211,7 +3406,18 @@ void MainWindow::onGitMergeClicked() {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
     
-    // Detect current branch
+    // 获取当前选中的待合并分支
+    QString branchToMerge = cmbGitBranches->currentText().trimmed();
+    if (branchToMerge.startsWith("+ ")) {
+        branchToMerge = branchToMerge.mid(2).trimmed();
+    }
+    
+    if (branchToMerge.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 请先在下拉框选择要合并进来的目标分支!</font>");
+        return;
+    }
+
+    // Detect current branch (where we are)
     QProcess process;
     process.setWorkingDirectory(workDir);
 #ifdef Q_OS_WIN
@@ -3222,41 +3428,18 @@ void MainWindow::onGitMergeClicked() {
     process.waitForFinished();
     QString currentBranch = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
     
-    if (currentBranch == "master" || currentBranch == "main") {
-        QMessageBox::warning(this, "合并限制", "当前是主分支 (" + currentBranch + ")，无法以此方式合并。请切换到功能分支。");
-        return;
-    }
-    
-    // Check if master or main exists to merge INTO
-    bool hasMaster = false;
-    bool hasMain = false;
-    for (int i = 0; i < cmbGitBranches->count(); ++i) {
-        QString b = cmbGitBranches->itemText(i);
-        if (b == "master") hasMaster = true;
-        if (b == "main") hasMain = true;
-    }
-    
-    QString targetMain = hasMain ? "main" : (hasMaster ? "master" : "");
-    if (targetMain.isEmpty()) {
-        QMessageBox::critical(this, "错误", "未找到本地 master 或 main 分支。");
+    if (branchToMerge == currentBranch) {
+        QMessageBox::warning(this, "合并提示", "当前已经在分支 [" + currentBranch + "] 上，无需合并自身。请在下拉框选择其他分支。");
         return;
     }
 
     QMessageBox::StandardButton reply;
     reply = QMessageBox::question(this, "确认合并", 
-                                  QString("确定要将当前分支 '%1' 合并到 '%2' 分支吗?\n操作将包括: 切换到 %2 -> 合并 %1 -> 返回 %1")
-                                  .arg(currentBranch).arg(targetMain),
+                                  QString("确定要将分支 [%1] 的改动合并到当前分支 [%2] 吗?").arg(branchToMerge).arg(currentBranch),
                                   QMessageBox::Yes|QMessageBox::No);
     
     if (reply == QMessageBox::Yes) {
-        // Step 1: Checkout targetMain
-        runGitCommand(QStringList() << "checkout" << targetMain);
-        // Step 2: Merge currentBranch
-        runGitCommand(QStringList() << "merge" << currentBranch);
-        // Step 3: Checkout back to currentBranch
-        runGitCommand(QStringList() << "checkout" << currentBranch);
-        
-        txtGitLog->append("<font color='green'>合并流程执行完毕 (需检查日志是否有冲突)。</font>");
+        runGitCommand(QStringList() << "merge" << branchToMerge);
     }
 }
 
@@ -3463,7 +3646,29 @@ void MainWindow::onGitSoftResetClicked() {
                                   QMessageBox::Yes|QMessageBox::No);
     
     if (reply == QMessageBox::Yes) {
+        // 在重置前获取最新的提交信息
+        QString lastCommit = cmbGitHistory->itemText(0);
+        QString commitMsg = "";
+
+        // 解析格式: "%h - %cd : %s (%an)" -> 提取冒号后的提交信息
+        int colonIdx = lastCommit.indexOf(" : ");
+        if (colonIdx != -1) {
+            commitMsg = lastCommit.mid(colonIdx + 3).trimmed();
+            // 去掉末尾的作者部分 (Author)
+            int authorStart = commitMsg.lastIndexOf(" (");
+            if (authorStart != -1) {
+                commitMsg = commitMsg.left(authorStart).trimmed();
+            }
+        }
+
         runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
+        
+        // 复制到剪贴板
+        if (!commitMsg.isEmpty()) {
+            QApplication::clipboard()->setText(commitMsg);
+            txtGitLog->append(QString("<font color='green'>[Reset] 已撤回提交并复制信息: %1</font>").arg(commitMsg));
+        }
+
         onGitRefreshLogClicked(); // 自动刷新历史记录
     }
 }
@@ -4227,7 +4432,13 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
         char c2 = (char)(val & 0xFF);
         display = QString("'%1%2'").arg(c1 > 31 ? QChar(c1) : '.').arg(c2 > 31 ? QChar(c2) : '.');
     } else if (fmt.startsWith("32-bit")) {
-        uint32_t val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+        uint32_t val32;
+        if (fmt == "32-bit Float") {
+            // CDAB
+            val32 = ((uint32_t)target->getRegister(addr + 1) << 16) | target->getRegister(addr);
+        } else {
+            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+        }
         if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
         else if (fmt == "32-bit Unsigned") display = QString::number(val32);
         else if (fmt == "32-bit Float") {
@@ -4237,10 +4448,11 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
         }
     } else if (fmt == "64-bit Float") {
         quint64 raw = 0;
-        raw |= (quint64)target->getRegister(addr);
-        raw |= ((quint64)target->getRegister(addr + 1) << 16);
-        raw |= ((quint64)target->getRegister(addr + 2) << 32);
-        raw |= ((quint64)target->getRegister(addr + 3) << 48);
+        // GHEFCDAB：addr 起为 GH, EF, CD, AB
+        raw |= (quint64)target->getRegister(addr + 3);
+        raw |= ((quint64)target->getRegister(addr + 2) << 16);
+        raw |= ((quint64)target->getRegister(addr + 1) << 32);
+        raw |= ((quint64)target->getRegister(addr) << 48);
         double d = 0.0;
         memcpy(&d, &raw, sizeof(double));
         display = QString::number(d, 'f', 6);
@@ -4318,10 +4530,10 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             if (ok) {
                 quint64 raw = 0;
                 memcpy(&raw, &d, sizeof(double));
-                target->setRegister(addr,     (quint16)(raw & 0xFFFF));
-                target->setRegister(addr + 1, (quint16)((raw >> 16) & 0xFFFF));
-                target->setRegister(addr + 2, (quint16)((raw >> 32) & 0xFFFF));
-                target->setRegister(addr + 3, (quint16)((raw >> 48) & 0xFFFF));
+                target->setRegister(addr,     (quint16)((raw >> 48) & 0xFFFF));
+                target->setRegister(addr + 1, (quint16)((raw >> 32) & 0xFFFF));
+                target->setRegister(addr + 2, (quint16)((raw >> 16) & 0xFFFF));
+                target->setRegister(addr + 3, (quint16)(raw & 0xFFFF));
                 refreshSimRowDisplay(table, row);
                 refreshSimRowDisplay(table, row + 1);
                 refreshSimRowDisplay(table, row + 2);

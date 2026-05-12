@@ -123,18 +123,18 @@ bool ModbusSlave::setFloat(quint16 addr, float value)
 {
     quint32 u;
     memcpy(&u, &value, sizeof(float));
-    // Ensure network order for the 32-bit value (big-endian words)
+    // IEEE754 32-bit: Modbus 字序 CDAB（先低字后高字）
     quint16 high = (u >> 16) & 0xFFFF;
     quint16 low = u & 0xFFFF;
-    return setRegister(addr, high) && setRegister(addr+1, low);
+    return setRegister(addr, low) && setRegister(addr + 1, high);
 }
 
 float ModbusSlave::getFloat(quint16 addr) const
 {
     QMutexLocker locker(&mutex);
     if (addr+1 >= (quint16)holding.size()) return 0.0f;
-    quint32 high = holding[addr];
-    quint32 low = holding[addr+1];
+    quint32 low = holding[addr];
+    quint32 high = holding[addr+1];
     quint32 u = (high << 16) | low;
     float f;
     memcpy(&f, &u, sizeof(float));
