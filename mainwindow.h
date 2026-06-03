@@ -33,6 +33,8 @@
 #include <QMenu>
 #include <QAction>
 #include <QJsonObject>
+#include <QSet>
+#include <QHash>
 #include <QDirIterator>
 #include <QPainter>
 #include <QPolygonF>
@@ -70,6 +72,18 @@ protected:
     }
 private:
     QList<double> values;
+};
+
+struct GitWorkGoal {
+    QString id;
+    QString title;
+    QString startDate;
+    QString endDate;
+    QString actualDate;
+    QString parentId;
+    QString branchName;
+    bool started = false;
+    QString remark;
 };
 
 class MainWindow : public QMainWindow
@@ -149,6 +163,12 @@ private slots:
     void onGitResetClicked();
     void onGitSoftResetClicked();   // <--- 新增
     void onGitCopyForDailyReportClicked();
+    void onGitRemoveHistoryClicked();
+    void onGitDirChanged();
+    void onGitGoalAddClicked();
+    void onGitGoalEditClicked();
+    void onGitGoalDeleteClicked();
+    void onGitGoalStartClicked();
     void onScpTransferClicked();
     void onRebootTargetClicked();
     void onMonitorUsageToggled();
@@ -206,6 +226,8 @@ private:
     QTabWidget *tabRegisterMaps;
     QTableWidget *tblAGV;
     QTableWidget *tblRobot;
+    QLineEdit *txtSearchMap;  // 新增：地址映射表搜索框
+    QPushButton *btnSearchMap; // 新增：搜索按钮
     QPushButton *btnExportRegisterMap;
     QPushButton *btnImportRegisterMap;
     QPushButton *btnImportStandardFile;
@@ -220,6 +242,8 @@ private:
     void loadRegisterTables();
     void onExportRegisterMapClicked();
     void onImportRegisterMapClicked();
+    void onSearchMapTextFinished(); // 新增：搜索回车处理
+    void onSearchMapClicked();      // 新增：搜索按钮点击处理
 
     // Connection
     QLabel *lblIP;
@@ -302,6 +326,12 @@ private:
     // --- Git Widgets ---
     QComboBox *cmbGitDir;  // Changed from QLineEdit
     QPushButton *btnGitSelectDir;
+    QPushButton *btnGitRemoveHistory;
+    QTableWidget *tblGitGoals;
+    QPushButton *btnGitGoalAdd;
+    QPushButton *btnGitGoalEdit;
+    QPushButton *btnGitGoalDelete;
+    QPushButton *btnGitGoalStart;
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
@@ -364,6 +394,7 @@ private:
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
     int gitDiffReminderRule = -1;
+    QHash<QString, QSet<QString>> gitGoalCollapsedByRepo;
 
     // --- Logic Objects ---
     
@@ -448,9 +479,39 @@ private:
     void logSerialMessage(const QString &message); // Logs to Serial log or status
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
-    void runGitCommand(const QStringList &args); // Git helper
+    bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
+    void removeGitHistoryPath(const QString &dir);
+    void applyGitHistoryToCombo(const QStringList &history, const QString &selectPath = QString());
+    QString gitGoalsRepoKey(const QString &repoDir) const;
+    QList<GitWorkGoal> loadGitGoals(const QString &repoDir) const;
+    void saveGitGoals(const QString &repoDir, const QList<GitWorkGoal> &goals);
+    void refreshGitGoalsTable();
+    bool editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals, const QString &excludeGoalId = QString());
+    QString gitGoalTitleById(const QList<GitWorkGoal> &goals, const QString &id) const;
+    GitWorkGoal *gitGoalById(QList<GitWorkGoal> &goals, const QString &id);
+    const GitWorkGoal *gitGoalById(const QList<GitWorkGoal> &goals, const QString &id) const;
+    QString translateGoalTitleToEnglish(const QString &title);
+    QString chineseTitleToPinyinSlug(const QString &title);
+    QString slugifyBranchName(const QString &text) const;
+    bool splitGoalBranchCategory(const QString &fullBranch, QString &category, QString &namePart) const;
+    QString buildGoalBranchName(const QString &category, const QString &namePart) const;
+    QString suggestBranchNameFromTitle(const QString &title);
+    bool gitBranchExists(const QString &repoDir, const QString &branchName) const;
+    bool createGitBranch(const QString &repoDir, const QString &branchName);
+    void fillAncestorStartDates(QList<GitWorkGoal> &goals, const QString &goalId, const QString &dateStr);
+    bool promptGitGoalStartDialog(const QString &goalTitle, QString &branchName, bool &createBranch);
+    QString resolveMainBranchName(const QString &repoDir) const;
+    QString normalizeLocalBranchRef(const QString &branchRef) const;
+    QStringList gitMergedLocalBranches(const QString &repoDir, const QString &intoBranch) const;
+    int markGoalsCompletedForMergedBranches(const QString &repoDir);
+    void syncChildGoalEndDatesFromParents(QList<GitWorkGoal> &goals);
+    void appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWorkGoal> &allGoals, int depth,
+                               bool hasChildren, bool childrenCollapsed);
+    bool isGitGoalHiddenByCollapse(const GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
+                                   const QSet<QString> &collapsedIds) const;
+    QSet<QString> &gitGoalCollapsedIdsForRepo(const QString &repoDir);
     bool isRegisterMapRowEmpty(const QTableWidget *table, int row) const;
     void ensureRegisterMapEditableTailRow(QTableWidget *table);
     void copyRegisterMapSelection(QTableWidget *table);

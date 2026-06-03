@@ -25,6 +25,20 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QNetworkInterface>
+#include <QDateEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QUuid>
+#include <QFileInfo>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QUrlQuery>
+#include <QEventLoop>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <functional>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -204,6 +218,10 @@ void MainWindow::createWidgets()
     btnExportRegisterMap = new QPushButton("导出");
     btnImportRegisterMap = new QPushButton("导入");
     btnImportStandardFile = new QPushButton("导入标准文件");
+    txtSearchMap = new QLineEdit();
+    txtSearchMap->setPlaceholderText("搜索内容...");
+    txtSearchMap->setClearButtonEnabled(true);
+    btnSearchMap = new QPushButton("搜索");
 
     // Read Group
     lblReadStartAddr = new QLabel("起始地址:");
@@ -360,7 +378,28 @@ void MainWindow::createWidgets()
     // loadGitHistory(); // Call this later or here? Better here.
     
     btnGitSelectDir = new QPushButton("选择目录");
-    
+    btnGitRemoveHistory = new QPushButton("删除记忆");
+    btnGitRemoveHistory->setToolTip("从记忆列表中移除当前选中的仓库路径（不删除磁盘目录）");
+
+    tblGitGoals = new QTableWidget();
+    tblGitGoals->setColumnCount(8);
+    tblGitGoals->setHorizontalHeaderLabels(
+        QStringList() << "" << "目标" << "父目标" << "开始日期" << "计划结束" << "实际完成" << "分支" << "备注");
+    tblGitGoals->setColumnWidth(0, 32);
+    tblGitGoals->horizontalHeader()->setStretchLastSection(true);
+    tblGitGoals->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblGitGoals->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblGitGoals->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tblGitGoals->verticalHeader()->setVisible(false);
+    tblGitGoals->setMinimumHeight(120);
+
+    btnGitGoalAdd = new QPushButton("添加目标");
+    btnGitGoalEdit = new QPushButton("编辑目标");
+    btnGitGoalDelete = new QPushButton("删除目标");
+    btnGitGoalStart = new QPushButton("目标开始");
+    btnGitGoalStart->setToolTip("记录开始日期并补齐上级未填写的开始日期；可翻译分支名并选择是否创建 Git 分支");
+    btnGitGoalStart->setStyleSheet("background-color: #c8e6c9; font-weight: bold;");
+
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
     btnGitCheckout = new QPushButton("切换分支");
@@ -596,6 +635,8 @@ QWidget* MainWindow::createModbusPage()
     QVBoxLayout *layMaps = new QVBoxLayout();
     
     QHBoxLayout *layMapBtns = new QHBoxLayout();
+    layMapBtns->addWidget(txtSearchMap);
+    layMapBtns->addWidget(btnSearchMap);
     layMapBtns->addWidget(btnExportRegisterMap);
     layMapBtns->addWidget(btnImportRegisterMap);
     layMapBtns->addWidget(btnImportStandardFile);
@@ -690,8 +731,22 @@ QWidget* MainWindow::createGitPage()
     
     layRepo->addWidget(cmbGitDir, 1);
     layRepo->addWidget(btnGitSelectDir);
+    layRepo->addWidget(btnGitRemoveHistory);
     grpRepo->setLayout(layRepo);
     layout->addWidget(grpRepo);
+
+    QGroupBox *grpGoals = new QGroupBox("工作目标（按当前仓库目录分开保存）");
+    QVBoxLayout *layGoals = new QVBoxLayout();
+    layGoals->addWidget(tblGitGoals);
+    QHBoxLayout *layGoalBtns = new QHBoxLayout();
+    layGoalBtns->addWidget(btnGitGoalAdd);
+    layGoalBtns->addWidget(btnGitGoalEdit);
+    layGoalBtns->addWidget(btnGitGoalDelete);
+    layGoalBtns->addWidget(btnGitGoalStart);
+    layGoalBtns->addStretch();
+    layGoals->addLayout(layGoalBtns);
+    grpGoals->setLayout(layGoals);
+    layout->addWidget(grpGoals);
     
     // 2. Branch & Actions
     QGroupBox *grpOps = new QGroupBox("Git 操作");
@@ -821,8 +876,10 @@ QWidget* MainWindow::createGitPage()
     
     layout->setStretch(0, 0);
     layout->setStretch(1, 0);
-    layout->setStretch(2, 1);
+    layout->setStretch(2, 0);
+    layout->setStretch(3, 1);
     
+    refreshGitGoalsTable();
     return page;
 }
 
@@ -1072,6 +1129,8 @@ void MainWindow::createConnections()
     connect(tblAGV, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
     connect(tblRobot, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
     connect(tabRegisterMaps, &QTabWidget::currentChanged, this, &MainWindow::onRegisterTabChanged);
+    connect(btnSearchMap, &QPushButton::clicked, this, &MainWindow::onSearchMapClicked);
+    connect(txtSearchMap, &QLineEdit::returnPressed, this, &MainWindow::onSearchMapTextFinished);
     connect(btnExportRegisterMap, &QPushButton::clicked, this, &MainWindow::onExportRegisterMapClicked);
     connect(btnImportRegisterMap, &QPushButton::clicked, this, &MainWindow::onImportRegisterMapClicked);
     connect(btnImportStandardFile, &QPushButton::clicked, this, &MainWindow::onImportStandardFileClicked);
@@ -1106,6 +1165,12 @@ void MainWindow::createConnections()
 
     // Git Connections
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
+    connect(btnGitRemoveHistory, &QPushButton::clicked, this, &MainWindow::onGitRemoveHistoryClicked);
+    connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
+    connect(btnGitGoalAdd, &QPushButton::clicked, this, &MainWindow::onGitGoalAddClicked);
+    connect(btnGitGoalEdit, &QPushButton::clicked, this, &MainWindow::onGitGoalEditClicked);
+    connect(btnGitGoalDelete, &QPushButton::clicked, this, &MainWindow::onGitGoalDeleteClicked);
+    connect(btnGitGoalStart, &QPushButton::clicked, this, &MainWindow::onGitGoalStartClicked);
     connect(btnGitRefreshBranches, &QPushButton::clicked, this, &MainWindow::onGitRefreshBranchesClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
     connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
@@ -1624,9 +1689,9 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
         
         if (displayFormat == FormatFloat && byteCount >= 4) {
             for (int i = 0; i < byteCount / 4; ++i) {
-                quint16 low, high;
-                stream >> low >> high; // CDAB: [Low, High]
-                quint32 raw = (quint32(high) << 16) | low;
+                quint16 cd, ab;
+                stream >> cd >> ab; // CDAB: [CD, AB]
+                quint32 raw = (quint32(ab) << 16) | cd;
                 float f;
                 memcpy(&f, &raw, 4);
                 regs << QString::number(f, 'f', 4);
@@ -1636,7 +1701,7 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
             for (int i = 0; i < byteCount / 8; ++i) {
                 quint16 gh, ef, cd, ab;
                 stream >> gh >> ef >> cd >> ab;
-                // GHEFCDAB：寄存器序 GH, EF, CD, AB -> 与主机 memcpy 的 uint64 小端字序一致
+                // GHEF CDAB: [GH, EF, CD, AB] -> 与主机 memcpy 的 uint64 小端字序一致
                 quint64 raw = quint64(ab) | (quint64(cd) << 16) | (quint64(ef) << 32) | (quint64(gh) << 48);
                 double d;
                 memcpy(&d, &raw, 8);
@@ -1730,12 +1795,12 @@ void MainWindow::onWriteSingleRegisterClicked() {
     } else if (format == FormatBinary) {
         val = txt.toUShort(nullptr, 2);
     } else if (format == FormatFloat || format == FormatDouble) {
-        // 单寄存器写浮点仅取字序中的首字：32 位 CDAB 取低位字，64 位 GHEFCDAB 取 GH
+        // 单寄存器写浮点仅取字序中的首字：32 位 CDAB 取 CD，64 位 GHEF CDAB 取 GH
         if (format == FormatFloat) {
             float f = txt.toFloat();
             quint32 raw;
             memcpy(&raw, &f, sizeof(float));
-            val = (quint16)(raw & 0xFFFF);
+            val = (quint16)((raw >> 16) & 0xFFFF);
         } else {
             double d = txt.toDouble();
             quint64 raw;
@@ -1766,15 +1831,15 @@ void MainWindow::onWriteMultipleRegistersClicked() {
              float f = s.toFloat();
              quint32 raw;
              memcpy(&raw, &f, 4);
-             vals << (quint16)(raw & 0xFFFF);         // CDAB: CD
-             vals << (quint16)((raw >> 16) & 0xFFFF); // AB
+             vals << (quint16)((raw >> 16) & 0xFFFF); // CDAB: CD
+             vals << (quint16)(raw & 0xFFFF);         // AB
          }
      } else if (format == FormatDouble) {
          for (const QString &s : items) {
              double d = s.toDouble();
              quint64 raw;
              memcpy(&raw, &d, 8);
-             vals << (quint16)((raw >> 48) & 0xFFFF); // GH
+             vals << (quint16)((raw >> 48) & 0xFFFF); // GHEF CDAB: GH
              vals << (quint16)((raw >> 32) & 0xFFFF); // EF
              vals << (quint16)((raw >> 16) & 0xFFFF); // CD
              vals << (quint16)(raw & 0xFFFF);         // AB
@@ -2713,11 +2778,11 @@ void MainWindow::onGitSelectDirClicked() {
     }
 }
 
-void MainWindow::runGitCommand(const QStringList &args) {
+bool MainWindow::runGitCommand(const QStringList &args) {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) {
         txtGitLog->append("<font color='red'>错误: 请先选择Git仓库目录!</font>");
-        return;
+        return false;
     }
 
     QProcess process;
@@ -2735,12 +2800,13 @@ void MainWindow::runGitCommand(const QStringList &args) {
     process.start();
     if (!process.waitForStarted()) {
          txtGitLog->append("<font color='red'>错误: 无法启动git命令，请检查是否安装了git</font>");
-         return;
+         return false;
     }
     
     // Default wait 30s
     if (!process.waitForFinished(30000)) {
          txtGitLog->append("<font color='red'>部分超时或后台运行...</font>");
+         return false;
     }
     
     QByteArray stdoutData = process.readAllStandardOutput();
@@ -2762,6 +2828,7 @@ void MainWindow::runGitCommand(const QStringList &args) {
     }
     
     txtGitLog->moveCursor(QTextCursor::End);
+    return process.exitCode() == 0;
 }
 
 void MainWindow::onGitRefreshBranchesClicked() {
@@ -2827,6 +2894,11 @@ void MainWindow::onGitRefreshBranchesClicked() {
         cmbGitBranches->setCurrentText(currentBranch);
 
     txtGitLog->append("<font color='gray'>已刷新本地及远程分支（红色为远程分支）。</font>");
+
+    const int completed = markGoalsCompletedForMergedBranches(workDir);
+    if (completed > 0) {
+        refreshGitGoalsTable();
+    }
 }
 
 void MainWindow::onGitDiffClicked() {
@@ -3330,8 +3402,7 @@ void MainWindow::onGitWorktreeRemoveClicked() {
             
             if (removed) {
                 settings.setValue("GitHistory", history);
-                cmbGitDir->clear();
-                cmbGitDir->addItems(history);
+                applyGitHistoryToCombo(history);
                 txtGitLog->append(QString("<font color='gray'>[History] 已从记忆记录中同步移除此 Worktree 路径。</font>"));
             }
         }
@@ -3439,7 +3510,16 @@ void MainWindow::onGitMergeClicked() {
                                   QMessageBox::Yes|QMessageBox::No);
     
     if (reply == QMessageBox::Yes) {
-        runGitCommand(QStringList() << "merge" << branchToMerge);
+        const QString mergedBranch = normalizeLocalBranchRef(branchToMerge);
+        if (runGitCommand(QStringList() << "merge" << branchToMerge)) {
+            const int completed = markGoalsCompletedForMergedBranches(workDir);
+            if (completed > 0) {
+                refreshGitGoalsTable();
+            } else if (!mergedBranch.isEmpty()) {
+                txtGitLog->append(QStringLiteral("<font color='gray'>[工作目标] 合并完成；分支 %1 若已并入主分支，刷新分支后会自动填写实际完成日期。</font>")
+                                      .arg(mergedBranch));
+            }
+        }
     }
 }
 
@@ -4322,40 +4402,1108 @@ void MainWindow::runCrashDiagnostics() {
     }
 }
 
+void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QString &selectPath) {
+    cmbGitDir->blockSignals(true);
+    cmbGitDir->clear();
+    cmbGitDir->addItems(history);
+    if (!selectPath.isEmpty()) {
+        cmbGitDir->setCurrentText(selectPath);
+    } else if (!history.isEmpty()) {
+        cmbGitDir->setCurrentIndex(0);
+    }
+    cmbGitDir->blockSignals(false);
+    refreshGitGoalsTable();
+}
+
 void MainWindow::saveGitHistory(const QString &dir) {
     if (dir.isEmpty()) return;
 
     QSettings settings("LiChenYang", "LinuxHelper");
     QStringList history = settings.value("GitHistory").toStringList();
+    const QString absDir = QDir(dir).absolutePath();
 
     history.removeAll(dir);
-    history.prepend(dir);
+    history.removeAll(absDir);
+    history.prepend(absDir);
 
     while (history.size() > MAX_HISTORY) {
         history.removeLast();
     }
 
     settings.setValue("GitHistory", history);
-    
-    // Update UI
-    cmbGitDir->blockSignals(true);
-    cmbGitDir->clear();
-    cmbGitDir->addItems(history);
-    cmbGitDir->setCurrentText(dir);
-    cmbGitDir->blockSignals(false);
+    applyGitHistoryToCombo(history, absDir);
 }
 
 void MainWindow::loadGitHistory() {
     QSettings settings("LiChenYang", "LinuxHelper");
     QStringList history = settings.value("GitHistory").toStringList();
-    
-    cmbGitDir->blockSignals(true);
-    cmbGitDir->clear();
-    cmbGitDir->addItems(history);
+    applyGitHistoryToCombo(history);
+}
+
+void MainWindow::removeGitHistoryPath(const QString &dir) {
+    if (dir.isEmpty()) return;
+
+    QSettings settings("LiChenYang", "LinuxHelper");
+    QStringList history = settings.value("GitHistory").toStringList();
+    const QString absDir = QDir(dir).absolutePath();
+
+    history.removeAll(dir);
+    history.removeAll(absDir);
+    settings.setValue("GitHistory", history);
+
+    QString nextSelect;
     if (!history.isEmpty()) {
-        cmbGitDir->setCurrentIndex(0);
+        nextSelect = history.first();
     }
-    cmbGitDir->blockSignals(false);
+    applyGitHistoryToCombo(history, nextSelect);
+}
+
+void MainWindow::onGitRemoveHistoryClicked() {
+    QString path = cmbGitDir->currentText().trimmed();
+    if (path.isEmpty()) {
+        QMessageBox::information(this, "删除记忆", "请先选择要移除的记忆路径。");
+        return;
+    }
+
+    const QString absPath = QDir(path).absolutePath();
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, "删除记忆",
+        QString("确定从记忆列表中移除路径吗？\n%1\n（不会删除磁盘上的目录）").arg(absPath),
+        QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    removeGitHistoryPath(path);
+    txtGitLog->append(QString("<font color='gray'>[History] 已移除记忆路径: %1</font>").arg(absPath));
+}
+
+void MainWindow::onGitDirChanged() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
+        markGoalsCompletedForMergedBranches(repoDir);
+        QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+        syncChildGoalEndDatesFromParents(goals);
+        saveGitGoals(repoDir, goals);
+    }
+    refreshGitGoalsTable();
+}
+
+QString MainWindow::gitGoalsRepoKey(const QString &repoDir) const {
+    if (repoDir.trimmed().isEmpty()) return QString();
+    return QDir(repoDir.trimmed()).absolutePath();
+}
+
+QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
+    QList<GitWorkGoal> goals;
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty()) return goals;
+
+    QSettings settings("LiChenYang", "LinuxHelper");
+    settings.beginGroup("GitGoals");
+    settings.beginGroup(key);
+    const int size = settings.beginReadArray("items");
+    for (int i = 0; i < size; ++i) {
+        settings.setArrayIndex(i);
+        GitWorkGoal g;
+        g.id = settings.value("id").toString();
+        g.title = settings.value("title").toString();
+        g.startDate = settings.value("startDate").toString();
+        g.endDate = settings.value("endDate").toString();
+        g.actualDate = settings.value("actualDate").toString();
+        g.parentId = settings.value("parentId").toString();
+        g.branchName = settings.value("branchName").toString();
+        g.started = settings.value("started").toBool();
+        g.remark = settings.value("remark").toString();
+        if (!g.id.isEmpty() && !g.title.isEmpty()) {
+            goals.append(g);
+        }
+    }
+    settings.endArray();
+    settings.endGroup();
+    settings.endGroup();
+    return goals;
+}
+
+QString MainWindow::normalizeLocalBranchRef(const QString &branchRef) const {
+    QString b = branchRef.trimmed();
+    if (b.startsWith(QStringLiteral("* "))) {
+        b = b.mid(2).trimmed();
+    }
+    if (b.startsWith(QStringLiteral("+ "))) {
+        b = b.mid(2).trimmed();
+    }
+    if (b.startsWith(QStringLiteral("remotes/"))) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        const QStringList parts = b.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+#else
+        const QStringList parts = b.split(QLatin1Char('/'), QString::SkipEmptyParts);
+#endif
+        if (parts.size() >= 3) {
+            return parts.mid(2).join(QLatin1Char('/'));
+        }
+    }
+    return b;
+}
+
+QString MainWindow::resolveMainBranchName(const QString &repoDir) const {
+    if (gitBranchExists(repoDir, QStringLiteral("main"))) {
+        return QStringLiteral("main");
+    }
+    if (gitBranchExists(repoDir, QStringLiteral("master"))) {
+        return QStringLiteral("master");
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"),
+                  QStringList() << QStringLiteral("symbolic-ref") << QStringLiteral("refs/remotes/origin/HEAD"));
+#else
+    process.start(QStringLiteral("git"),
+                  QStringList() << QStringLiteral("symbolic-ref") << QStringLiteral("refs/remotes/origin/HEAD"));
+#endif
+    if (process.waitForFinished(5000) && process.exitCode() == 0) {
+        const QString sym = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        const int slash = sym.lastIndexOf(QLatin1Char('/'));
+        if (slash >= 0) {
+            const QString candidate = sym.mid(slash + 1);
+            if (gitBranchExists(repoDir, candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return QString();
+}
+
+QStringList MainWindow::gitMergedLocalBranches(const QString &repoDir, const QString &intoBranch) const {
+    QStringList merged;
+    if (intoBranch.isEmpty()) {
+        return merged;
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"),
+                  QStringList() << QStringLiteral("branch") << QStringLiteral("--merged") << intoBranch);
+#else
+    process.start(QStringLiteral("git"),
+                  QStringList() << QStringLiteral("branch") << QStringLiteral("--merged") << intoBranch);
+#endif
+    if (!process.waitForFinished(10000) || process.exitCode() != 0) {
+        return merged;
+    }
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+
+    for (QString line : lines) {
+        const QString name = normalizeLocalBranchRef(line);
+        if (name.isEmpty() || name == intoBranch) {
+            continue;
+        }
+        if (!merged.contains(name, Qt::CaseInsensitive)) {
+            merged.append(name);
+        }
+    }
+    return merged;
+}
+
+int MainWindow::markGoalsCompletedForMergedBranches(const QString &repoDir) {
+    const QString mainBranch = resolveMainBranchName(repoDir);
+    if (mainBranch.isEmpty()) {
+        return 0;
+    }
+
+    const QStringList mergedBranches = gitMergedLocalBranches(repoDir, mainBranch);
+    if (mergedBranches.isEmpty()) {
+        return 0;
+    }
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    bool changed = false;
+    int updated = 0;
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+
+    for (GitWorkGoal &g : goals) {
+        if (g.branchName.isEmpty() || !g.actualDate.isEmpty()) {
+            continue;
+        }
+        const QString goalBranch = normalizeLocalBranchRef(g.branchName);
+        bool isMerged = false;
+        for (const QString &mb : mergedBranches) {
+            if (mb.compare(goalBranch, Qt::CaseInsensitive) == 0) {
+                isMerged = true;
+                break;
+            }
+        }
+        if (!isMerged) {
+            continue;
+        }
+        g.actualDate = today;
+        changed = true;
+        updated++;
+        txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 分支 %1 已合并入 %2，已填写实际完成日期: %3（%4）</font>")
+                              .arg(goalBranch, mainBranch, today, g.title));
+    }
+
+    if (changed) {
+        saveGitGoals(repoDir, goals);
+    }
+    return updated;
+}
+
+void MainWindow::saveGitGoals(const QString &repoDir, const QList<GitWorkGoal> &goals) {
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty()) return;
+
+    QSettings settings("LiChenYang", "LinuxHelper");
+    settings.beginGroup("GitGoals");
+    settings.beginGroup(key);
+    settings.remove("");
+    settings.beginWriteArray("items");
+    int idx = 0;
+    for (const GitWorkGoal &g : goals) {
+        if (g.id.isEmpty() || g.title.isEmpty()) continue;
+        settings.setArrayIndex(idx++);
+        settings.setValue("id", g.id);
+        settings.setValue("title", g.title);
+        settings.setValue("startDate", g.startDate);
+        settings.setValue("endDate", g.endDate);
+        settings.setValue("actualDate", g.actualDate);
+        settings.setValue("parentId", g.parentId);
+        settings.setValue("branchName", g.branchName);
+        settings.setValue("started", g.started);
+        settings.setValue("remark", g.remark);
+    }
+    settings.endArray();
+    settings.endGroup();
+    settings.endGroup();
+}
+
+QString MainWindow::gitGoalTitleById(const QList<GitWorkGoal> &goals, const QString &id) const {
+    if (id.isEmpty()) return QString();
+    for (const GitWorkGoal &g : goals) {
+        if (g.id == id) return g.title;
+    }
+    return QString();
+}
+
+bool MainWindow::isGitGoalHiddenByCollapse(const GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
+                                           const QSet<QString> &collapsedIds) const {
+    QString parentId = goal.parentId;
+    while (!parentId.isEmpty()) {
+        if (collapsedIds.contains(parentId)) {
+            return true;
+        }
+        const GitWorkGoal *parent = gitGoalById(allGoals, parentId);
+        if (!parent) {
+            break;
+        }
+        parentId = parent->parentId;
+    }
+    return false;
+}
+
+QSet<QString> &MainWindow::gitGoalCollapsedIdsForRepo(const QString &repoDir) {
+    const QString key = gitGoalsRepoKey(repoDir);
+    return gitGoalCollapsedByRepo[key];
+}
+
+void MainWindow::appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWorkGoal> &allGoals, int depth,
+                                        bool hasChildren, bool childrenCollapsed) {
+    const int row = tblGitGoals->rowCount();
+    tblGitGoals->insertRow(row);
+
+    if (hasChildren) {
+        QPushButton *btnToggle = new QPushButton(childrenCollapsed ? QStringLiteral("▶")
+                                                                   : QStringLiteral("▼"));
+        btnToggle->setFixedSize(26, 22);
+        btnToggle->setToolTip(childrenCollapsed ? QStringLiteral("展开子目标")
+                                              : QStringLiteral("折叠子目标"));
+        btnToggle->setFlat(true);
+        const QString goalId = g.id;
+        connect(btnToggle, &QPushButton::clicked, this, [this, goalId]() {
+            const QString repoDir = cmbGitDir->currentText().trimmed();
+            QSet<QString> &collapsed = gitGoalCollapsedIdsForRepo(repoDir);
+            if (collapsed.contains(goalId)) {
+                collapsed.remove(goalId);
+            } else {
+                collapsed.insert(goalId);
+            }
+            refreshGitGoalsTable();
+        });
+        tblGitGoals->setCellWidget(row, 0, btnToggle);
+    }
+
+    const QString indent = depth > 0 ? QString(depth * 4, QLatin1Char(' ')) : QString();
+    QTableWidgetItem *titleItem = new QTableWidgetItem(indent + g.title);
+    titleItem->setData(Qt::UserRole, g.id);
+    tblGitGoals->setItem(row, 1, titleItem);
+
+    QString parentDisplay = QStringLiteral("(无)");
+    if (!g.parentId.isEmpty()) {
+        const QString parentTitle = gitGoalTitleById(allGoals, g.parentId);
+        parentDisplay = parentTitle.isEmpty() ? QStringLiteral("(已删除)") : parentTitle;
+    }
+    tblGitGoals->setItem(row, 2, new QTableWidgetItem(parentDisplay));
+
+    QString startDisplay;
+    if (g.startDate.isEmpty()) {
+        startDisplay = g.parentId.isEmpty() ? QStringLiteral("未开始") : QStringLiteral("—");
+    } else if (!g.started) {
+        startDisplay = g.startDate + QStringLiteral(" (计划)");
+    } else {
+        startDisplay = g.startDate;
+    }
+    tblGitGoals->setItem(row, 3, new QTableWidgetItem(startDisplay));
+    tblGitGoals->setItem(row, 4, new QTableWidgetItem(g.endDate.isEmpty() ? QStringLiteral("—") : g.endDate));
+    const QString actual = g.actualDate.isEmpty() ? QStringLiteral("—") : g.actualDate;
+    tblGitGoals->setItem(row, 5, new QTableWidgetItem(actual));
+    const QString branchDisplay = g.branchName.isEmpty() ? QStringLiteral("—") : g.branchName;
+    tblGitGoals->setItem(row, 6, new QTableWidgetItem(branchDisplay));
+
+    QString remarkDisplay = g.remark.trimmed();
+    if (remarkDisplay.isEmpty()) {
+        remarkDisplay = QStringLiteral("—");
+    } else {
+        remarkDisplay.replace(QLatin1Char('\n'), QLatin1Char(' '));
+        if (remarkDisplay.length() > 40) {
+            remarkDisplay = remarkDisplay.left(40) + QStringLiteral("…");
+        }
+    }
+    QTableWidgetItem *remarkItem = new QTableWidgetItem(remarkDisplay);
+    if (!g.remark.trimmed().isEmpty()) {
+        remarkItem->setToolTip(g.remark.trimmed());
+    }
+    tblGitGoals->setItem(row, 7, remarkItem);
+}
+
+void MainWindow::refreshGitGoalsTable() {
+    if (!tblGitGoals) return;
+
+    const QString repoDir = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    const QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    const QSet<QString> collapsedIds = repoDir.isEmpty() ? QSet<QString>()
+                                                         : gitGoalCollapsedIdsForRepo(repoDir);
+
+    QHash<QString, QStringList> childrenByParent;
+    QStringList rootIds;
+    for (const GitWorkGoal &g : goals) {
+        childrenByParent[g.parentId].append(g.id);
+        if (g.parentId.isEmpty()) {
+            rootIds.append(g.id);
+        }
+    }
+
+    tblGitGoals->setRowCount(0);
+
+    std::function<void(const QString &, int)> visitGoal;
+    visitGoal = [&](const QString &goalId, int depth) {
+        const GitWorkGoal *g = gitGoalById(goals, goalId);
+        if (!g || isGitGoalHiddenByCollapse(*g, goals, collapsedIds)) {
+            return;
+        }
+
+        const QStringList children = childrenByParent.value(goalId);
+        const bool hasChildren = !children.isEmpty();
+        const bool childrenCollapsed = collapsedIds.contains(goalId);
+        appendGitGoalTableRow(*g, goals, depth, hasChildren, childrenCollapsed);
+
+        for (const QString &childId : children) {
+            visitGoal(childId, depth + 1);
+        }
+    };
+
+    for (const QString &rootId : rootIds) {
+        visitGoal(rootId, 0);
+    }
+
+    tblGitGoals->resizeColumnsToContents();
+    tblGitGoals->setColumnWidth(0, 32);
+}
+
+GitWorkGoal *MainWindow::gitGoalById(QList<GitWorkGoal> &goals, const QString &id) {
+    for (GitWorkGoal &g : goals) {
+        if (g.id == id) return &g;
+    }
+    return nullptr;
+}
+
+const GitWorkGoal *MainWindow::gitGoalById(const QList<GitWorkGoal> &goals, const QString &id) const {
+    for (const GitWorkGoal &g : goals) {
+        if (g.id == id) return &g;
+    }
+    return nullptr;
+}
+
+QString MainWindow::slugifyBranchName(const QString &text) const {
+    QString s = text.trimmed().toLower();
+    QString out;
+    bool lastDash = false;
+    for (const QChar &c : s) {
+        if ((c >= QLatin1Char('a') && c <= QLatin1Char('z'))
+            || (c >= QLatin1Char('0') && c <= QLatin1Char('9'))) {
+            out += c;
+            lastDash = false;
+        } else if (!lastDash && !out.isEmpty()) {
+            out += QLatin1Char('-');
+            lastDash = true;
+        }
+    }
+    while (out.endsWith(QLatin1Char('-'))) {
+        out.chop(1);
+    }
+    if (out.length() > 50) {
+        out = out.left(50);
+        while (out.endsWith(QLatin1Char('-'))) {
+            out.chop(1);
+        }
+    }
+    return out.isEmpty() ? QStringLiteral("goal") : out;
+}
+
+bool MainWindow::splitGoalBranchCategory(const QString &fullBranch, QString &category,
+                                          QString &namePart) const {
+    category.clear();
+    namePart = fullBranch.trimmed();
+    if (namePart.startsWith(QStringLiteral("fix/"), Qt::CaseInsensitive)) {
+        category = QStringLiteral("fix");
+        namePart = namePart.mid(4);
+        return true;
+    }
+    if (namePart.startsWith(QStringLiteral("feature/"), Qt::CaseInsensitive)) {
+        category = QStringLiteral("feature");
+        namePart = namePart.mid(8);
+        return true;
+    }
+    return false;
+}
+
+QString MainWindow::buildGoalBranchName(const QString &category, const QString &namePart) const {
+    const QString slug = slugifyBranchName(namePart);
+    if (category == QLatin1String("fix") || category == QLatin1String("feature")) {
+        return category + QLatin1Char('/') + slug;
+    }
+    return slug;
+}
+
+QString MainWindow::chineseTitleToPinyinSlug(const QString &title) {
+    QProcess proc;
+    proc.setProgram("python3");
+    proc.setArguments(QStringList()
+                      << QStringLiteral("-c")
+                      << QStringLiteral(
+                             "import sys\n"
+                             "t=sys.argv[1]\n"
+                             "try:\n"
+                             " from pypinyin import lazy_pinyin\n"
+                             " py='-'.join(lazy_pinyin(t))\n"
+                             " print(py)\n"
+                             "except Exception:\n"
+                             " print('')\n")
+                      << title);
+    proc.start();
+    if (proc.waitForFinished(4000) && proc.exitCode() == 0) {
+        QString py = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+        py = slugifyBranchName(py);
+        if (!py.isEmpty() && py != QLatin1String("goal")) {
+            return py;
+        }
+    }
+
+    QString asciiPart = slugifyBranchName(title);
+    if (!asciiPart.isEmpty() && asciiPart != QLatin1String("goal")) {
+        return asciiPart;
+    }
+    const uint hash = qHash(title);
+    return QStringLiteral("goal-%1").arg(hash % 100000, 5, 10, QChar(QLatin1Char('0')));
+}
+
+QString MainWindow::translateGoalTitleToEnglish(const QString &title) {
+    const QString trimmed = title.trimmed();
+    if (trimmed.isEmpty()) {
+        return QString();
+    }
+
+    QNetworkAccessManager mgr;
+    QUrl url(QStringLiteral("https://api.mymemory.translated.net/get"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("q"), trimmed);
+    query.addQueryItem(QStringLiteral("langpair"), QStringLiteral("zh-CN|en"));
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("LinuxHelper/1.0"));
+
+    QNetworkReply *reply = mgr.get(request);
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    timer.start(8000);
+    loop.exec();
+
+    QString translated;
+    if (reply->error() == QNetworkReply::NoError) {
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject responseData = doc.object().value(QStringLiteral("responseData")).toObject();
+        translated = responseData.value(QStringLiteral("translatedText")).toString().trimmed();
+    }
+    reply->deleteLater();
+
+    if (!translated.isEmpty()) {
+        const QString slug = slugifyBranchName(translated);
+        if (!slug.isEmpty()) {
+            txtGitLog->append(QStringLiteral("[工作目标] 联网翻译分支名: %1 → %2").arg(trimmed, slug));
+            return slug;
+        }
+    }
+
+    txtGitLog->append(QStringLiteral("[工作目标] 联网翻译不可用，使用拼音/离线命名。"));
+    return chineseTitleToPinyinSlug(trimmed);
+}
+
+QString MainWindow::suggestBranchNameFromTitle(const QString &title) {
+    return translateGoalTitleToEnglish(title);
+}
+
+bool MainWindow::gitBranchExists(const QString &repoDir, const QString &branchName) const {
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"), QStringList() << QStringLiteral("show-ref")
+                                                           << QStringLiteral("--verify")
+                                                           << QStringLiteral("--quiet")
+                                                           << QStringLiteral("refs/heads/") + branchName);
+#else
+    process.start(QStringLiteral("git"), QStringList() << QStringLiteral("show-ref")
+                                                       << QStringLiteral("--verify")
+                                                       << QStringLiteral("--quiet")
+                                                       << QStringLiteral("refs/heads/") + branchName);
+#endif
+    process.waitForFinished(5000);
+    return process.exitCode() == 0;
+}
+
+bool MainWindow::createGitBranch(const QString &repoDir, const QString &branchName) {
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.setProgram(QStringLiteral("git.exe"));
+#else
+    process.setProgram(QStringLiteral("git"));
+#endif
+    process.setArguments(QStringList() << QStringLiteral("checkout") << QStringLiteral("-b") << branchName);
+    process.start();
+    if (!process.waitForFinished(30000)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[工作目标] 创建分支超时</font>"));
+        return false;
+    }
+    const QString stdoutData = QString::fromLocal8Bit(process.readAllStandardOutput());
+    const QString stderrData = QString::fromLocal8Bit(process.readAllStandardError());
+    if (process.exitCode() != 0) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[工作目标] 创建分支失败: %1</font>").arg(stderrData.trimmed()));
+        return false;
+    }
+    txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 已创建并切换到分支: %1</font>").arg(branchName));
+    if (!stdoutData.trimmed().isEmpty()) {
+        txtGitLog->append(stdoutData.trimmed());
+    }
+    onGitRefreshBranchesClicked();
+    const int index = cmbGitBranches->findText(branchName);
+    if (index >= 0) {
+        cmbGitBranches->setCurrentIndex(index);
+    }
+    return true;
+}
+
+void MainWindow::fillAncestorStartDates(QList<GitWorkGoal> &goals, const QString &goalId,
+                                        const QString &dateStr) {
+    const GitWorkGoal *g = gitGoalById(goals, goalId);
+    if (!g || g->parentId.isEmpty()) {
+        return;
+    }
+    GitWorkGoal *parent = gitGoalById(goals, g->parentId);
+    if (!parent) {
+        return;
+    }
+    if (parent->startDate.isEmpty()) {
+        parent->startDate = dateStr;
+        parent->started = true;
+    }
+    fillAncestorStartDates(goals, parent->id, dateStr);
+}
+
+bool MainWindow::promptGitGoalStartDialog(const QString &goalTitle, QString &branchName,
+                                          bool &createBranch) {
+    createBranch = false;
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("目标开始"));
+    dlg.setMinimumWidth(480);
+
+    QLabel *lblInfo = new QLabel(
+        QStringLiteral("目标「%1」即将开始。\n请确认分支类型与名称（名称可由中文自动翻译），创建分支时将加上 fix/ 或 feature/ 前缀：")
+            .arg(goalTitle));
+    lblInfo->setWordWrap(true);
+
+    QRadioButton *rdFeature = new QRadioButton(QStringLiteral("feature/（新功能）"));
+    QRadioButton *rdFix = new QRadioButton(QStringLiteral("fix/（问题修复）"));
+    rdFeature->setChecked(true);
+    QButtonGroup *grpCategory = new QButtonGroup(&dlg);
+    grpCategory->addButton(rdFeature, 0);
+    grpCategory->addButton(rdFix, 1);
+
+    QWidget *rowCategory = new QWidget();
+    QHBoxLayout *layCategory = new QHBoxLayout(rowCategory);
+    layCategory->setContentsMargins(0, 0, 0, 0);
+    layCategory->addWidget(new QLabel(QStringLiteral("分支类型:")));
+    layCategory->addWidget(rdFeature);
+    layCategory->addWidget(rdFix);
+    layCategory->addStretch();
+
+    QLineEdit *txtBranch = new QLineEdit();
+    txtBranch->setPlaceholderText(QStringLiteral("翻译后的英文名，如 login-timeout"));
+
+    QLabel *lblPreview = new QLabel();
+    lblPreview->setWordWrap(true);
+    lblPreview->setStyleSheet(QStringLiteral("color: #1565c0; font-weight: bold;"));
+
+    auto selectedCategory = [&]() -> QString {
+        return rdFix->isChecked() ? QStringLiteral("fix") : QStringLiteral("feature");
+    };
+
+    auto updatePreview = [&]() {
+        QString namePart = txtBranch->text().trimmed();
+        QString cat;
+        QString stripped;
+        if (splitGoalBranchCategory(namePart, cat, stripped)) {
+            namePart = stripped;
+        }
+        const QString full = buildGoalBranchName(selectedCategory(), namePart);
+        lblPreview->setText(QStringLiteral("创建分支时将使用: %1").arg(full));
+    };
+
+    QPushButton *btnConfirmBranch = new QPushButton(QStringLiteral("确认并开始（创建分支）"));
+    btnConfirmBranch->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    QPushButton *btnStartOnly = new QPushButton(QStringLiteral("仅记录开始（不创建分支）"));
+    QPushButton *btnCancel = new QPushButton(QStringLiteral("取消"));
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(lblInfo);
+    layout->addWidget(rowCategory);
+    layout->addWidget(new QLabel(QStringLiteral("分支名称:")));
+    layout->addWidget(txtBranch);
+    layout->addWidget(lblPreview);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addWidget(btnConfirmBranch);
+    btnLayout->addWidget(btnStartOnly);
+    btnLayout->addWidget(btnCancel);
+    layout->addLayout(btnLayout);
+
+    QString existingCategory;
+    QString existingNamePart;
+    if (splitGoalBranchCategory(branchName, existingCategory, existingNamePart)) {
+        if (existingCategory == QLatin1String("fix")) {
+            rdFix->setChecked(true);
+        } else {
+            rdFeature->setChecked(true);
+        }
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const QString suggested = suggestBranchNameFromTitle(goalTitle);
+    QApplication::restoreOverrideCursor();
+
+    if (!existingNamePart.isEmpty()) {
+        txtBranch->setText(existingNamePart);
+    } else {
+        txtBranch->setText(suggested);
+    }
+    updatePreview();
+
+    connect(txtBranch, &QLineEdit::textChanged, &dlg, updatePreview);
+    connect(rdFeature, &QRadioButton::toggled, &dlg, updatePreview);
+    connect(rdFix, &QRadioButton::toggled, &dlg, updatePreview);
+
+    auto acceptWithBranch = [&](bool doCreate) {
+        QString namePart = txtBranch->text().trimmed();
+        QString ignoredCat;
+        splitGoalBranchCategory(namePart, ignoredCat, namePart);
+        const QString slug = slugifyBranchName(namePart);
+        if (slug.isEmpty() || slug == QLatin1String("goal")) {
+            QMessageBox::warning(&dlg, QStringLiteral("目标开始"), QStringLiteral("请输入有效的英文分支名。"));
+            return;
+        }
+        if (doCreate) {
+            branchName = buildGoalBranchName(selectedCategory(), slug);
+        } else {
+            branchName = slug;
+        }
+        createBranch = doCreate;
+        dlg.accept();
+    };
+
+    connect(btnConfirmBranch, &QPushButton::clicked, &dlg, [&]() { acceptWithBranch(true); });
+    connect(btnStartOnly, &QPushButton::clicked, &dlg, [&]() { acceptWithBranch(false); });
+    connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    return dlg.exec() == QDialog::Accepted;
+}
+
+bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
+                                      const QString &excludeGoalId) {
+    QDialog dlg(this);
+    dlg.setWindowTitle(excludeGoalId.isEmpty() ? QStringLiteral("添加工作目标")
+                                               : QStringLiteral("编辑工作目标"));
+    dlg.setMinimumWidth(480);
+
+    QLineEdit *txtTitle = new QLineEdit(goal.title);
+    QComboBox *cmbParent = new QComboBox();
+    cmbParent->addItem(QStringLiteral("(无)"), QString());
+    for (const GitWorkGoal &g : allGoals) {
+        if (g.id == excludeGoalId) continue;
+        cmbParent->addItem(g.title, g.id);
+    }
+    if (goal.parentId.isEmpty()) {
+        cmbParent->setCurrentIndex(0);
+    } else {
+        const int pIdx = cmbParent->findData(goal.parentId);
+        if (pIdx >= 0) cmbParent->setCurrentIndex(pIdx);
+    }
+
+    QLabel *lblPlanHint = new QLabel(QStringLiteral("无父目标时需填写计划开始与计划结束；子目标的计划结束继承父目标，开始日期在「目标开始」时记录。"));
+    lblPlanHint->setWordWrap(true);
+    lblPlanHint->setStyleSheet(QStringLiteral("color: #555; font-size: 11px;"));
+
+    QDateEdit *dateStart = new QDateEdit(QDate::currentDate());
+    dateStart->setCalendarPopup(true);
+    dateStart->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    QDateEdit *dateEnd = new QDateEdit(QDate::currentDate().addDays(7));
+    dateEnd->setCalendarPopup(true);
+    dateEnd->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+
+    QWidget *rowStart = new QWidget();
+    QHBoxLayout *layStart = new QHBoxLayout(rowStart);
+    layStart->setContentsMargins(0, 0, 0, 0);
+    layStart->addWidget(new QLabel(QStringLiteral("计划开始:")));
+    layStart->addWidget(dateStart, 1);
+
+    QWidget *rowEnd = new QWidget();
+    QHBoxLayout *layEnd = new QHBoxLayout(rowEnd);
+    layEnd->setContentsMargins(0, 0, 0, 0);
+    layEnd->addWidget(new QLabel(QStringLiteral("计划结束:")));
+    layEnd->addWidget(dateEnd, 1);
+
+    QLabel *lblChildPlanEnd = new QLabel();
+    lblChildPlanEnd->setWordWrap(true);
+    lblChildPlanEnd->setStyleSheet(QStringLiteral("color: #1565c0;"));
+
+    QTextEdit *txtRemark = new QTextEdit(goal.remark);
+    txtRemark->setPlaceholderText(QStringLiteral("可选：记录需求链接、问题现象、验收标准等"));
+    txtRemark->setMaximumHeight(100);
+
+    QCheckBox *chkActual = new QCheckBox(QStringLiteral("已填写实际完成日期"));
+    QDateEdit *dateActual = new QDateEdit(QDate::currentDate());
+    dateActual->setCalendarPopup(true);
+    dateActual->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    dateActual->setEnabled(false);
+
+    if (!goal.startDate.isEmpty()) {
+        const QDate d = QDate::fromString(goal.startDate, QStringLiteral("yyyy-MM-dd"));
+        if (d.isValid()) dateStart->setDate(d);
+    }
+    if (!goal.endDate.isEmpty()) {
+        const QDate d = QDate::fromString(goal.endDate, QStringLiteral("yyyy-MM-dd"));
+        if (d.isValid()) dateEnd->setDate(d);
+    }
+    if (!goal.actualDate.isEmpty()) {
+        const QDate d = QDate::fromString(goal.actualDate, QStringLiteral("yyyy-MM-dd"));
+        if (d.isValid()) {
+            chkActual->setChecked(true);
+            dateActual->setEnabled(true);
+            dateActual->setDate(d);
+        }
+    }
+
+    auto updatePlanFieldsVisibility = [&]() {
+        const bool isRoot = cmbParent->currentData().toString().isEmpty();
+        rowStart->setVisible(isRoot);
+        rowEnd->setVisible(isRoot);
+        lblChildPlanEnd->setVisible(!isRoot);
+        if (!isRoot) {
+            const QString parentId = cmbParent->currentData().toString();
+            const GitWorkGoal *parent = gitGoalById(allGoals, parentId);
+            if (parent && !parent->endDate.isEmpty()) {
+                lblChildPlanEnd->setText(
+                    QStringLiteral("计划结束（继承父目标「%1」）: %2")
+                        .arg(parent->title, parent->endDate));
+            } else {
+                lblChildPlanEnd->setText(QStringLiteral("计划结束: 父目标尚未设置计划结束，请先编辑父目标。"));
+            }
+        }
+    };
+    connect(cmbParent, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, updatePlanFieldsVisibility);
+    connect(chkActual, &QCheckBox::toggled, dateActual, &QWidget::setEnabled);
+    updatePlanFieldsVisibility();
+
+    QFormLayout *form = new QFormLayout();
+    form->addRow(QStringLiteral("目标名称:"), txtTitle);
+    form->addRow(QStringLiteral("父目标:"), cmbParent);
+    form->addRow(lblPlanHint);
+    form->addRow(rowStart);
+    form->addRow(rowEnd);
+    form->addRow(lblChildPlanEnd);
+    form->addRow(QStringLiteral("备注:"), txtRemark);
+    form->addRow(chkActual);
+    form->addRow(QStringLiteral("实际完成:"), dateActual);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted) return false;
+
+    const QString title = txtTitle->text().trimmed();
+    if (title.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("工作目标"), QStringLiteral("请填写目标名称。"));
+        return false;
+    }
+
+    const QString parentId = cmbParent->currentData().toString();
+    if (!excludeGoalId.isEmpty() && parentId == excludeGoalId) {
+        QMessageBox::warning(this, QStringLiteral("工作目标"), QStringLiteral("不能将目标自身设为父目标。"));
+        return false;
+    }
+
+    const bool isRoot = parentId.isEmpty();
+    if (isRoot) {
+        if (dateEnd->date() < dateStart->date()) {
+            QMessageBox::warning(this, QStringLiteral("工作目标"), QStringLiteral("计划结束日期不能早于计划开始日期。"));
+            return false;
+        }
+        goal.startDate = dateStart->date().toString(QStringLiteral("yyyy-MM-dd"));
+        goal.endDate = dateEnd->date().toString(QStringLiteral("yyyy-MM-dd"));
+    } else {
+        const GitWorkGoal *parent = gitGoalById(allGoals, parentId);
+        if (!parent || parent->endDate.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("工作目标"),
+                                 QStringLiteral("父目标尚未设置计划结束日期，请先为父目标填写计划结束。"));
+            return false;
+        }
+        goal.endDate = parent->endDate;
+        if (excludeGoalId.isEmpty()) {
+            goal.startDate.clear();
+            goal.started = false;
+        }
+    }
+
+    goal.title = title;
+    goal.parentId = parentId;
+    goal.remark = txtRemark->toPlainText().trimmed();
+    goal.actualDate = chkActual->isChecked() ? dateActual->date().toString(QStringLiteral("yyyy-MM-dd")) : QString();
+    return true;
+}
+
+void MainWindow::onGitGoalAddClicked() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("工作目标"), QStringLiteral("请先选择 Git 仓库目录。"));
+        return;
+    }
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    GitWorkGoal goal;
+    goal.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    goal.started = false;
+
+    if (!editGitWorkGoalDialog(goal, goals)) return;
+
+    goals.append(goal);
+    syncChildGoalEndDatesFromParents(goals);
+    saveGitGoals(repoDir, goals);
+    refreshGitGoalsTable();
+    txtGitLog->append(QString("[工作目标] 已添加: %1").arg(goal.title));
+}
+
+void MainWindow::syncChildGoalEndDatesFromParents(QList<GitWorkGoal> &goals) {
+    bool changed = true;
+    int guard = 0;
+    while (changed && guard++ < 32) {
+        changed = false;
+        for (GitWorkGoal &g : goals) {
+            if (g.parentId.isEmpty()) {
+                continue;
+            }
+            const GitWorkGoal *parent = gitGoalById(goals, g.parentId);
+            if (!parent || parent->endDate.isEmpty()) {
+                continue;
+            }
+            if (g.endDate != parent->endDate) {
+                g.endDate = parent->endDate;
+                changed = true;
+            }
+        }
+    }
+}
+
+void MainWindow::onGitGoalStartClicked() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("工作目标"), QStringLiteral("请先选择 Git 仓库目录。"));
+        return;
+    }
+    if (!QDir(repoDir).exists()) {
+        QMessageBox::warning(this, QStringLiteral("工作目标"), QStringLiteral("当前仓库目录不存在。"));
+        return;
+    }
+
+    const int row = tblGitGoals->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, QStringLiteral("工作目标"), QStringLiteral("请先选择要开始的目标。"));
+        return;
+    }
+
+    QTableWidgetItem *idItem = tblGitGoals->item(row, 1);
+    if (!idItem) return;
+    const QString goalId = idItem->data(Qt::UserRole).toString();
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    GitWorkGoal *goal = gitGoalById(goals, goalId);
+    if (!goal) return;
+
+    const bool isRoot = goal->parentId.isEmpty();
+
+    if (isRoot && goal->endDate.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("目标开始"),
+                             QStringLiteral("请先在编辑中为该根目标填写计划结束日期。"));
+        return;
+    }
+
+    if (goal->started) {
+        if (QMessageBox::question(
+                this, QStringLiteral("目标开始"),
+                QStringLiteral("该目标已开始（开始日期: %1）。是否重新记录开始日期并再次确认分支？")
+                    .arg(goal->startDate),
+                QMessageBox::Yes | QMessageBox::No)
+            != QMessageBox::Yes) {
+            return;
+        }
+    }
+
+    QString branchName = goal->branchName;
+    bool createBranch = false;
+    if (!promptGitGoalStartDialog(goal->title, branchName, createBranch)) {
+        return;
+    }
+
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    goal->startDate = today;
+    goal->started = true;
+    fillAncestorStartDates(goals, goal->id, today);
+
+    if (createBranch) {
+        if (gitBranchExists(repoDir, branchName)) {
+            QMessageBox::warning(this, QStringLiteral("目标开始"),
+                                 QStringLiteral("分支 %1 已存在，请修改分支名或选择不创建分支。").arg(branchName));
+            return;
+        }
+        if (!createGitBranch(repoDir, branchName)) {
+            return;
+        }
+        goal->branchName = branchName;
+    }
+
+    saveGitGoals(repoDir, goals);
+    refreshGitGoalsTable();
+    txtGitLog->append(QStringLiteral("[工作目标] 已开始: %1，开始日期 %2%3")
+                          .arg(goal->title,
+                               today,
+                               createBranch ? QStringLiteral("，分支 ") + branchName : QStringLiteral("（未创建分支）")));
+}
+
+void MainWindow::onGitGoalEditClicked() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty()) {
+        QMessageBox::information(this, "工作目标", "请先选择 Git 仓库目录。");
+        return;
+    }
+
+    const int row = tblGitGoals->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, "工作目标", "请先选择要编辑的目标。");
+        return;
+    }
+
+    QTableWidgetItem *idItem = tblGitGoals->item(row, 1);
+    if (!idItem) return;
+    const QString goalId = idItem->data(Qt::UserRole).toString();
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    for (int i = 0; i < goals.size(); ++i) {
+        if (goals[i].id != goalId) continue;
+        GitWorkGoal edited = goals[i];
+        if (!editGitWorkGoalDialog(edited, goals, goalId)) return;
+        goals[i] = edited;
+        syncChildGoalEndDatesFromParents(goals);
+        saveGitGoals(repoDir, goals);
+        refreshGitGoalsTable();
+        txtGitLog->append(QString("[工作目标] 已更新: %1").arg(edited.title));
+        return;
+    }
+}
+
+void MainWindow::onGitGoalDeleteClicked() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty()) {
+        QMessageBox::information(this, "工作目标", "请先选择 Git 仓库目录。");
+        return;
+    }
+
+    const int row = tblGitGoals->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, "工作目标", "请先选择要删除的目标。");
+        return;
+    }
+
+    QTableWidgetItem *idItem = tblGitGoals->item(row, 1);
+    if (!idItem) return;
+    const QString goalId = idItem->data(Qt::UserRole).toString();
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    const QString title = gitGoalTitleById(goals, goalId);
+    if (title.isEmpty()) {
+        return;
+    }
+
+    if (QMessageBox::question(this, "删除工作目标",
+                              QString("确定删除目标「%1」吗？\n其子目标将变为无父目标。").arg(title),
+                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    QList<GitWorkGoal> updated;
+    for (GitWorkGoal g : goals) {
+        if (g.id == goalId) continue;
+        if (g.parentId == goalId) g.parentId.clear();
+        updated.append(g);
+    }
+    saveGitGoals(repoDir, updated);
+    refreshGitGoalsTable();
+    txtGitLog->append(QString("[工作目标] 已删除: %1").arg(title));
 }
 
 void MainWindow::setupRegisterTable(QTableWidget *table) {
@@ -4434,8 +5582,11 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
     } else if (fmt.startsWith("32-bit")) {
         uint32_t val32;
         if (fmt == "32-bit Float") {
-            // CDAB
-            val32 = ((uint32_t)target->getRegister(addr + 1) << 16) | target->getRegister(addr);
+            // CDAB: [CD, AB] -> CD is high 16 bits of quint32 (which is low part of float? No, CDAB means big-endian order for the 32-bit float but words swapped?)
+            // Normally CDAB for float means: Word0=CD, Word1=AB. 
+            // If float is IEEE754: [Byte3 Byte2 Byte1 Byte0]
+            // CDAB usually means [Byte3 Byte2] [Byte1 Byte1]
+            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
         } else {
             val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
         }
@@ -4448,7 +5599,7 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
         }
     } else if (fmt == "64-bit Float") {
         quint64 raw = 0;
-        // GHEFCDAB：addr 起为 GH, EF, CD, AB
+        // GHEF CDAB：addr 起为 GH, EF, CD, AB
         raw |= (quint64)target->getRegister(addr + 3);
         raw |= ((quint64)target->getRegister(addr + 2) << 16);
         raw |= ((quint64)target->getRegister(addr + 1) << 32);
@@ -5045,6 +6196,53 @@ void MainWindow::onImportRegisterMapClicked() {
     saveRegisterTables();
     syncSimulatorTablesFromMaps();
     QMessageBox::information(this, "成功", "地址映射表 CSV 导入成功。");
+}
+
+void MainWindow::onSearchMapTextFinished()
+{
+    onSearchMapClicked();
+}
+
+void MainWindow::onSearchMapClicked()
+{
+    QString searchText = txtSearchMap->text().trimmed();
+    if (searchText.isEmpty()) return;
+
+    QTableWidget *currentTable = qobject_cast<QTableWidget*>(tabRegisterMaps->currentWidget());
+    if (!currentTable) return;
+
+    // 获取当前选中的位置作为起点
+    int startRow = 0;
+    int startCol = 0;
+    QTableWidgetItem *currentItem = currentTable->currentItem();
+    if (currentItem) {
+        startRow = currentItem->row();
+        startCol = currentItem->column() + 1; // 从下一个单元格开始搜
+        if (startCol >= currentTable->columnCount()) {
+            startCol = 0;
+            startRow++;
+        }
+    }
+
+    int rowCount = currentTable->rowCount();
+    int colCount = currentTable->columnCount();
+
+    // 循环搜索
+    for (int i = 0; i < rowCount; i++) {
+        int r = (startRow + i) % rowCount;
+        int cStart = (i == 0) ? startCol : 0;
+        for (int c = cStart; c < colCount; c++) {
+            QTableWidgetItem *item = currentTable->item(r, c);
+            if (item && item->text().contains(searchText, Qt::CaseInsensitive)) {
+                currentTable->setCurrentCell(r, c);
+                currentTable->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+                return;
+            }
+        }
+    }
+
+    // 如果没搜到，提示一下
+    QMessageBox::information(this, "搜索", QString("未找到 \"%1\"").arg(searchText));
 }
 
 void MainWindow::onSimShowContextMenu(const QPoint &pos) {
