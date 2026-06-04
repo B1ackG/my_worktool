@@ -39,7 +39,189 @@
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <functional>
+#include <cmath>
+#include <QPainter>
+#include <QPainterPath>
+#include <QtMath>
 #include <QProgressBar>
+#include <QStandardPaths>
+#include <QMenuBar>
+#include <QCoreApplication>
+#include <QSet>
+
+namespace {
+
+QString gitIgnoreDefaultTemplate(const QString &type)
+{
+    if (type == QStringLiteral("Qt")) {
+        return QStringLiteral(
+            "# Qt intermediate files\n"
+            "*.o\n*.obj\nMakefile*\nmoc_*\nui_*\nqrc_*\n.qmake.stash\nbuild/\nbuild_*/\n\n"
+            ".qtc_clangd/\n"
+            "build_log.txt\n\n"
+            "# Project specific\n"
+            "ModbusTCPAssistant\n*.user\n*.user.*\n\n"
+            "# OS files\n.DS_Store\nThumbs.db\n");
+    }
+    if (type == QStringLiteral("Keil")) {
+        return QStringLiteral(
+            "# Keil intermediate files\n"
+            "*.lst\n*.obj\n*.o\n*.d\n*.crf\n*.lnp\n*.axf\n*.htm\n*.build_log.htm\n"
+            "*.dep\n*.ie\n*.i\n"
+            "# Keil IDE files\n"
+            "Listings/\nObjects/\n"
+            "*.uvgui.*\n*.uvguix.*\n*.bak\n\n"
+            "# OS files\n.DS_Store\nThumbs.db\n");
+    }
+    return QString();
+}
+
+QString gitIgnoreTemplateFilePath(const QString &type)
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+                        + QStringLiteral("/gitignore_templates");
+    QDir().mkpath(dir);
+    return dir + QLatin1Char('/') + type + QStringLiteral(".gitignore");
+}
+
+bool gitIgnoreSaveTemplate(const QString &type, const QString &content)
+{
+    QFile file(gitIgnoreTemplateFilePath(type));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        return false;
+    file.write(content.toUtf8());
+    file.close();
+    return true;
+}
+
+QString gitIgnoreTemplateContent(const QString &type)
+{
+    const QString path = gitIgnoreTemplateFilePath(type);
+    QFile file(path);
+    if (file.exists() && file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString stored = QString::fromUtf8(file.readAll());
+        file.close();
+        if (!stored.trimmed().isEmpty())
+            return stored;
+    }
+
+    // 从旧版 QSettings 迁移一次
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QString legacy = settings.value(QStringLiteral("GitIgnoreTemplates/") + type).toString();
+    if (!legacy.trimmed().isEmpty()) {
+        gitIgnoreSaveTemplate(type, legacy);
+        settings.remove(QStringLiteral("GitIgnoreTemplates/") + type);
+        return legacy;
+    }
+    return gitIgnoreDefaultTemplate(type);
+}
+
+QString gitIgnoreNormalizeLine(QString line)
+{
+    line = line.trimmed();
+    line.remove(QLatin1Char('\r'));
+    return line;
+}
+
+QStringList gitIgnoreEffectiveLines(const QString &content)
+{
+    QStringList lines;
+    for (const QString &raw : content.split(QLatin1Char('\n'))) {
+        const QString line = gitIgnoreNormalizeLine(raw);
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
+            continue;
+        lines << line;
+    }
+    return lines;
+}
+
+struct GitIgnoreTemplateDiff {
+    QStringList missingInFile; // 模板有、.gitignore 没有
+    QStringList extraInFile;   // .gitignore 有、模板没有
+};
+
+GitIgnoreTemplateDiff gitIgnoreDiffAgainstTemplate(const QString &fileContent, const QString &templateType)
+{
+    QSet<QString> fileLines;
+    for (const QString &line : gitIgnoreEffectiveLines(fileContent))
+        fileLines.insert(line);
+
+    QSet<QString> templateLines;
+    for (const QString &line : gitIgnoreEffectiveLines(gitIgnoreTemplateContent(templateType)))
+        templateLines.insert(line);
+
+    GitIgnoreTemplateDiff diff;
+    for (const QString &line : templateLines) {
+        if (!fileLines.contains(line))
+            diff.missingInFile << line;
+    }
+    for (const QString &line : fileLines) {
+        if (!templateLines.contains(line))
+            diff.extraInFile << line;
+    }
+    diff.missingInFile.sort();
+    diff.extraInFile.sort();
+    return diff;
+}
+
+QString gitIgnorePickTemplateType(QWidget *parent, const QString &title, const QString &text)
+{
+    QMessageBox msgBox(parent);
+    msgBox.setWindowTitle(title);
+    msgBox.setText(text);
+    QPushButton *qtBtn = msgBox.addButton(QStringLiteral("Qt/C++ 模板"), QMessageBox::AcceptRole);
+    QPushButton *keilBtn = msgBox.addButton(QStringLiteral("Keil/C 模板"), QMessageBox::AcceptRole);
+    QPushButton *skipBtn = msgBox.addButton(QStringLiteral("暂不"), QMessageBox::RejectRole);
+    msgBox.setDefaultButton(skipBtn);
+    msgBox.exec();
+
+    const QAbstractButton *clicked = msgBox.clickedButton();
+    if (clicked == qtBtn)
+        return QStringLiteral("Qt");
+    if (clicked == keilBtn)
+        return QStringLiteral("Keil");
+    return QString();
+}
+
+bool gitIgnoreAppendLinesToTemplate(QTextEdit *log, const QString &targetType, const QStringList &lines)
+{
+    QString tmpl = gitIgnoreTemplateContent(targetType);
+    QSet<QString> existing;
+    for (const QString &line : gitIgnoreEffectiveLines(tmpl))
+        existing.insert(line);
+
+    QStringList toAdd;
+    for (QString line : lines) {
+        line = gitIgnoreNormalizeLine(line);
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
+            continue;
+        if (!existing.contains(line)) {
+            toAdd << line;
+            existing.insert(line);
+        }
+    }
+    if (toAdd.isEmpty())
+        return false;
+
+    if (!tmpl.endsWith(QLatin1Char('\n')))
+        tmpl += QLatin1Char('\n');
+    tmpl += QStringLiteral("\n# Added from project .gitignore\n");
+    for (const QString &line : toAdd)
+        tmpl += line + QLatin1Char('\n');
+
+    if (!gitIgnoreSaveTemplate(targetType, tmpl)) {
+        log->append(QStringLiteral("<font color='red'>错误: 无法写入模板文件 %1</font>")
+                        .arg(gitIgnoreTemplateFilePath(targetType)));
+        return false;
+    }
+    log->append(QStringLiteral("成功: 已将 %1 条规则写入 %2 模板（%3），新建 .gitignore 时会自动包含。")
+                    .arg(toAdd.size())
+                    .arg(targetType)
+                    .arg(gitIgnoreTemplateFilePath(targetType)));
+    return true;
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -76,6 +258,7 @@ MainWindow::MainWindow(QWidget *parent)
     // Create UI
     createWidgets();
     createLayouts();
+    createMenus();
     createConnections();
     
     // Load History
@@ -454,7 +637,7 @@ void MainWindow::createWidgets()
     btnGitRemoteAdd->setStyleSheet("background-color: #e8f5e9; font-weight: bold;"); // 浅绿色
 
     btnGitCheckIgnore = new QPushButton("检查 .gitignore");
-    btnGitCheckIgnore->setToolTip("检查是否存在常用的 .gitignore 规则");
+    btnGitCheckIgnore->setToolTip("按所选 Qt/Keil 模板的完整规则与仓库 .gitignore 逐项对照，补全缺失或回写模板");
 
     btnGitWorktreeList = new QPushButton("Worktree 列表");
     btnGitWorktreeList->setToolTip("列出当前仓库的所有 git worktree (git worktree list)");
@@ -1064,6 +1247,105 @@ QWidget* MainWindow::createSimulatorPage()
     mainPageLayout->addWidget(rightWidget);
 
     return page;
+}
+
+void MainWindow::createMenus()
+{
+    QMenu *settingsMenu = menuBar()->addMenu(QStringLiteral("设置(&S)"));
+
+    actAutostart = settingsMenu->addAction(QStringLiteral("开机自启动"));
+    actAutostart->setCheckable(true);
+    connect(actAutostart, &QAction::toggled, this, &MainWindow::onAutostartToggled);
+
+    syncAutostartActionState();
+}
+
+QString MainWindow::autostartDesktopFilePath() const
+{
+    const QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)
+                                 + QStringLiteral("/autostart");
+    return autostartDir + QStringLiteral("/ModbusTCPAssistant.desktop");
+}
+
+bool MainWindow::isAutostartEnabled() const
+{
+    const QString desktopPath = autostartDesktopFilePath();
+    if (!QFile::exists(desktopPath))
+        return false;
+
+    QFile file(desktopPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    const QString execPath = QCoreApplication::applicationFilePath();
+    const QString content = QString::fromUtf8(file.readAll());
+    return content.contains(QStringLiteral("Exec=")) && content.contains(execPath);
+}
+
+bool MainWindow::setAutostartEnabled(bool enabled)
+{
+    const QString desktopPath = autostartDesktopFilePath();
+    const QFileInfo desktopInfo(desktopPath);
+
+    if (enabled) {
+        QDir autostartDir = desktopInfo.dir();
+        if (!autostartDir.exists() && !autostartDir.mkpath(QStringLiteral(".")))
+            return false;
+
+        QFile file(desktopPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+            return false;
+
+        const QString execPath = QCoreApplication::applicationFilePath();
+        QTextStream out(&file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        out.setEncoding(QStringConverter::Utf8);
+#else
+        out.setCodec("UTF-8");
+#endif
+        out << "[Desktop Entry]\n";
+        out << "Type=Application\n";
+        out << "Version=1.0\n";
+        out << "Name=李晨阳的linux工作助手\n";
+        out << "Comment=Linux工作助手\n";
+        out << "Exec=\"" << execPath << "\"\n";
+        out << "Terminal=false\n";
+        out << "Categories=Utility;\n";
+        out << "X-GNOME-Autostart-enabled=true\n";
+
+        QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+        settings.setValue(QStringLiteral("autostart/enabled"), true);
+        return true;
+    }
+
+    if (QFile::exists(desktopPath) && !QFile::remove(desktopPath))
+        return false;
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.setValue(QStringLiteral("autostart/enabled"), false);
+    return true;
+}
+
+void MainWindow::syncAutostartActionState()
+{
+    if (!actAutostart)
+        return;
+
+    actAutostart->blockSignals(true);
+    actAutostart->setChecked(isAutostartEnabled());
+    actAutostart->blockSignals(false);
+}
+
+void MainWindow::onAutostartToggled(bool checked)
+{
+    if (setAutostartEnabled(checked))
+        return;
+
+    syncAutostartActionState();
+    QMessageBox::warning(this,
+                         QStringLiteral("设置失败"),
+                         checked ? QStringLiteral("无法启用开机自启动，请检查程序是否有写入权限。")
+                                 : QStringLiteral("无法关闭开机自启动，请检查 autostart 目录权限。"));
 }
 
 void MainWindow::createLayouts()
@@ -3597,112 +3879,119 @@ void MainWindow::onGitOpenIgnoreClicked() {
 }
 
 void MainWindow::onGitCheckIgnoreClicked() {
-    QString repoDir = cmbGitDir->currentText();
+    QString repoDir = cmbGitDir->currentText().trimmed();
     if (repoDir.isEmpty()) {
         txtGitLog->append("错误: 请先选择 Git 仓库目录。");
         return;
     }
 
-    QFile ignoreFile(repoDir + "/.gitignore");
-    
-    auto createIgnoreFile = [&](const QString& type) {
-        if (ignoreFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&ignoreFile);
-            if (type == "Qt") {
-                out << "# Qt intermediate files\n"
-                    << "*.o\n*.obj\nMakefile*\nmoc_*\nui_*\nqrc_*\n.qmake.stash\nbuild/\nbuild_*/\n\n"
-                    << ".qtc_clangd/\n"
-                    << "build_log.txt\n\n"
-                    << "# Project specific\n"
-                    << "ModbusTCPAssistant\n*.user\n*.user.*\n";
-            } else if (type == "Keil") {
-                out << "# Keil intermediate files\n"
-                    << "*.lst\n*.obj\n*.o\n*.d\n*.crf\n*.lnp\n*.axf\n*.htm\n*.build_log.htm\n"
-                    << "*.dep\n*.ie\n*.i\n"
-                    << "# Keil IDE files\n"
-                    << "Listings/\nObjects/\n"
-                    << "*.uvgui.*\n*.uvguix.*\n*.bak\n";
-            }
-            out << "\n# OS files\n.DS_Store\nThumbs.db\n";
-            ignoreFile.close();
-            txtGitLog->append(QString("成功: 已创建 %1 类型的 .gitignore 文件。").arg(type));
-        }
+    QFile ignoreFile(repoDir + QStringLiteral("/.gitignore"));
+
+    auto createIgnoreFile = [&](const QString &type) {
+        if (!ignoreFile.open(QIODevice::WriteOnly | QIODevice::Text))
+            return;
+        QTextStream out(&ignoreFile);
+        out << gitIgnoreTemplateContent(type);
+        ignoreFile.close();
+        txtGitLog->append(QStringLiteral("成功: 已创建 %1 类型的 .gitignore 文件。").arg(type));
     };
 
     if (!ignoreFile.exists()) {
         QMessageBox msgBox(this);
-        msgBox.setWindowTitle(".gitignore 检查");
-        msgBox.setText(".gitignore 文件不存在！\n请选择要创建的模板类型：");
-        QPushButton *qtBtn = msgBox.addButton("Qt/C++ 模板", QMessageBox::ActionRole);
-        QPushButton *keilBtn = msgBox.addButton("Keil/C 模板", QMessageBox::ActionRole);
-        msgBox.addButton("取消", QMessageBox::RejectRole);
-
+        msgBox.setWindowTitle(QStringLiteral(".gitignore 检查"));
+        msgBox.setText(QStringLiteral(".gitignore 文件不存在！\n请选择要创建的模板类型："));
+        QPushButton *qtBtn = msgBox.addButton(QStringLiteral("Qt/C++ 模板"), QMessageBox::ActionRole);
+        QPushButton *keilBtn = msgBox.addButton(QStringLiteral("Keil/C 模板"), QMessageBox::ActionRole);
+        msgBox.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
         msgBox.exec();
 
-        if (msgBox.clickedButton() == qtBtn) {
-            createIgnoreFile("Qt");
-        } else if (msgBox.clickedButton() == keilBtn) {
-            createIgnoreFile("Keil");
-        }
-    } else {
-        txtGitLog->append("信息: .gitignore 文件已存在。正在检查缺失规则...");
-        if (ignoreFile.open(QIODevice::ReadWrite | QIODevice::Text)) {
-            QString content = ignoreFile.readAll();
-            
-            struct Rule { QString pattern; QString description; };
-            QList<Rule> suggestions = {
-                {".qtc_clangd/", ".qtc_clangd/ (QtCreator 缓存缓存)"},
-                {"build_log.txt", "build_log.txt (编译日志)"},
-                {"build/", "build/ (默认构建目录)"},
-                {"build_*/", "build_*/ (通配构建目录)"},
-                {"*.o", "*.o (中间对象文件)"},
-                {"*.user", "*.user (用户本地配置)"},
-                {"*.pro.user", "*.pro.user (Qt .pro 文件的本地用户配置，如 ModbusTCPAssistant.pro.user)"}
-            };
+        if (msgBox.clickedButton() == qtBtn)
+            createIgnoreFile(QStringLiteral("Qt"));
+        else if (msgBox.clickedButton() == keilBtn)
+            createIgnoreFile(QStringLiteral("Keil"));
+        return;
+    }
 
-            QStringList missingPatterns;
-            QStringList missingDesc;
+    const QString templateType = gitIgnorePickTemplateType(
+        this, QStringLiteral(".gitignore 检查"),
+        QStringLiteral("请选择用于对照检查的模板类型。\n"
+                       "将按该模板文件中的全部有效规则（逐行）与当前 .gitignore 比对。"));
+    if (templateType.isEmpty())
+        return;
 
-            for (const auto& rule : suggestions) {
-                if (!content.contains(rule.pattern)) {
-                    missingPatterns << rule.pattern;
-                    missingDesc << rule.description;
-                }
+    if (!ignoreFile.open(QIODevice::ReadWrite | QIODevice::Text))
+        return;
+
+    QString content = ignoreFile.readAll();
+    const int templateRuleCount = gitIgnoreEffectiveLines(gitIgnoreTemplateContent(templateType)).size();
+    txtGitLog->append(QStringLiteral("信息: 正在与 %1 模板对照检查（模板共 %2 条有效规则）…")
+                          .arg(templateType)
+                          .arg(templateRuleCount));
+
+    GitIgnoreTemplateDiff diff = gitIgnoreDiffAgainstTemplate(content, templateType);
+
+    if (diff.missingInFile.isEmpty() && diff.extraInFile.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral(".gitignore 检查"),
+                                 QStringLiteral("当前 .gitignore 与 %1 模板完全一致。").arg(templateType));
+        ignoreFile.close();
+        return;
+    }
+
+    if (!diff.missingInFile.isEmpty()) {
+        const QString msg = QStringLiteral("相对 %1 模板，.gitignore 缺少以下 %2 条规则:\n\n%3\n\n"
+                                           "是否从模板补全到 .gitignore 文件末尾？")
+                                .arg(templateType)
+                                .arg(diff.missingInFile.size())
+                                .arg(diff.missingInFile.join(QLatin1Char('\n')));
+        const QMessageBox::StandardButton reply =
+            QMessageBox::question(this, QStringLiteral("补全 .gitignore"), msg, QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+            QTextStream out(&ignoreFile);
+            if (!content.endsWith(QLatin1Char('\n')))
+                out << QLatin1Char('\n');
+            out << QStringLiteral("\n# Added from %1 template by Assistant\n").arg(templateType);
+            for (const QString &p : diff.missingInFile)
+                out << p << QLatin1Char('\n');
+            out.flush();
+            ignoreFile.flush();
+            txtGitLog->append(QStringLiteral("成功: 已从 %1 模板补全 %2 条规则到 .gitignore。")
+                                  .arg(templateType)
+                                  .arg(diff.missingInFile.size()));
+
+            txtGitLog->append(QStringLiteral("信息: 正在从 Git 索引中移除已忽略路径的缓存…"));
+            QStringList cleanArgs;
+            cleanArgs << QStringLiteral("rm") << QStringLiteral("-r") << QStringLiteral("--cached");
+            for (QString cleanPattern : diff.missingInFile) {
+                if (cleanPattern.endsWith(QLatin1Char('/')))
+                    cleanPattern.chop(1);
+                cleanArgs << cleanPattern;
             }
+            runGitCommand(cleanArgs);
 
-            if (!missingPatterns.isEmpty()) {
-                QString msg = "您的 .gitignore 可能缺少以下建议规则:\n" + missingDesc.join("\n") + 
-                              "\n\n是否要自动将这些通用忽略规则添加到文件末尾？";
-                QMessageBox::StandardButton reply = QMessageBox::question(this, "优化建议", msg, QMessageBox::Yes|QMessageBox::No);
-                if (reply == QMessageBox::Yes) {
-                    QTextStream out(&ignoreFile);
-                    if (!content.endsWith("\n")) out << "\n";
-                    out << "\n# Automatically added by Assistant\n";
-                    for (const QString& p : missingPatterns) {
-                        out << p << "\n";
-                    }
-                    txtGitLog->append("成功: 已自动补全缺失的忽略规则。");
-                    
-                    // 彻底清除缓存以确保忽略规则对已追踪文件生效
-                    txtGitLog->append("信息: 正在从 Git 索引中强制移除被忽略的文件以确保规则生效...");
-                    QStringList cleanArgs;
-                    cleanArgs << "rm" << "-r" << "--cached";
-                    for (const QString& p : missingPatterns) {
-                        // 去掉可能的回车符或空格，并针对目录模式（如 build/）做处理
-                        QString cleanPattern = p.trimmed();
-                        if (cleanPattern.endsWith("/")) {
-                            cleanPattern.chop(1);
-                        }
-                        cleanArgs << cleanPattern;
-                    }
-                    runGitCommand(cleanArgs);
-                }
-            } else {
-                QMessageBox::information(this, ".gitignore 检查", "您的 .gitignore 看起来已经包含基本的忽略规则。");
-            }
-            ignoreFile.close();
+            ignoreFile.seek(0);
+            content = ignoreFile.readAll();
+            diff = gitIgnoreDiffAgainstTemplate(content, templateType);
         }
     }
+
+    if (!diff.extraInFile.isEmpty()) {
+        const QString msg = QStringLiteral("相对 %1 模板，.gitignore 多出以下 %2 条规则:\n\n%3\n\n"
+                                           "是否写入 %1 模板？")
+                                .arg(templateType)
+                                .arg(diff.extraInFile.size())
+                                .arg(diff.extraInFile.join(QLatin1Char('\n')));
+        const QMessageBox::StandardButton reply =
+            QMessageBox::question(this, QStringLiteral("更新模板"), msg, QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+            if (!gitIgnoreAppendLinesToTemplate(txtGitLog, templateType, diff.extraInFile)) {
+                txtGitLog->append(QStringLiteral("<font color='gray'>信息: 模板未变更。</font>"));
+            }
+        }
+    } else if (diff.missingInFile.isEmpty()) {
+        txtGitLog->append(QStringLiteral("信息: 与 %1 模板一致，无多余规则。").arg(templateType));
+    }
+
+    ignoreFile.close();
 }
 
 void MainWindow::onGitRefreshLogClicked() {
@@ -3811,29 +4100,58 @@ void MainWindow::onGitSoftResetClicked() {
 }
 
 void MainWindow::onGitCopyForDailyReportClicked() {
-    QString today = QDate::currentDate().toString("yyyy-MM-dd");
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("错误: 请先选择有效的 Git 目录"));
+        return;
+    }
+
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
     QStringList todayCommits;
 
-    // Iterate through all items in the history combo box
-    for (int i = 0; i < cmbGitHistory->count(); ++i) {
-        QString item = cmbGitHistory->itemText(i);
+    QStringList args;
+    args << QStringLiteral("log")
+         << QStringLiteral("--all")
+         << QStringLiteral("--pretty=format:%h - %cd : %s (%an)")
+         << QStringLiteral("--date=short");
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"), args);
+#else
+    process.start(QStringLiteral("git"), args);
+#endif
+    process.waitForFinished();
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+
+    // git log 按时间倒序；越过今日后即可停止
+    for (const QString &item : lines) {
         // Format: %h - %cd : %s (%an) -> e.g., "a1b2c3d - 2026-03-05 : Fix bug (Author)"
-        
-        // Extract date (usually between the first " - " and the first " : ")
-        int dashIdx = item.indexOf(" - ");
-        int colonIdx = item.indexOf(" : ");
-        
-        if (dashIdx != -1 && colonIdx != -1) {
-            QString datePart = item.mid(dashIdx + 3, colonIdx - (dashIdx + 3)).trimmed();
-            if (datePart == today) {
-                // Extract Subject
-                QString subject = item.mid(colonIdx + 3);
-                int authorIdx = subject.lastIndexOf(" (");
-                if (authorIdx != -1) {
-                    subject = subject.left(authorIdx);
-                }
-                todayCommits.prepend(subject.trimmed()); // prepend to get chronological order (git log is reverse)
-            }
+        const int dashIdx = item.indexOf(QStringLiteral(" - "));
+        const int colonIdx = item.indexOf(QStringLiteral(" : "));
+        if (dashIdx == -1 || colonIdx == -1)
+            continue;
+
+        const QString datePart = item.mid(dashIdx + 3, colonIdx - (dashIdx + 3)).trimmed();
+        if (datePart == today) {
+            QString subject = item.mid(colonIdx + 3);
+            const int authorIdx = subject.lastIndexOf(QStringLiteral(" ("));
+            if (authorIdx != -1)
+                subject = subject.left(authorIdx);
+            todayCommits.prepend(subject.trimmed()); // prepend to get chronological order (git log is reverse)
+        } else if (datePart < today) {
+            break;
         }
     }
 
@@ -3847,6 +4165,33 @@ void MainWindow::onGitCopyForDailyReportClicked() {
         finalContent += QString("%1. %2\n").arg(i + 1).arg(todayCommits[i]);
     }
     finalContent = finalContent.trimmed();
+
+    QList<GitWorkGoal> goals = loadGitGoals(workDir);
+    if (QDir(workDir).exists()) {
+        syncGoalDifficultyFromCommits(workDir, goals);
+    }
+    QList<const GitWorkGoal *> rootGoals;
+    for (const GitWorkGoal &g : goals) {
+        if (g.parentId.isEmpty()) {
+            rootGoals.append(&g);
+        }
+    }
+
+    if (rootGoals.size() > 1) {
+        QStringList titles;
+        for (const GitWorkGoal *g : rootGoals) {
+            titles << g->title;
+        }
+        const QString warnMsg =
+            QStringLiteral("当前仓库存在 %1 个无父目标（根目标），无法自动填入完成度：\n%2")
+                .arg(rootGoals.size())
+                .arg(titles.join(QStringLiteral("\n")));
+        txtGitLog->append(QStringLiteral("<font color='orange'>[日报] %1</font>").arg(warnMsg));
+        QMessageBox::warning(this, QStringLiteral("复制到日报"), warnMsg);
+    } else if (rootGoals.size() == 1) {
+        const GitRootProgressInfo progress = calcRootGoalProgress(workDir, *rootGoals.first(), goals);
+        finalContent += QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
+    }
 
     QGuiApplication::clipboard()->setText(finalContent);
     txtGitLog->append(QString("已拼接今日(%1)共 %2 条提交并复制:").arg(today).arg(todayCommits.size()));
@@ -4590,10 +4935,10 @@ QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
         g.difficulty = settings.value("difficulty", 0).toInt();
         if (!g.parentId.isEmpty()) {
             if (g.difficulty < 1) {
-                g.difficulty = 6; // 默认 3.0 星（预计 3 次提交）
-            } else if (g.difficulty <= 5) {
-                // 旧版 1–5 星权重 → 转为半格数（3 星 → 6 半格 = 3.0 星 = 3 次提交）
-                g.difficulty = g.difficulty * 2;
+                g.difficulty = 3; // 默认 3 星（预计 3 次提交）
+            } else if (g.difficulty > 5) {
+                // 旧版半格存储 → 整星（四舍五入）
+                g.difficulty = qMax(1, static_cast<int>(std::lround(g.difficulty * 0.5)));
             }
         }
         if (!g.id.isEmpty() && !g.title.isEmpty()) {
@@ -4606,23 +4951,46 @@ QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
     return goals;
 }
 
-QString MainWindow::formatDifficultyStars(int starHalfUnits) const {
-    if (starHalfUnits < 1) {
-        starHalfUnits = 1;
-    }
-    const int fullStars = starHalfUnits / 2;
-    const bool hasHalf = (starHalfUnits % 2) != 0;
-    QString result;
-    if (fullStars > 0) {
-        result = QString(fullStars, QChar(0x2605));
-    }
-    if (hasHalf) {
-        if (!result.isEmpty()) {
-            result += QChar(0x00BD);
+QString MainWindow::formatDifficultyStars(int starCount) const {
+    return QString::number(qMax(1, starCount)) + QStringLiteral(" 星");
+}
+
+QPixmap MainWindow::gitDifficultyStarPixmap(int starCount, int starSize) const {
+    starCount = qMax(1, starCount);
+    const int gap = 2;
+    const int width = starCount * starSize + qMax(0, starCount - 1) * gap;
+    const int height = starSize;
+
+    QPixmap pixmap(width, height);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor fillColor(255, 193, 7);
+
+    for (int i = 0; i < starCount; ++i) {
+        const int x = i * (starSize + gap);
+        const QRect rect(x, 0, starSize, starSize);
+        const QPointF center = rect.center();
+        const qreal outerR = qMin(rect.width(), rect.height()) * 0.46;
+        const qreal innerR = outerR * 0.42;
+
+        QPainterPath path;
+        for (int j = 0; j < 10; ++j) {
+            const qreal angle = -M_PI_2 + j * M_PI / 5.0;
+            const qreal r = (j % 2 == 0) ? outerR : innerR;
+            const QPointF pt(center.x() + r * std::cos(angle), center.y() + r * std::sin(angle));
+            if (j == 0) {
+                path.moveTo(pt);
+            } else {
+                path.lineTo(pt);
+            }
         }
-        result += QChar(0x2605);
+        path.closeSubpath();
+        painter.fillPath(path, fillColor);
     }
-    return result;
+
+    return pixmap;
 }
 
 QDate MainWindow::gitGoalEffectiveStartDate(const GitWorkGoal &goal,
@@ -4703,10 +5071,10 @@ bool MainWindow::syncGoalDifficultyFromCommits(const QString &repoDir, QList<Git
         if (g.parentId.isEmpty() || gitGoalHasChildren(g.id, goals)) {
             continue;
         }
-        const double presetCommits = qMax(0.5, g.difficulty * 0.5);
+        const int presetCommits = qMax(1, g.difficulty);
         const int actual = gitGoalActualCommits(repoDir, g, goals);
-        if (static_cast<double>(actual) > presetCommits) {
-            g.difficulty = actual * 2;
+        if (actual > presetCommits) {
+            g.difficulty = actual;
             changed = true;
         }
     }
@@ -4863,13 +5231,12 @@ GitRootProgressInfo MainWindow::calcRootGoalProgress(const QString &repoDir, con
                 continue;
             }
 
-            const double presetCommits = qMax(0.5, sub->difficulty * 0.5);
+            const int presetCommits = qMax(1, sub->difficulty);
             const int actual = repoDir.isEmpty() ? 0 : gitGoalActualCommits(repoDir, *sub, goals);
-            const double effectiveExpected = qMax(presetCommits, static_cast<double>(actual));
+            const int effectiveExpected = qMax(presetCommits, actual);
             const bool completed = isGitSubGoalCompleted(*sub);
 
-            const double denom = completed ? qMax(static_cast<double>(actual), 0.5)
-                                           : effectiveExpected;
+            const double denom = completed ? qMax(actual, 1) : effectiveExpected;
             info.totalWeight += denom;
             info.completedWeight += static_cast<double>(actual);
             if (completed) {
@@ -5080,22 +5447,21 @@ void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal
     } else {
         tblGitGoals->setItem(row, 2, new QTableWidgetItem(QStringLiteral("—")));
         const bool hasChildren = gitGoalHasChildren(g.id, allGoals);
-        const int starHalfUnits = hasChildren ? gitGoalDisplayDifficulty(g, allGoals)
-                                              : qMax(1, g.difficulty);
-        const double presetStars = starHalfUnits * 0.5;
+        const int starCount = hasChildren ? gitGoalDisplayDifficulty(g, allGoals)
+                                          : qMax(1, g.difficulty);
         const int actualCommits = (!hasChildren && !repoDir.isEmpty())
                                       ? gitGoalActualCommits(repoDir, g, allGoals)
                                       : 0;
-        QTableWidgetItem *diffItem = new QTableWidgetItem(formatDifficultyStars(starHalfUnits));
+        QTableWidgetItem *diffItem = new QTableWidgetItem();
+        diffItem->setData(Qt::DecorationRole, gitDifficultyStarPixmap(starCount, 14));
+        diffItem->setText(formatDifficultyStars(starCount));
         if (hasChildren) {
-            diffItem->setToolTip(QStringLiteral("由下级子目标星级相加，合计 %1 星")
-                                     .arg(QString::number(presetStars, 'f', 1)));
+            diffItem->setToolTip(QStringLiteral("由下级子目标星级相加，合计 %1 星").arg(starCount));
         } else {
             diffItem->setToolTip(
-                QStringLiteral("预计 %1 次提交（%2 星）；目标开始日期后分支 %3 已有 %4 次提交\n"
+                QStringLiteral("预计 %1 次提交（%1 星）；目标开始日期后分支 %2 已有 %3 次提交\n"
                                "超出预设时程序自动抬升星级（无上限）")
-                    .arg(QString::number(presetStars, 'f', 1))
-                    .arg(QString::number(qMax(presetStars, static_cast<double>(actualCommits)), 'f', 1))
+                    .arg(starCount)
                     .arg(g.branchName.isEmpty() ? QStringLiteral("（未绑定）") : g.branchName)
                     .arg(actualCommits));
         }
@@ -5817,7 +6183,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     }
 
     QLabel *lblPlanHint = new QLabel(
-        QStringLiteral("无父目标时需填写计划开始与计划结束，列表显示综合进度条；子目标星级表示目标开始日期后的预计提交次数（0.5 星步进），"
+        QStringLiteral("无父目标时需填写计划开始与计划结束，列表显示综合进度条；子目标 1 星 = 1 次预计提交，"
                        "未完成时按分支 log 数计进度，超出预设时自动抬升星级，完成后以实际提交数计权。"));
     lblPlanHint->setWordWrap(true);
     lblPlanHint->setStyleSheet(QStringLiteral("color: #555; font-size: 11px;"));
@@ -5848,22 +6214,22 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     QWidget *rowDifficulty = new QWidget();
     QHBoxLayout *layDifficulty = new QHBoxLayout(rowDifficulty);
     layDifficulty->setContentsMargins(0, 0, 0, 0);
-    QDoubleSpinBox *spinDifficulty = new QDoubleSpinBox();
-    spinDifficulty->setRange(0.5, 9999.0);
-    spinDifficulty->setSingleStep(0.5);
-    spinDifficulty->setDecimals(1);
-    const double initialStars = goal.parentId.isEmpty()
-                                    ? 3.0
-                                    : qMax(0.5, goal.difficulty * 0.5);
+    QSpinBox *spinDifficulty = new QSpinBox();
+    spinDifficulty->setRange(1, 9999);
+    spinDifficulty->setSingleStep(1);
+    const int initialStars = goal.parentId.isEmpty() ? 3 : qMax(1, goal.difficulty);
     spinDifficulty->setValue(initialStars);
     spinDifficulty->setSuffix(QStringLiteral(" 星"));
-    QLabel *lblDifficultyStars = new QLabel(formatDifficultyStars(qMax(1, qRound(initialStars * 2))));
+    QLabel *lblDifficultyStars = new QLabel();
+    lblDifficultyStars->setPixmap(gitDifficultyStarPixmap(initialStars, 16));
+    lblDifficultyStars->setToolTip(formatDifficultyStars(initialStars));
     layDifficulty->addWidget(spinDifficulty);
     layDifficulty->addWidget(lblDifficultyStars);
     layDifficulty->addStretch();
-    connect(spinDifficulty, QOverload<double>::of(&QDoubleSpinBox::valueChanged), &dlg,
-            [lblDifficultyStars, this](double v) {
-                lblDifficultyStars->setText(formatDifficultyStars(qMax(1, qRound(v * 2))));
+    connect(spinDifficulty, QOverload<int>::of(&QSpinBox::valueChanged), &dlg,
+            [lblDifficultyStars, this](int v) {
+                lblDifficultyStars->setPixmap(gitDifficultyStarPixmap(v, 16));
+                lblDifficultyStars->setToolTip(formatDifficultyStars(v));
             });
 
     QTextEdit *txtRemark = new QTextEdit(goal.remark);
@@ -5966,7 +6332,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
             return false;
         }
         goal.endDate = parent->endDate;
-        goal.difficulty = qMax(1, qRound(spinDifficulty->value() * 2));
+        goal.difficulty = spinDifficulty->value();
         if (excludeGoalId.isEmpty()) {
             goal.startDate.clear();
             goal.started = false;

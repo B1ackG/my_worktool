@@ -84,7 +84,7 @@ struct GitWorkGoal {
     QString branchName;
     bool started = false;
     QString remark;
-    int difficulty = 0; // 子任务半格数（显示星级×2；0.5 星=1 次提交），根目标为 0
+    int difficulty = 0; // 子任务星级（1 星 = 1 次预计提交），根目标为 0
 };
 
 struct GitRootProgressInfo {
@@ -195,6 +195,9 @@ private slots:
     // Common
     void onClearLogClicked();
 
+    // Settings
+    void onAutostartToggled(bool checked);
+
     // Simulator Slots
     void onStartSimulatorClicked();
     void onStopSimulatorClicked();
@@ -213,6 +216,11 @@ private:
     void createWidgets();
     void createLayouts();
     void createConnections();
+    void createMenus();
+    void syncAutostartActionState();
+    bool isAutostartEnabled() const;
+    bool setAutostartEnabled(bool enabled);
+    QString autostartDesktopFilePath() const;
     
     // Helpers to init pages
     QWidget* createModbusPage();
@@ -223,6 +231,7 @@ private:
     QWidget* createPerformancePage();
 
     // --- Main UI Structure ---
+    QAction *actAutostart = nullptr;
     QWidget *centralWidget;
     QHBoxLayout *mainLayout; // Horizontal: Nav + Stack
     QListWidget *navWidget;
@@ -535,7 +544,8 @@ private:
     bool isGitGoalHiddenByCollapse(const GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
                                    const QSet<QString> &collapsedIds) const;
     QSet<QString> &gitGoalCollapsedIdsForRepo(const QString &repoDir);
-    QString formatDifficultyStars(int starHalfUnits) const;
+    QString formatDifficultyStars(int starCount) const;
+    QPixmap gitDifficultyStarPixmap(int starCount, int starSize = 14) const;
     QDate gitGoalEffectiveStartDate(const GitWorkGoal &goal, const QList<GitWorkGoal> &goals) const;
     int gitBranchCommitCountSince(const QString &repoDir, const QString &branchRef,
                                   const QDate &sinceDate) const;
