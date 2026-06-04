@@ -39,6 +39,7 @@
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <functional>
+#include <QProgressBar>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -382,9 +383,10 @@ void MainWindow::createWidgets()
     btnGitRemoveHistory->setToolTip("从记忆列表中移除当前选中的仓库路径（不删除磁盘目录）");
 
     tblGitGoals = new QTableWidget();
-    tblGitGoals->setColumnCount(8);
+    tblGitGoals->setColumnCount(10);
     tblGitGoals->setHorizontalHeaderLabels(
-        QStringList() << "" << "目标" << "父目标" << "开始日期" << "计划结束" << "实际完成" << "分支" << "备注");
+        QStringList() << "" << "目标" << "进度" << "难度" << "父目标" << "开始日期" << "计划结束"
+                      << "实际完成" << "分支" << "备注");
     tblGitGoals->setColumnWidth(0, 32);
     tblGitGoals->horizontalHeader()->setStretchLastSection(true);
     tblGitGoals->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -723,6 +725,7 @@ QWidget* MainWindow::createGitPage()
     
     // 1. Repository Selection
     QGroupBox *grpRepo = new QGroupBox("Git 仓库 (记忆路径)");
+    QVBoxLayout *layRepoVBox = new QVBoxLayout();
     QHBoxLayout *layRepo = new QHBoxLayout();
     layRepo->addWidget(new QLabel("路径:"));
     
@@ -732,7 +735,8 @@ QWidget* MainWindow::createGitPage()
     layRepo->addWidget(cmbGitDir, 1);
     layRepo->addWidget(btnGitSelectDir);
     layRepo->addWidget(btnGitRemoveHistory);
-    grpRepo->setLayout(layRepo);
+    layRepoVBox->addLayout(layRepo);
+    grpRepo->setLayout(layRepoVBox);
     layout->addWidget(grpRepo);
 
     QGroupBox *grpGoals = new QGroupBox("工作目标（按当前仓库目录分开保存）");
@@ -1167,6 +1171,7 @@ void MainWindow::createConnections()
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
     connect(btnGitRemoveHistory, &QPushButton::clicked, this, &MainWindow::onGitRemoveHistoryClicked);
     connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
+    connect(cmbGitBranches, &QComboBox::currentTextChanged, this, &MainWindow::onGitBranchSelectionChanged);
     connect(btnGitGoalAdd, &QPushButton::clicked, this, &MainWindow::onGitGoalAddClicked);
     connect(btnGitGoalEdit, &QPushButton::clicked, this, &MainWindow::onGitGoalEditClicked);
     connect(btnGitGoalDelete, &QPushButton::clicked, this, &MainWindow::onGitGoalDeleteClicked);
@@ -2770,10 +2775,8 @@ void MainWindow::onGitSelectDirClicked() {
     QString initialDir = cmbGitDir->currentText();
     QString dir = QFileDialog::getExistingDirectory(this, "选择Git仓库", initialDir.isEmpty() ? QDir::homePath() : initialDir);
     if (!dir.isEmpty()) {
-        cmbGitDir->setCurrentText(dir);
         saveGitHistory(dir);
         runGitCommand(QStringList() << "status"); // Check status which will verify it's a git repo
-        onGitRefreshBranchesClicked(); // Auto refresh
         onGitRefreshLogClicked();
     }
 }
@@ -2866,6 +2869,7 @@ void MainWindow::onGitRefreshBranchesClicked() {
     QStringList lines = output.split('\n', QString::SkipEmptyParts);
 #endif
     
+    cmbGitBranches->blockSignals(true);
     cmbGitBranches->clear();
     QString currentBranch;
     
@@ -2892,13 +2896,17 @@ void MainWindow::onGitRefreshBranchesClicked() {
     
     if (!currentBranch.isEmpty())
         cmbGitBranches->setCurrentText(currentBranch);
+    cmbGitBranches->blockSignals(false);
 
     txtGitLog->append("<font color='gray'>已刷新本地及远程分支（红色为远程分支）。</font>");
 
-    const int completed = markGoalsCompletedForMergedBranches(workDir);
+    const int completed = markGoalsCompletedForDeletedBranches(workDir);
     if (completed > 0) {
         refreshGitGoalsTable();
     }
+
+    syncGitMainBranchSetting(workDir);
+    onGitRefreshLogClicked();
 }
 
 void MainWindow::onGitDiffClicked() {
@@ -3179,21 +3187,58 @@ void MainWindow::onGitCreateBranchClicked() {
 
 void MainWindow::onGitDeleteBranchClicked() {
     QString branch = cmbGitBranches->currentText().trimmed();
+    if (branch.startsWith(QStringLiteral("+ "))) {
+        branch = branch.mid(2).trimmed();
+    }
     if (branch.isEmpty()) {
        txtGitLog->append("<font color='red'>错误: 请先选择要删除的分支</font>");
        return;
     }
+    if (branch.startsWith(QStringLiteral("remotes/"))) {
+        txtGitLog->append("<font color='red'>错误: 请选择本地分支删除，远程分支请用其它方式管理。</font>");
+        return;
+    }
 
-    if (QMessageBox::question(this, "确认删除", 
-                              QString("确定要删除本地分支 %1 吗？\n(注意：如果分支未合并，删除可能会失败)").arg(branch)) 
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty()) {
+        return;
+    }
+
+    const QString localBranch = normalizeLocalBranchRef(branch);
+    const QString worktreePath = gitWorktreePathUsingBranch(repoDir, localBranch);
+
+    QString confirmMsg = QStringLiteral("确定要删除本地分支 %1 吗？\n(未合并时 git 可能拒绝删除)").arg(localBranch);
+    if (!worktreePath.isEmpty()) {
+        confirmMsg = QStringLiteral(
+                          "分支 %1 正被 Git Worktree 占用（与「添加 Worktree」功能相关，不是程序冲突）：\n%2\n\n"
+                          "删除本地分支前必须先移除该 worktree。\n是否先移除 worktree 再删除分支？")
+                          .arg(localBranch, worktreePath);
+    }
+
+    if (QMessageBox::question(this, QStringLiteral("确认删除"), confirmMsg,
+                              QMessageBox::Yes | QMessageBox::No)
         != QMessageBox::Yes) {
         return;
     }
 
-    // 执行 git branch -d <branch>
-    runGitCommand(QStringList() << "branch" << "-d" << branch);
-    
-    // 刷新 UI
+    if (!worktreePath.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='gray'>[Worktree] 正在移除占用分支的工作树: %1</font>")
+                              .arg(worktreePath));
+        if (!runGitCommand(QStringList() << QStringLiteral("worktree") << QStringLiteral("remove")
+                                         << worktreePath)) {
+            txtGitLog->append(QStringLiteral("<font color='orange'>[提示] 若移除失败，可手动执行: git worktree remove --force %1</font>")
+                                  .arg(worktreePath));
+            return;
+        }
+    }
+
+    if (runGitCommand(QStringList() << QStringLiteral("branch") << QStringLiteral("-d") << localBranch)) {
+        const int completed = markGoalsCompletedForDeletedBranches(repoDir);
+        if (completed > 0) {
+            refreshGitGoalsTable();
+        }
+    }
+
     onGitRefreshBranchesClicked();
     onGitRefreshLogClicked();
 }
@@ -3510,16 +3555,7 @@ void MainWindow::onGitMergeClicked() {
                                   QMessageBox::Yes|QMessageBox::No);
     
     if (reply == QMessageBox::Yes) {
-        const QString mergedBranch = normalizeLocalBranchRef(branchToMerge);
-        if (runGitCommand(QStringList() << "merge" << branchToMerge)) {
-            const int completed = markGoalsCompletedForMergedBranches(workDir);
-            if (completed > 0) {
-                refreshGitGoalsTable();
-            } else if (!mergedBranch.isEmpty()) {
-                txtGitLog->append(QStringLiteral("<font color='gray'>[工作目标] 合并完成；分支 %1 若已并入主分支，刷新分支后会自动填写实际完成日期。</font>")
-                                      .arg(mergedBranch));
-            }
-        }
+        runGitCommand(QStringList() << "merge" << branchToMerge);
     }
 }
 
@@ -3672,14 +3708,34 @@ void MainWindow::onGitCheckIgnoreClicked() {
 void MainWindow::onGitRefreshLogClicked() {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
-    
+
+    QStringList args;
+    args << QStringLiteral("log")
+         << QStringLiteral("--pretty=format:%h - %cd : %s (%an)")
+         << QStringLiteral("--date=short")
+         << QStringLiteral("-n")
+         << QStringLiteral("20");
+
+    QString branch = cmbGitBranches ? cmbGitBranches->currentText().trimmed() : QString();
+    if (branch.startsWith(QStringLiteral("* "))) {
+        branch = branch.mid(2).trimmed();
+    }
+    if (!branch.isEmpty()) {
+        QString logRef = branch;
+        if (logRef.startsWith(QStringLiteral("remotes/origin/"))) {
+            logRef = QStringLiteral("origin/") + logRef.mid(QStringLiteral("remotes/origin/").size());
+        } else if (logRef.startsWith(QStringLiteral("remotes/"))) {
+            logRef = logRef.mid(QStringLiteral("remotes/").size());
+        }
+        args << logRef;
+    }
+
     QProcess process;
     process.setWorkingDirectory(workDir);
-    // Get short hash, relative time, Subject, Author name
 #ifdef Q_OS_WIN
-    process.start("git.exe", QStringList() << "log" << "--pretty=format:%h - %cd : %s (%an)" << "--date=short" << "-n" << "20");
+    process.start(QStringLiteral("git.exe"), args);
 #else
-    process.start("git", QStringList() << "log" << "--pretty=format:%h - %cd : %s (%an)" << "--date=short" << "-n" << "20");
+    process.start(QStringLiteral("git"), args);
 #endif
     process.waitForFinished();
     
@@ -3700,6 +3756,7 @@ void MainWindow::onGitRefreshLogClicked() {
     }
     
     txtGitLog->append("已刷新历史版本 (Git Log)");
+    refreshGitGoalsTable();
 }
 
 void MainWindow::onGitResetClicked() {
@@ -4412,6 +4469,8 @@ void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QStrin
         cmbGitDir->setCurrentIndex(0);
     }
     cmbGitDir->blockSignals(false);
+    const QString path = selectPath.isEmpty() && !history.isEmpty() ? history.first() : selectPath;
+    activateGitRepo(path.isEmpty() ? cmbGitDir->currentText().trimmed() : path);
     refreshGitGoalsTable();
 }
 
@@ -4477,14 +4536,29 @@ void MainWindow::onGitRemoveHistoryClicked() {
 }
 
 void MainWindow::onGitDirChanged() {
-    const QString repoDir = cmbGitDir->currentText().trimmed();
-    if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
-        markGoalsCompletedForMergedBranches(repoDir);
-        QList<GitWorkGoal> goals = loadGitGoals(repoDir);
-        syncChildGoalEndDatesFromParents(goals);
-        saveGitGoals(repoDir, goals);
-    }
+    activateGitRepo(cmbGitDir->currentText().trimmed());
     refreshGitGoalsTable();
+}
+
+void MainWindow::activateGitRepo(const QString &repoDir) {
+    if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
+        return;
+    }
+
+    onGitRefreshBranchesClicked();
+
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    syncChildGoalEndDatesFromParents(goals);
+    syncParentStartDatesFromLeaves(goals);
+    saveGitGoals(repoDir, goals);
+}
+
+void MainWindow::onGitBranchSelectionChanged() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
+        return;
+    }
+    onGitRefreshLogClicked();
 }
 
 QString MainWindow::gitGoalsRepoKey(const QString &repoDir) const {
@@ -4513,6 +4587,15 @@ QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
         g.branchName = settings.value("branchName").toString();
         g.started = settings.value("started").toBool();
         g.remark = settings.value("remark").toString();
+        g.difficulty = settings.value("difficulty", 0).toInt();
+        if (!g.parentId.isEmpty()) {
+            if (g.difficulty < 1) {
+                g.difficulty = 6; // 默认 3.0 星（预计 3 次提交）
+            } else if (g.difficulty <= 5) {
+                // 旧版 1–5 星权重 → 转为半格数（3 星 → 6 半格 = 3.0 星 = 3 次提交）
+                g.difficulty = g.difficulty * 2;
+            }
+        }
         if (!g.id.isEmpty() && !g.title.isEmpty()) {
             goals.append(g);
         }
@@ -4521,6 +4604,290 @@ QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
     settings.endGroup();
     settings.endGroup();
     return goals;
+}
+
+QString MainWindow::formatDifficultyStars(int starHalfUnits) const {
+    if (starHalfUnits < 1) {
+        starHalfUnits = 1;
+    }
+    const int fullStars = starHalfUnits / 2;
+    const bool hasHalf = (starHalfUnits % 2) != 0;
+    QString result;
+    if (fullStars > 0) {
+        result = QString(fullStars, QChar(0x2605));
+    }
+    if (hasHalf) {
+        if (!result.isEmpty()) {
+            result += QChar(0x00BD);
+        }
+        result += QChar(0x2605);
+    }
+    return result;
+}
+
+QDate MainWindow::gitGoalEffectiveStartDate(const GitWorkGoal &goal,
+                                            const QList<GitWorkGoal> &goals) const {
+    if (!goal.startDate.isEmpty()) {
+        const QDate d = QDate::fromString(goal.startDate, QStringLiteral("yyyy-MM-dd"));
+        if (d.isValid()) {
+            return d;
+        }
+    }
+    if (!goal.parentId.isEmpty()) {
+        const GitWorkGoal *parent = gitGoalById(goals, goal.parentId);
+        if (parent) {
+            return gitGoalEffectiveStartDate(*parent, goals);
+        }
+    }
+    return QDate();
+}
+
+int MainWindow::gitBranchCommitCountSince(const QString &repoDir, const QString &branchRef,
+                                          const QDate &sinceDate) const {
+    if (repoDir.isEmpty() || branchRef.isEmpty() || !sinceDate.isValid()) {
+        return 0;
+    }
+
+    const QString branch = normalizeLocalBranchRef(branchRef);
+    if (branch.isEmpty() || !gitBranchExists(repoDir, branch)) {
+        return 0;
+    }
+
+    QStringList args;
+    args << QStringLiteral("rev-list")
+         << QStringLiteral("--count")
+         << branch
+         << QStringLiteral("--since=%1").arg(sinceDate.toString(QStringLiteral("yyyy-MM-dd")));
+
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"), args);
+#else
+    process.start(QStringLiteral("git"), args);
+#endif
+    process.waitForFinished(10000);
+    if (process.exitCode() != 0) {
+        return 0;
+    }
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+#endif
+    bool ok = false;
+    const int count = output.toInt(&ok);
+    return ok ? count : 0;
+}
+
+int MainWindow::gitGoalActualCommits(const QString &repoDir, const GitWorkGoal &goal,
+                                     const QList<GitWorkGoal> &goals) const {
+    if (goal.branchName.isEmpty()) {
+        return 0;
+    }
+    const QDate since = gitGoalEffectiveStartDate(goal, goals);
+    if (!since.isValid()) {
+        return 0;
+    }
+    return gitBranchCommitCountSince(repoDir, goal.branchName, since);
+}
+
+bool MainWindow::syncGoalDifficultyFromCommits(const QString &repoDir, QList<GitWorkGoal> &goals) {
+    if (repoDir.isEmpty()) {
+        return false;
+    }
+
+    bool changed = false;
+    for (GitWorkGoal &g : goals) {
+        if (g.parentId.isEmpty() || gitGoalHasChildren(g.id, goals)) {
+            continue;
+        }
+        const double presetCommits = qMax(0.5, g.difficulty * 0.5);
+        const int actual = gitGoalActualCommits(repoDir, g, goals);
+        if (static_cast<double>(actual) > presetCommits) {
+            g.difficulty = actual * 2;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+void MainWindow::collectGitGoalDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
+                                              QStringList &outIds) const {
+    for (const GitWorkGoal &g : goals) {
+        if (g.parentId != parentId) {
+            continue;
+        }
+        outIds.append(g.id);
+        collectGitGoalDescendantIds(g.id, goals, outIds);
+    }
+}
+
+void MainWindow::collectGitGoalLeafDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
+                                                 QStringList &outIds) const {
+    for (const GitWorkGoal &g : goals) {
+        if (g.parentId != parentId) {
+            continue;
+        }
+        if (gitGoalHasChildren(g.id, goals)) {
+            collectGitGoalLeafDescendantIds(g.id, goals, outIds);
+        } else {
+            outIds.append(g.id);
+        }
+    }
+}
+
+bool MainWindow::gitGoalHasChildren(const QString &goalId, const QList<GitWorkGoal> &goals) const {
+    for (const GitWorkGoal &g : goals) {
+        if (g.parentId == goalId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int MainWindow::gitGoalDisplayDifficulty(const GitWorkGoal &goal,
+                                         const QList<GitWorkGoal> &goals) const {
+    if (!gitGoalHasChildren(goal.id, goals)) {
+        return qMax(1, goal.difficulty);
+    }
+
+    int sum = 0;
+    for (const GitWorkGoal &g : goals) {
+        if (g.parentId != goal.id) {
+            continue;
+        }
+        sum += gitGoalDisplayDifficulty(g, goals);
+    }
+    return qMax(1, sum);
+}
+
+bool MainWindow::syncParentStartDatesFromLeaves(QList<GitWorkGoal> &goals) {
+    bool changed = false;
+    for (GitWorkGoal &g : goals) {
+        if (!gitGoalHasChildren(g.id, goals)) {
+            continue;
+        }
+
+        QStringList leafIds;
+        collectGitGoalLeafDescendantIds(g.id, goals, leafIds);
+
+        QDate earliest;
+        bool anyStarted = false;
+        for (const QString &leafId : leafIds) {
+            const GitWorkGoal *leaf = gitGoalById(goals, leafId);
+            if (!leaf || leaf->startDate.isEmpty()) {
+                continue;
+            }
+            const QDate d = QDate::fromString(leaf->startDate, QStringLiteral("yyyy-MM-dd"));
+            if (!d.isValid()) {
+                continue;
+            }
+            if (leaf->started) {
+                anyStarted = true;
+            }
+            if (!earliest.isValid() || d < earliest) {
+                earliest = d;
+            }
+        }
+
+        if (!earliest.isValid()) {
+            continue;
+        }
+
+        const QString dateStr = earliest.toString(QStringLiteral("yyyy-MM-dd"));
+        if (g.startDate != dateStr) {
+            g.startDate = dateStr;
+            changed = true;
+        }
+        if (anyStarted && !g.started) {
+            g.started = true;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool MainWindow::isGitSubGoalCompleted(const GitWorkGoal &goal) const {
+    return !goal.actualDate.trimmed().isEmpty();
+}
+
+GitRootProgressInfo MainWindow::calcRootGoalProgress(const QString &repoDir, const GitWorkGoal &root,
+                                                     const QList<GitWorkGoal> &goals) const {
+    GitRootProgressInfo info;
+
+    const QDate planEnd = QDate::fromString(root.endDate, QStringLiteral("yyyy-MM-dd"));
+    const QDate planStart = QDate::fromString(root.startDate, QStringLiteral("yyyy-MM-dd"));
+    const QDate today = QDate::currentDate();
+    double timePercent = 0.0;
+
+    if (planEnd.isValid()) {
+        if (!root.started) {
+            if (planStart.isValid() && today > planStart) {
+                int totalDays = static_cast<int>(planStart.daysTo(planEnd));
+                if (totalDays < 1) {
+                    totalDays = 1;
+                }
+                const int overdueDays = static_cast<int>(planStart.daysTo(today));
+                timePercent = qMin(30.0, 30.0 * overdueDays / totalDays);
+            }
+        } else {
+            QDate effectiveStart = planStart.isValid() ? planStart : today;
+            if (planEnd <= effectiveStart) {
+                timePercent = today >= planEnd ? 100.0 : 0.0;
+            } else if (today <= effectiveStart) {
+                timePercent = 0.0;
+            } else if (today >= planEnd) {
+                timePercent = 100.0;
+            } else {
+                const int totalDays = static_cast<int>(effectiveStart.daysTo(planEnd));
+                const int elapsed = static_cast<int>(effectiveStart.daysTo(today));
+                timePercent = 100.0 * static_cast<double>(elapsed)
+                              / static_cast<double>(qMax(1, totalDays));
+            }
+        }
+    }
+    info.timePercent = qBound(0.0, timePercent, 100.0);
+
+    QStringList descendantIds;
+    collectGitGoalLeafDescendantIds(root.id, goals, descendantIds);
+    info.descendantCount = descendantIds.size();
+    info.hasSubGoals = info.descendantCount > 0;
+
+    double taskPercent = 0.0;
+    if (info.hasSubGoals) {
+        for (const QString &id : descendantIds) {
+            const GitWorkGoal *sub = gitGoalById(goals, id);
+            if (!sub) {
+                continue;
+            }
+
+            const double presetCommits = qMax(0.5, sub->difficulty * 0.5);
+            const int actual = repoDir.isEmpty() ? 0 : gitGoalActualCommits(repoDir, *sub, goals);
+            const double effectiveExpected = qMax(presetCommits, static_cast<double>(actual));
+            const bool completed = isGitSubGoalCompleted(*sub);
+
+            const double denom = completed ? qMax(static_cast<double>(actual), 0.5)
+                                           : effectiveExpected;
+            info.totalWeight += denom;
+            info.completedWeight += static_cast<double>(actual);
+            if (completed) {
+                info.completedCount++;
+            }
+        }
+        if (info.totalWeight > 0.0) {
+            taskPercent = 100.0 * info.completedWeight / info.totalWeight;
+        }
+    }
+    info.taskPercent = qBound(0.0, taskPercent, 100.0);
+
+    if (info.hasSubGoals) {
+        info.totalPercent = qBound(0.0, info.timePercent * 0.35 + info.taskPercent * 0.65, 100.0);
+    } else {
+        info.totalPercent = info.timePercent;
+    }
+    return info;
 }
 
 QString MainWindow::normalizeLocalBranchRef(const QString &branchRef) const {
@@ -4544,89 +4911,7 @@ QString MainWindow::normalizeLocalBranchRef(const QString &branchRef) const {
     return b;
 }
 
-QString MainWindow::resolveMainBranchName(const QString &repoDir) const {
-    if (gitBranchExists(repoDir, QStringLiteral("main"))) {
-        return QStringLiteral("main");
-    }
-    if (gitBranchExists(repoDir, QStringLiteral("master"))) {
-        return QStringLiteral("master");
-    }
-
-    QProcess process;
-    process.setWorkingDirectory(repoDir);
-#ifdef Q_OS_WIN
-    process.start(QStringLiteral("git.exe"),
-                  QStringList() << QStringLiteral("symbolic-ref") << QStringLiteral("refs/remotes/origin/HEAD"));
-#else
-    process.start(QStringLiteral("git"),
-                  QStringList() << QStringLiteral("symbolic-ref") << QStringLiteral("refs/remotes/origin/HEAD"));
-#endif
-    if (process.waitForFinished(5000) && process.exitCode() == 0) {
-        const QString sym = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
-        const int slash = sym.lastIndexOf(QLatin1Char('/'));
-        if (slash >= 0) {
-            const QString candidate = sym.mid(slash + 1);
-            if (gitBranchExists(repoDir, candidate)) {
-                return candidate;
-            }
-        }
-    }
-    return QString();
-}
-
-QStringList MainWindow::gitMergedLocalBranches(const QString &repoDir, const QString &intoBranch) const {
-    QStringList merged;
-    if (intoBranch.isEmpty()) {
-        return merged;
-    }
-
-    QProcess process;
-    process.setWorkingDirectory(repoDir);
-#ifdef Q_OS_WIN
-    process.start(QStringLiteral("git.exe"),
-                  QStringList() << QStringLiteral("branch") << QStringLiteral("--merged") << intoBranch);
-#else
-    process.start(QStringLiteral("git"),
-                  QStringList() << QStringLiteral("branch") << QStringLiteral("--merged") << intoBranch);
-#endif
-    if (!process.waitForFinished(10000) || process.exitCode() != 0) {
-        return merged;
-    }
-
-#ifdef Q_OS_WIN
-    const QString output = QString::fromUtf8(process.readAllStandardOutput());
-#else
-    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-#else
-    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-#endif
-
-    for (QString line : lines) {
-        const QString name = normalizeLocalBranchRef(line);
-        if (name.isEmpty() || name == intoBranch) {
-            continue;
-        }
-        if (!merged.contains(name, Qt::CaseInsensitive)) {
-            merged.append(name);
-        }
-    }
-    return merged;
-}
-
-int MainWindow::markGoalsCompletedForMergedBranches(const QString &repoDir) {
-    const QString mainBranch = resolveMainBranchName(repoDir);
-    if (mainBranch.isEmpty()) {
-        return 0;
-    }
-
-    const QStringList mergedBranches = gitMergedLocalBranches(repoDir, mainBranch);
-    if (mergedBranches.isEmpty()) {
-        return 0;
-    }
-
+int MainWindow::markGoalsCompletedForDeletedBranches(const QString &repoDir) {
     QList<GitWorkGoal> goals = loadGitGoals(repoDir);
     bool changed = false;
     int updated = 0;
@@ -4637,21 +4922,18 @@ int MainWindow::markGoalsCompletedForMergedBranches(const QString &repoDir) {
             continue;
         }
         const QString goalBranch = normalizeLocalBranchRef(g.branchName);
-        bool isMerged = false;
-        for (const QString &mb : mergedBranches) {
-            if (mb.compare(goalBranch, Qt::CaseInsensitive) == 0) {
-                isMerged = true;
-                break;
-            }
-        }
-        if (!isMerged) {
+        if (goalBranch.isEmpty()) {
             continue;
         }
+        if (gitBranchExists(repoDir, goalBranch)) {
+            continue;
+        }
+
         g.actualDate = today;
         changed = true;
         updated++;
-        txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 分支 %1 已合并入 %2，已填写实际完成日期: %3（%4）</font>")
-                              .arg(goalBranch, mainBranch, today, g.title));
+        txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 分支 %1 已删除，已填写实际完成日期: %2（%3）</font>")
+                              .arg(goalBranch, today, g.title));
     }
 
     if (changed) {
@@ -4682,6 +4964,7 @@ void MainWindow::saveGitGoals(const QString &repoDir, const QList<GitWorkGoal> &
         settings.setValue("branchName", g.branchName);
         settings.setValue("started", g.started);
         settings.setValue("remark", g.remark);
+        settings.setValue("difficulty", g.parentId.isEmpty() ? 0 : qMax(1, g.difficulty));
     }
     settings.endArray();
     settings.endGroup();
@@ -4717,15 +5000,30 @@ QSet<QString> &MainWindow::gitGoalCollapsedIdsForRepo(const QString &repoDir) {
     return gitGoalCollapsedByRepo[key];
 }
 
-void MainWindow::appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWorkGoal> &allGoals, int depth,
+void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal &g,
+                                        const QList<GitWorkGoal> &allGoals, int depth,
                                         bool hasChildren, bool childrenCollapsed) {
     const int row = tblGitGoals->rowCount();
     tblGitGoals->insertRow(row);
 
+    static const int kTreeIndentPerLevel = 22;
+    static const int kToggleButtonWidth = 26;
+
+    QWidget *treeLeadCell = new QWidget();
+    QHBoxLayout *treeLeadLayout = new QHBoxLayout(treeLeadCell);
+    treeLeadLayout->setContentsMargins(0, 0, 0, 0);
+    treeLeadLayout->setSpacing(0);
+
+    if (depth > 0) {
+        QWidget *levelIndent = new QWidget();
+        levelIndent->setFixedWidth(depth * kTreeIndentPerLevel);
+        treeLeadLayout->addWidget(levelIndent);
+    }
+
     if (hasChildren) {
         QPushButton *btnToggle = new QPushButton(childrenCollapsed ? QStringLiteral("▶")
                                                                    : QStringLiteral("▼"));
-        btnToggle->setFixedSize(26, 22);
+        btnToggle->setFixedSize(kToggleButtonWidth, 22);
         btnToggle->setToolTip(childrenCollapsed ? QStringLiteral("展开子目标")
                                               : QStringLiteral("折叠子目标"));
         btnToggle->setFlat(true);
@@ -4740,35 +5038,91 @@ void MainWindow::appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWork
             }
             refreshGitGoalsTable();
         });
-        tblGitGoals->setCellWidget(row, 0, btnToggle);
+        treeLeadLayout->addWidget(btnToggle);
+    } else if (depth > 0) {
+        QWidget *toggleAlign = new QWidget();
+        toggleAlign->setFixedWidth(kToggleButtonWidth);
+        treeLeadLayout->addWidget(toggleAlign);
     }
 
-    const QString indent = depth > 0 ? QString(depth * 4, QLatin1Char(' ')) : QString();
-    QTableWidgetItem *titleItem = new QTableWidgetItem(indent + g.title);
+    treeLeadLayout->addStretch();
+    tblGitGoals->setCellWidget(row, 0, treeLeadCell);
+
+    QTableWidgetItem *titleItem = new QTableWidgetItem(g.title);
     titleItem->setData(Qt::UserRole, g.id);
     tblGitGoals->setItem(row, 1, titleItem);
+
+    const bool isRoot = g.parentId.isEmpty();
+    if (isRoot) {
+        const GitRootProgressInfo progress = calcRootGoalProgress(repoDir, g, allGoals);
+        QProgressBar *bar = new QProgressBar();
+        bar->setRange(0, 100);
+        bar->setValue(qRound(progress.totalPercent));
+        bar->setFormat(QStringLiteral("%p%"));
+        bar->setFixedHeight(18);
+        QString tip = QStringLiteral("综合进度 %1%\n时间进度 %2%")
+                          .arg(QString::number(progress.totalPercent, 'f', 1))
+                          .arg(QString::number(progress.timePercent, 'f', 1));
+        if (progress.hasSubGoals) {
+            tip += QStringLiteral("\n子任务进度 %1%（%2/%3 已完成，提交加权 %4/%5）")
+                       .arg(QString::number(progress.taskPercent, 'f', 1))
+                       .arg(progress.completedCount)
+                       .arg(progress.descendantCount)
+                       .arg(QString::number(progress.completedWeight, 'f', 1))
+                       .arg(QString::number(progress.totalWeight, 'f', 1));
+            tip += QStringLiteral("\n未完成最下级子任务按分支提交数计分；已完成按实际提交数计权");
+        } else {
+            tip += QStringLiteral("\n无子任务，进度仅按时间计算");
+        }
+        bar->setToolTip(tip);
+        tblGitGoals->setCellWidget(row, 2, bar);
+        tblGitGoals->setItem(row, 3, new QTableWidgetItem(QStringLiteral("—")));
+    } else {
+        tblGitGoals->setItem(row, 2, new QTableWidgetItem(QStringLiteral("—")));
+        const bool hasChildren = gitGoalHasChildren(g.id, allGoals);
+        const int starHalfUnits = hasChildren ? gitGoalDisplayDifficulty(g, allGoals)
+                                              : qMax(1, g.difficulty);
+        const double presetStars = starHalfUnits * 0.5;
+        const int actualCommits = (!hasChildren && !repoDir.isEmpty())
+                                      ? gitGoalActualCommits(repoDir, g, allGoals)
+                                      : 0;
+        QTableWidgetItem *diffItem = new QTableWidgetItem(formatDifficultyStars(starHalfUnits));
+        if (hasChildren) {
+            diffItem->setToolTip(QStringLiteral("由下级子目标星级相加，合计 %1 星")
+                                     .arg(QString::number(presetStars, 'f', 1)));
+        } else {
+            diffItem->setToolTip(
+                QStringLiteral("预计 %1 次提交（%2 星）；目标开始日期后分支 %3 已有 %4 次提交\n"
+                               "超出预设时程序自动抬升星级（无上限）")
+                    .arg(QString::number(presetStars, 'f', 1))
+                    .arg(QString::number(qMax(presetStars, static_cast<double>(actualCommits)), 'f', 1))
+                    .arg(g.branchName.isEmpty() ? QStringLiteral("（未绑定）") : g.branchName)
+                    .arg(actualCommits));
+        }
+        tblGitGoals->setItem(row, 3, diffItem);
+    }
 
     QString parentDisplay = QStringLiteral("(无)");
     if (!g.parentId.isEmpty()) {
         const QString parentTitle = gitGoalTitleById(allGoals, g.parentId);
         parentDisplay = parentTitle.isEmpty() ? QStringLiteral("(已删除)") : parentTitle;
     }
-    tblGitGoals->setItem(row, 2, new QTableWidgetItem(parentDisplay));
+    tblGitGoals->setItem(row, 4, new QTableWidgetItem(parentDisplay));
 
     QString startDisplay;
     if (g.startDate.isEmpty()) {
-        startDisplay = g.parentId.isEmpty() ? QStringLiteral("未开始") : QStringLiteral("—");
+        startDisplay = isRoot ? QStringLiteral("未开始") : QStringLiteral("—");
     } else if (!g.started) {
         startDisplay = g.startDate + QStringLiteral(" (计划)");
     } else {
         startDisplay = g.startDate;
     }
-    tblGitGoals->setItem(row, 3, new QTableWidgetItem(startDisplay));
-    tblGitGoals->setItem(row, 4, new QTableWidgetItem(g.endDate.isEmpty() ? QStringLiteral("—") : g.endDate));
+    tblGitGoals->setItem(row, 5, new QTableWidgetItem(startDisplay));
+    tblGitGoals->setItem(row, 6, new QTableWidgetItem(g.endDate.isEmpty() ? QStringLiteral("—") : g.endDate));
     const QString actual = g.actualDate.isEmpty() ? QStringLiteral("—") : g.actualDate;
-    tblGitGoals->setItem(row, 5, new QTableWidgetItem(actual));
+    tblGitGoals->setItem(row, 7, new QTableWidgetItem(actual));
     const QString branchDisplay = g.branchName.isEmpty() ? QStringLiteral("—") : g.branchName;
-    tblGitGoals->setItem(row, 6, new QTableWidgetItem(branchDisplay));
+    tblGitGoals->setItem(row, 8, new QTableWidgetItem(branchDisplay));
 
     QString remarkDisplay = g.remark.trimmed();
     if (remarkDisplay.isEmpty()) {
@@ -4783,14 +5137,23 @@ void MainWindow::appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWork
     if (!g.remark.trimmed().isEmpty()) {
         remarkItem->setToolTip(g.remark.trimmed());
     }
-    tblGitGoals->setItem(row, 7, remarkItem);
+    tblGitGoals->setItem(row, 9, remarkItem);
 }
 
 void MainWindow::refreshGitGoalsTable() {
     if (!tblGitGoals) return;
 
     const QString repoDir = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
-    const QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    QList<GitWorkGoal> goals = loadGitGoals(repoDir);
+    if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
+        bool changed = syncParentStartDatesFromLeaves(goals);
+        if (syncGoalDifficultyFromCommits(repoDir, goals)) {
+            changed = true;
+        }
+        if (changed) {
+            saveGitGoals(repoDir, goals);
+        }
+    }
     const QSet<QString> collapsedIds = repoDir.isEmpty() ? QSet<QString>()
                                                          : gitGoalCollapsedIdsForRepo(repoDir);
 
@@ -4815,19 +5178,33 @@ void MainWindow::refreshGitGoalsTable() {
         const QStringList children = childrenByParent.value(goalId);
         const bool hasChildren = !children.isEmpty();
         const bool childrenCollapsed = collapsedIds.contains(goalId);
-        appendGitGoalTableRow(*g, goals, depth, hasChildren, childrenCollapsed);
+        appendGitGoalTableRow(repoDir, *g, goals, depth, hasChildren, childrenCollapsed);
 
         for (const QString &childId : children) {
             visitGoal(childId, depth + 1);
         }
     };
 
+    int maxDepth = 0;
+    std::function<void(const QString &, int)> measureDepth;
+    measureDepth = [&](const QString &goalId, int depth) {
+        maxDepth = qMax(maxDepth, depth);
+        for (const QString &childId : childrenByParent.value(goalId)) {
+            measureDepth(childId, depth + 1);
+        }
+    };
+    for (const QString &rootId : rootIds) {
+        measureDepth(rootId, 0);
+    }
+
     for (const QString &rootId : rootIds) {
         visitGoal(rootId, 0);
     }
 
     tblGitGoals->resizeColumnsToContents();
-    tblGitGoals->setColumnWidth(0, 32);
+    const int treeColWidth = 26 + 8 + maxDepth * 22;
+    tblGitGoals->setColumnWidth(0, qMax(40, treeColWidth));
+    tblGitGoals->setColumnWidth(2, 110);
 }
 
 GitWorkGoal *MainWindow::gitGoalById(QList<GitWorkGoal> &goals, const QString &id) {
@@ -4976,6 +5353,222 @@ QString MainWindow::suggestBranchNameFromTitle(const QString &title) {
     return translateGoalTitleToEnglish(title);
 }
 
+QStringList MainWindow::gitBranchHintLinesFromCombo() const {
+    QStringList hints;
+    if (!cmbGitBranches) {
+        return hints;
+    }
+    for (int i = 0; i < cmbGitBranches->count(); ++i) {
+        hints.append(cmbGitBranches->itemText(i));
+    }
+    return hints;
+}
+
+bool MainWindow::branchNameInBranchHints(const QStringList &hints, const QString &name) const {
+    const QString target = name.trimmed();
+    if (target.isEmpty()) {
+        return false;
+    }
+    const QString remoteRef = QStringLiteral("remotes/origin/") + target;
+    for (QString line : hints) {
+        line = line.trimmed();
+        if (line.startsWith(QStringLiteral("* "))) {
+            line = line.mid(2).trimmed();
+        }
+        if (line.compare(target, Qt::CaseInsensitive) == 0
+            || line.compare(remoteRef, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QString MainWindow::detectDefaultMainBranch(const QString &repoDir, const QStringList &branchHints) const {
+    auto branchPresent = [&](const QString &name) -> bool {
+        if (!repoDir.isEmpty() && gitBranchExists(repoDir, name)) {
+            return true;
+        }
+        return branchNameInBranchHints(branchHints, name);
+    };
+
+    if (branchPresent(QStringLiteral("main"))) {
+        return QStringLiteral("main");
+    }
+    if (branchPresent(QStringLiteral("master"))) {
+        return QStringLiteral("master");
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"),
+                  QStringList() << QStringLiteral("symbolic-ref")
+                                << QStringLiteral("refs/remotes/origin/HEAD"));
+#else
+    process.start(QStringLiteral("git"),
+                  QStringList() << QStringLiteral("symbolic-ref")
+                                << QStringLiteral("refs/remotes/origin/HEAD"));
+#endif
+    if (process.waitForFinished(5000) && process.exitCode() == 0) {
+        const QString sym = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        const int slash = sym.lastIndexOf(QLatin1Char('/'));
+        if (slash >= 0) {
+            const QString candidate = sym.mid(slash + 1);
+            if (gitBranchExists(repoDir, candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return QString();
+}
+
+void MainWindow::saveGitMainBranchSetting(const QString &repoDir, const QString &branchName) {
+    const QString branch = branchName.trimmed();
+    if (branch.isEmpty()) {
+        return;
+    }
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.setValue(QStringLiteral("GitDefaultMainBranch"), branch);
+
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (!key.isEmpty()) {
+        settings.beginGroup(QStringLiteral("GitMainBranch"));
+        settings.setValue(key, branch);
+        settings.endGroup();
+    }
+}
+
+void MainWindow::syncGitMainBranchSetting(const QString &repoDir) {
+    if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
+        return;
+    }
+
+    const QStringList branchHints = gitBranchHintLinesFromCombo();
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    QString branch;
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (!key.isEmpty()) {
+        settings.beginGroup(QStringLiteral("GitMainBranch"));
+        branch = settings.value(key).toString().trimmed();
+        settings.endGroup();
+    }
+    if (branch.isEmpty()) {
+        branch = settings.value(QStringLiteral("GitDefaultMainBranch")).toString().trimmed();
+    }
+
+    auto branchPresent = [&](const QString &name) -> bool {
+        if (name.isEmpty()) {
+            return false;
+        }
+        if (gitBranchExists(repoDir, name)) {
+            return true;
+        }
+        return branchNameInBranchHints(branchHints, name);
+    };
+
+    if (!branch.isEmpty() && !branchPresent(branch)) {
+        const QString remembered = branch;
+        branch.clear();
+        if (txtGitLog) {
+            txtGitLog->append(QStringLiteral("<font color='orange'>[主分支] 记忆的 %1 在当前仓库不存在，已按分支列表自动识别</font>")
+                                  .arg(remembered));
+        }
+    }
+
+    if (branch.isEmpty()) {
+        branch = detectDefaultMainBranch(repoDir, branchHints);
+    }
+    if (!branch.isEmpty()) {
+        saveGitMainBranchSetting(repoDir, branch);
+    }
+}
+
+QString MainWindow::resolveGitMainBranch(const QString &repoDir) const {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (!key.isEmpty()) {
+        settings.beginGroup(QStringLiteral("GitMainBranch"));
+        const QString perRepo = settings.value(key).toString().trimmed();
+        settings.endGroup();
+        if (!perRepo.isEmpty()) {
+            return perRepo;
+        }
+    }
+    const QString globalDefault = settings.value(QStringLiteral("GitDefaultMainBranch")).toString().trimmed();
+    if (!globalDefault.isEmpty()) {
+        return globalDefault;
+    }
+    return detectDefaultMainBranch(repoDir, gitBranchHintLinesFromCombo());
+}
+
+QString MainWindow::gitWorktreePathUsingBranch(const QString &repoDir, const QString &branchName) const {
+    const QString target = normalizeLocalBranchRef(branchName);
+    if (target.isEmpty()) {
+        return QString();
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"),
+                  QStringList() << QStringLiteral("worktree") << QStringLiteral("list")
+                                << QStringLiteral("--porcelain"));
+#else
+    process.start(QStringLiteral("git"),
+                  QStringList() << QStringLiteral("worktree") << QStringLiteral("list")
+                                << QStringLiteral("--porcelain"));
+#endif
+    if (!process.waitForFinished(10000) || process.exitCode() != 0) {
+        return QString();
+    }
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+
+    QString currentPath;
+    QString currentBranch;
+    const QString prefix = QStringLiteral("refs/heads/");
+
+    auto checkCurrent = [&]() -> QString {
+        if (!currentPath.isEmpty() && !currentBranch.isEmpty()
+            && currentBranch.compare(target, Qt::CaseInsensitive) == 0) {
+            return currentPath;
+        }
+        return QString();
+    };
+
+    for (const QString &line : lines) {
+        if (line.startsWith(QStringLiteral("worktree "))) {
+            const QString hit = checkCurrent();
+            if (!hit.isEmpty()) {
+                return hit;
+            }
+            currentPath = line.mid(9).trimmed();
+            currentBranch.clear();
+        } else if (line.startsWith(QStringLiteral("branch "))) {
+            const QString ref = line.mid(7).trimmed();
+            if (ref.startsWith(prefix)) {
+                currentBranch = ref.mid(prefix.size());
+            }
+            const QString hit = checkCurrent();
+            if (!hit.isEmpty()) {
+                return hit;
+            }
+        }
+    }
+    return checkCurrent();
+}
+
 bool MainWindow::gitBranchExists(const QString &repoDir, const QString &branchName) const {
     QProcess process;
     process.setWorkingDirectory(repoDir);
@@ -4994,7 +5587,48 @@ bool MainWindow::gitBranchExists(const QString &repoDir, const QString &branchNa
     return process.exitCode() == 0;
 }
 
+bool MainWindow::checkoutGitBranch(const QString &repoDir, const QString &branchName) {
+    QProcess process;
+    process.setWorkingDirectory(repoDir);
+#ifdef Q_OS_WIN
+    process.setProgram(QStringLiteral("git.exe"));
+#else
+    process.setProgram(QStringLiteral("git"));
+#endif
+    process.setArguments(QStringList() << QStringLiteral("checkout") << branchName);
+    process.start();
+    if (!process.waitForFinished(30000)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[Git] 切换分支超时</font>"));
+        return false;
+    }
+    const QString stderrData = QString::fromLocal8Bit(process.readAllStandardError());
+    if (process.exitCode() != 0) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[Git] 切换分支失败: %1</font>").arg(stderrData.trimmed()));
+        return false;
+    }
+    return true;
+}
+
 bool MainWindow::createGitBranch(const QString &repoDir, const QString &branchName) {
+    const QString mainBranch = resolveGitMainBranch(repoDir);
+    if (mainBranch.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("工作目标"),
+                             QStringLiteral("未配置主分支。请在仓库区域设置主分支并保存。"));
+        return false;
+    }
+    if (!gitBranchExists(repoDir, mainBranch)) {
+        QMessageBox::warning(this, QStringLiteral("工作目标"),
+                             QStringLiteral("主分支 %1 在本地不存在，请先拉取或修正主分支配置。").arg(mainBranch));
+        return false;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='cyan'>[工作目标] 从主分支 %1 创建: %2</font>")
+                          .arg(mainBranch, branchName));
+
+    if (!checkoutGitBranch(repoDir, mainBranch)) {
+        return false;
+    }
+
     QProcess process;
     process.setWorkingDirectory(repoDir);
 #ifdef Q_OS_WIN
@@ -5014,7 +5648,8 @@ bool MainWindow::createGitBranch(const QString &repoDir, const QString &branchNa
         txtGitLog->append(QStringLiteral("<font color='red'>[工作目标] 创建分支失败: %1</font>").arg(stderrData.trimmed()));
         return false;
     }
-    txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 已创建并切换到分支: %1</font>").arg(branchName));
+    txtGitLog->append(QStringLiteral("<font color='green'>[工作目标] 已从 %1 创建并切换到分支: %2</font>")
+                          .arg(mainBranch, branchName));
     if (!stdoutData.trimmed().isEmpty()) {
         txtGitLog->append(stdoutData.trimmed());
     }
@@ -5181,7 +5816,9 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
         if (pIdx >= 0) cmbParent->setCurrentIndex(pIdx);
     }
 
-    QLabel *lblPlanHint = new QLabel(QStringLiteral("无父目标时需填写计划开始与计划结束；子目标的计划结束继承父目标，开始日期在「目标开始」时记录。"));
+    QLabel *lblPlanHint = new QLabel(
+        QStringLiteral("无父目标时需填写计划开始与计划结束，列表显示综合进度条；子目标星级表示目标开始日期后的预计提交次数（0.5 星步进），"
+                       "未完成时按分支 log 数计进度，超出预设时自动抬升星级，完成后以实际提交数计权。"));
     lblPlanHint->setWordWrap(true);
     lblPlanHint->setStyleSheet(QStringLiteral("color: #555; font-size: 11px;"));
 
@@ -5207,6 +5844,27 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     QLabel *lblChildPlanEnd = new QLabel();
     lblChildPlanEnd->setWordWrap(true);
     lblChildPlanEnd->setStyleSheet(QStringLiteral("color: #1565c0;"));
+
+    QWidget *rowDifficulty = new QWidget();
+    QHBoxLayout *layDifficulty = new QHBoxLayout(rowDifficulty);
+    layDifficulty->setContentsMargins(0, 0, 0, 0);
+    QDoubleSpinBox *spinDifficulty = new QDoubleSpinBox();
+    spinDifficulty->setRange(0.5, 9999.0);
+    spinDifficulty->setSingleStep(0.5);
+    spinDifficulty->setDecimals(1);
+    const double initialStars = goal.parentId.isEmpty()
+                                    ? 3.0
+                                    : qMax(0.5, goal.difficulty * 0.5);
+    spinDifficulty->setValue(initialStars);
+    spinDifficulty->setSuffix(QStringLiteral(" 星"));
+    QLabel *lblDifficultyStars = new QLabel(formatDifficultyStars(qMax(1, qRound(initialStars * 2))));
+    layDifficulty->addWidget(spinDifficulty);
+    layDifficulty->addWidget(lblDifficultyStars);
+    layDifficulty->addStretch();
+    connect(spinDifficulty, QOverload<double>::of(&QDoubleSpinBox::valueChanged), &dlg,
+            [lblDifficultyStars, this](double v) {
+                lblDifficultyStars->setText(formatDifficultyStars(qMax(1, qRound(v * 2))));
+            });
 
     QTextEdit *txtRemark = new QTextEdit(goal.remark);
     txtRemark->setPlaceholderText(QStringLiteral("可选：记录需求链接、问题现象、验收标准等"));
@@ -5239,6 +5897,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
         const bool isRoot = cmbParent->currentData().toString().isEmpty();
         rowStart->setVisible(isRoot);
         rowEnd->setVisible(isRoot);
+        rowDifficulty->setVisible(!isRoot);
         lblChildPlanEnd->setVisible(!isRoot);
         if (!isRoot) {
             const QString parentId = cmbParent->currentData().toString();
@@ -5263,6 +5922,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     form->addRow(rowStart);
     form->addRow(rowEnd);
     form->addRow(lblChildPlanEnd);
+    form->addRow(QStringLiteral("预计提交（星）:"), rowDifficulty);
     form->addRow(QStringLiteral("备注:"), txtRemark);
     form->addRow(chkActual);
     form->addRow(QStringLiteral("实际完成:"), dateActual);
@@ -5297,6 +5957,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
         }
         goal.startDate = dateStart->date().toString(QStringLiteral("yyyy-MM-dd"));
         goal.endDate = dateEnd->date().toString(QStringLiteral("yyyy-MM-dd"));
+        goal.difficulty = 0;
     } else {
         const GitWorkGoal *parent = gitGoalById(allGoals, parentId);
         if (!parent || parent->endDate.isEmpty()) {
@@ -5305,6 +5966,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
             return false;
         }
         goal.endDate = parent->endDate;
+        goal.difficulty = qMax(1, qRound(spinDifficulty->value() * 2));
         if (excludeGoalId.isEmpty()) {
             goal.startDate.clear();
             goal.started = false;
@@ -5334,6 +5996,7 @@ void MainWindow::onGitGoalAddClicked() {
 
     goals.append(goal);
     syncChildGoalEndDatesFromParents(goals);
+    syncParentStartDatesFromLeaves(goals);
     saveGitGoals(repoDir, goals);
     refreshGitGoalsTable();
     txtGitLog->append(QString("[工作目标] 已添加: %1").arg(goal.title));
@@ -5413,7 +6076,7 @@ void MainWindow::onGitGoalStartClicked() {
     const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
     goal->startDate = today;
     goal->started = true;
-    fillAncestorStartDates(goals, goal->id, today);
+    syncParentStartDatesFromLeaves(goals);
 
     if (createBranch) {
         if (gitBranchExists(repoDir, branchName)) {
@@ -5459,6 +6122,7 @@ void MainWindow::onGitGoalEditClicked() {
         if (!editGitWorkGoalDialog(edited, goals, goalId)) return;
         goals[i] = edited;
         syncChildGoalEndDatesFromParents(goals);
+        syncParentStartDatesFromLeaves(goals);
         saveGitGoals(repoDir, goals);
         refreshGitGoalsTable();
         txtGitLog->append(QString("[工作目标] 已更新: %1").arg(edited.title));

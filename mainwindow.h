@@ -84,6 +84,18 @@ struct GitWorkGoal {
     QString branchName;
     bool started = false;
     QString remark;
+    int difficulty = 0; // 子任务半格数（显示星级×2；0.5 星=1 次提交），根目标为 0
+};
+
+struct GitRootProgressInfo {
+    double totalPercent = 0.0;
+    double timePercent = 0.0;
+    double taskPercent = 0.0;
+    int descendantCount = 0;
+    int completedCount = 0;
+    double totalWeight = 0.0;
+    double completedWeight = 0.0;
+    bool hasSubGoals = false;
 };
 
 class MainWindow : public QMainWindow
@@ -165,6 +177,7 @@ private slots:
     void onGitCopyForDailyReportClicked();
     void onGitRemoveHistoryClicked();
     void onGitDirChanged();
+    void onGitBranchSelectionChanged();
     void onGitGoalAddClicked();
     void onGitGoalEditClicked();
     void onGitGoalDeleteClicked();
@@ -499,19 +512,45 @@ private:
     QString buildGoalBranchName(const QString &category, const QString &namePart) const;
     QString suggestBranchNameFromTitle(const QString &title);
     bool gitBranchExists(const QString &repoDir, const QString &branchName) const;
+    bool checkoutGitBranch(const QString &repoDir, const QString &branchName);
     bool createGitBranch(const QString &repoDir, const QString &branchName);
+    QString detectDefaultMainBranch(const QString &repoDir,
+                                    const QStringList &branchHints = QStringList()) const;
+    QString resolveGitMainBranch(const QString &repoDir) const;
+    void syncGitMainBranchSetting(const QString &repoDir);
+    void activateGitRepo(const QString &repoDir);
+    QStringList gitBranchHintLinesFromCombo() const;
+    bool branchNameInBranchHints(const QStringList &hints, const QString &name) const;
+    void saveGitMainBranchSetting(const QString &repoDir, const QString &branchName);
+    QString gitWorktreePathUsingBranch(const QString &repoDir, const QString &branchName) const;
     void fillAncestorStartDates(QList<GitWorkGoal> &goals, const QString &goalId, const QString &dateStr);
     bool promptGitGoalStartDialog(const QString &goalTitle, QString &branchName, bool &createBranch);
-    QString resolveMainBranchName(const QString &repoDir) const;
     QString normalizeLocalBranchRef(const QString &branchRef) const;
-    QStringList gitMergedLocalBranches(const QString &repoDir, const QString &intoBranch) const;
-    int markGoalsCompletedForMergedBranches(const QString &repoDir);
+    int markGoalsCompletedForDeletedBranches(const QString &repoDir);
     void syncChildGoalEndDatesFromParents(QList<GitWorkGoal> &goals);
-    void appendGitGoalTableRow(const GitWorkGoal &g, const QList<GitWorkGoal> &allGoals, int depth,
+    bool syncParentStartDatesFromLeaves(QList<GitWorkGoal> &goals);
+    void appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal &g,
+                               const QList<GitWorkGoal> &allGoals, int depth,
                                bool hasChildren, bool childrenCollapsed);
     bool isGitGoalHiddenByCollapse(const GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
                                    const QSet<QString> &collapsedIds) const;
     QSet<QString> &gitGoalCollapsedIdsForRepo(const QString &repoDir);
+    QString formatDifficultyStars(int starHalfUnits) const;
+    QDate gitGoalEffectiveStartDate(const GitWorkGoal &goal, const QList<GitWorkGoal> &goals) const;
+    int gitBranchCommitCountSince(const QString &repoDir, const QString &branchRef,
+                                  const QDate &sinceDate) const;
+    int gitGoalActualCommits(const QString &repoDir, const GitWorkGoal &goal,
+                             const QList<GitWorkGoal> &goals) const;
+    bool syncGoalDifficultyFromCommits(const QString &repoDir, QList<GitWorkGoal> &goals);
+    void collectGitGoalDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
+                                     QStringList &outIds) const;
+    void collectGitGoalLeafDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
+                                         QStringList &outIds) const;
+    bool gitGoalHasChildren(const QString &goalId, const QList<GitWorkGoal> &goals) const;
+    int gitGoalDisplayDifficulty(const GitWorkGoal &goal, const QList<GitWorkGoal> &goals) const;
+    bool isGitSubGoalCompleted(const GitWorkGoal &goal) const;
+    GitRootProgressInfo calcRootGoalProgress(const QString &repoDir, const GitWorkGoal &root,
+                                             const QList<GitWorkGoal> &goals) const;
     bool isRegisterMapRowEmpty(const QTableWidget *table, int row) const;
     void ensureRegisterMapEditableTailRow(QTableWidget *table);
     void copyRegisterMapSelection(QTableWidget *table);
