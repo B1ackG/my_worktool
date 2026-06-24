@@ -84,7 +84,7 @@ struct GitWorkGoal {
     QString branchName;
     bool started = false;
     QString remark;
-    int difficulty = 0; // 子任务星级（1 星 = 1 次预计提交），根目标为 0
+    int difficulty = 0; // 子任务星级（1 星 = 5000 行 +/− 变更），根目标为 0
 };
 
 struct GitRootProgressInfo {
@@ -106,6 +106,19 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
     void onImportStandardFileClicked();
+
+    enum class Float32WordOrder {
+        CDAB = 0,
+        ABCD = 1,
+        BADC = 2,
+        DCBA = 3
+    };
+    enum class Float64WordOrder {
+        GHEF_CDAB = 0,
+        ABCD_EFGH = 1,
+        BADC_FEHG = 2,
+        DCBA_HGFE = 3
+    };
 
 private slots:
     // Pages Navigation
@@ -145,7 +158,7 @@ private slots:
 
     // Git Slots
     void onGitSelectDirClicked();
-    void onGitRefreshBranchesClicked();
+    void onGitRefreshBranchesClicked(bool fetchRemote = true);
     void onGitCheckoutClicked();
     void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
@@ -155,6 +168,7 @@ private slots:
     void onGitPushClicked();
     void onGitPullClicked();
     void onGitMergeClicked();
+    void onGitRebaseClicked();
     void onGitStatusClicked();
     void onGitDiffClicked();
     void onGitFetchClicked();
@@ -182,6 +196,7 @@ private slots:
     void onGitGoalEditClicked();
     void onGitGoalDeleteClicked();
     void onGitGoalStartClicked();
+    void onGitGoalRowDoubleClicked(int row, int column);
     void onScpTransferClicked();
     void onRebootTargetClicked();
     void onMonitorUsageToggled();
@@ -229,6 +244,7 @@ private:
     QWidget* createSimulatorPage();
     QWidget* createTcpAssistantPage();
     QWidget* createPerformancePage();
+    QWidget* createLifeAssistantPage();
 
     // --- Main UI Structure ---
     QAction *actAutostart = nullptr;
@@ -242,6 +258,7 @@ private:
     QWidget *simulatorPageWidget;
     QWidget *tcpAssistantPageWidget;
     QWidget *performancePageWidget;
+    QWidget *lifeAssistantPageWidget;
 
     // --- Modbus Widgets ---
     // Register Map Tables
@@ -354,6 +371,7 @@ private:
     QPushButton *btnGitGoalEdit;
     QPushButton *btnGitGoalDelete;
     QPushButton *btnGitGoalStart;
+    QLabel *lblGitCurrentBranch;
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
@@ -367,6 +385,7 @@ private:
     QComboBox *cmbGitRemote; // Added for remote selection
     QPushButton *btnGitPull;
     QPushButton *btnGitMerge;
+    QPushButton *btnGitRebase;
     QPushButton *btnGitStatus;
     QPushButton *btnGitDiff;
     QPushButton *btnGitFetch;
@@ -415,7 +434,8 @@ private:
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
-    int gitDiffReminderRule = -1;
+    int gitDiffReminderRule = 2;
+    bool gitDiffReminderEnabled = true;
     QHash<QString, QSet<QString>> gitGoalCollapsedByRepo;
 
     // --- Logic Objects ---
@@ -436,9 +456,12 @@ private:
         FormatHex = 1,
         FormatBinary = 2,
         FormatFloat = 3,
-        FormatDouble = 4
+        FormatDouble = 4,
+        FormatString = 5
     };
     DisplayFormat displayFormat;
+    Float32WordOrder float32WordOrder;
+    Float64WordOrder float64WordOrder;
 
     // --- Simulator Members ---
     ModbusSlave *simMainDevice; // port 5020
@@ -481,6 +504,8 @@ private:
     // register history: simple in-memory list of JSON objects
     QVector<QJsonObject> registerHistory;
     QMap<QString, QMap<quint16, quint16>> simLastReadValues;
+    QTimer *simWriteRefreshTimer = nullptr;
+    QHash<QTableWidget *, QSet<quint16>> simPendingWriteAddrs;
     // Fault injection controls
     QSpinBox *spinSimDelayMs;
     QDoubleSpinBox *spinSimDropProb;
@@ -502,10 +527,12 @@ private:
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
     bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
+    bool gitHasUncommittedChanges(const QString &workDir) const;
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
     void removeGitHistoryPath(const QString &dir);
-    void applyGitHistoryToCombo(const QStringList &history, const QString &selectPath = QString());
+    void applyGitHistoryToCombo(const QStringList &history, const QString &selectPath = QString(),
+                                bool activateRepo = true);
     QString gitGoalsRepoKey(const QString &repoDir) const;
     QList<GitWorkGoal> loadGitGoals(const QString &repoDir) const;
     void saveGitGoals(const QString &repoDir, const QList<GitWorkGoal> &goals);
@@ -527,9 +554,15 @@ private:
                                     const QStringList &branchHints = QStringList()) const;
     QString resolveGitMainBranch(const QString &repoDir) const;
     void syncGitMainBranchSetting(const QString &repoDir);
-    void activateGitRepo(const QString &repoDir);
+    void activateGitRepo(const QString &repoDir, bool fetchRemote = true);
+    void deferredGitRepoInit();
+    void loadGitDiffReminderSettings();
+    void saveGitDiffReminderSettings();
+    void applyGitDiffReminderEnabled(bool enabled);
+    QString gitCheckedOutBranch(const QString &repoDir) const;
     QStringList gitBranchHintLinesFromCombo() const;
     bool branchNameInBranchHints(const QStringList &hints, const QString &name) const;
+    bool selectGitBranchInCombo(const QString &branchName);
     void saveGitMainBranchSetting(const QString &repoDir, const QString &branchName);
     QString gitWorktreePathUsingBranch(const QString &repoDir, const QString &branchName) const;
     void fillAncestorStartDates(QList<GitWorkGoal> &goals, const QString &goalId, const QString &dateStr);
@@ -541,17 +574,25 @@ private:
     void appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal &g,
                                const QList<GitWorkGoal> &allGoals, int depth,
                                bool hasChildren, bool childrenCollapsed);
+    enum class GitGoalBranchHighlight {
+        None,
+        CurrentBranch,
+        TargetBranch,
+        Both
+    };
+    GitGoalBranchHighlight gitGoalBranchHighlight(const GitWorkGoal &goal) const;
+    void applyGitGoalRowBranchHighlight(int row, GitGoalBranchHighlight highlight);
+    void updateGitGoalBranchHighlights();
     bool isGitGoalHiddenByCollapse(const GitWorkGoal &goal, const QList<GitWorkGoal> &allGoals,
                                    const QSet<QString> &collapsedIds) const;
     QSet<QString> &gitGoalCollapsedIdsForRepo(const QString &repoDir);
     QString formatDifficultyStars(int starCount) const;
     QPixmap gitDifficultyStarPixmap(int starCount, int starSize = 14) const;
     QDate gitGoalEffectiveStartDate(const GitWorkGoal &goal, const QList<GitWorkGoal> &goals) const;
-    int gitBranchCommitCountSince(const QString &repoDir, const QString &branchRef,
-                                  const QDate &sinceDate) const;
-    int gitGoalActualCommits(const QString &repoDir, const GitWorkGoal &goal,
-                             const QList<GitWorkGoal> &goals) const;
-    bool syncGoalDifficultyFromCommits(const QString &repoDir, QList<GitWorkGoal> &goals);
+    int gitBranchDiffLineCountVsMain(const QString &repoDir, const QString &branchRef,
+                                     const QString &mainBranch) const;
+    int gitGoalActualDiffLines(const QString &repoDir, const GitWorkGoal &goal) const;
+    bool syncGoalDifficultyFromDiffLines(const QString &repoDir, QList<GitWorkGoal> &goals);
     void collectGitGoalDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
                                      QStringList &outIds) const;
     void collectGitGoalLeafDescendantIds(const QString &parentId, const QList<GitWorkGoal> &goals,
@@ -567,6 +608,8 @@ private:
     void pasteRegisterMapFromClipboard(QTableWidget *table, int startRow, int startColumn);
     void setupSimulatorRegisterTable(QTableWidget *table);
     void syncSimulatorTablesFromMaps();
+    int findSimRowByAddress(QTableWidget *table, quint16 addr) const;
+    void rebuildSimRowStates(QTableWidget *table);
     void onSimRandomAndWriteClicked();
     void onSimSaveSceneClicked();
     void onSimLoadSceneClicked();
@@ -577,7 +620,8 @@ private:
     void onSimRandomAndWriteClicked_v2(); // unused but keeping to maintain structure if needed
     void onSimTableRowChanged(int row, int column);
     void onSimPopulateFloats();
-    void onSimShowBitEditor(int row);
+    void onSimShowBitEditor(QTableWidget *table, int row);
+    void onSimCellDoubleClicked(int row, int column);
     void onSimAddCyclicTimerClicked();
     void onSimRemoveCyclicTimerClicked(); // 新增
     void onSimWaveTypeChanged(const QString &type); // 新增
@@ -585,7 +629,22 @@ private:
     void onSimTimerTick();
     void onSimGenerateReportClicked();
     void refreshSimRowDisplay(QTableWidget *table, int row);
+    void refreshSimMultiWordRows(QTableWidget *table, int startRow);
+    void refreshSimTableForAddr(QTableWidget *table, quint16 addr);
+    void flushPendingSimWriteRefresh();
     void setSimRowEnabled(QTableWidget *table, int row, bool enabled);
+    void loadModbusFloatOrderSettings();
+    void saveModbusFloatOrderSettings();
+    void applyFloatWordOrderToSimulatorTables();
+    void showModbusFloatOrderDialog();
+    QPair<quint16, quint16> encodeFloat32Words(float value) const;
+    float decodeFloat32Words(quint16 w0, quint16 w1) const;
+    void encodeFloat64Words(double value, quint16 &w0, quint16 &w1, quint16 &w2, quint16 &w3) const;
+    double decodeFloat64Words(quint16 w0, quint16 w1, quint16 w2, quint16 w3) const;
+    bool writeFloat32ToSlave(ModbusSlave *slave, quint16 addr, float value);
+    float readFloat32FromSlave(ModbusSlave *slave, quint16 addr) const;
+    bool writeFloat64ToSlave(ModbusSlave *slave, quint16 addr, double value);
+    double readFloat64FromSlave(ModbusSlave *slave, quint16 addr) const;
 
     // --- TCP Assistant Slots ---
     void onTcpConnectClicked();
@@ -632,6 +691,8 @@ private:
 
     // 模拟器表格显示的格式缓存：Key=tablePtr, Value=Map<row, formatString>
     QMap<QTableWidget*, QMap<int, QString>> simTableFormats;
+    // String 格式占用的寄存器数：Key=tablePtr, Value=Map<row, registerCount>
+    QMap<QTableWidget*, QMap<int, int>> simTableStringLengths;
     // 被 32-bit 显示占用并禁用的行：Key=tablePtr, Value=Map<lockedRow, ownerRow>
     QMap<QTableWidget*, QMap<int, int>> simDisabledRowsOwner;
 

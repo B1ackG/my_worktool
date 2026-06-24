@@ -13,6 +13,9 @@ class ModbusSlave : public QObject
 {
     Q_OBJECT
 public:
+    static constexpr quint16 MaxHoldingRegisterAddress = 10000;
+    static constexpr int HoldingRegisterCount = MaxHoldingRegisterAddress + 1;
+
     explicit ModbusSlave(QObject *parent = nullptr);
     ~ModbusSlave();
 

@@ -5,7 +5,7 @@
 #include <QRandomGenerator>
 #include <QJsonDocument>
 
-ModbusSlave::ModbusSlave(QObject *parent) : QObject(parent), server(new QTcpServer(this)), holding(2001, 0), unit(1)
+ModbusSlave::ModbusSlave(QObject *parent) : QObject(parent), server(new QTcpServer(this)), holding(HoldingRegisterCount, 0), unit(1)
 {
     connect(server, &QTcpServer::newConnection, this, &ModbusSlave::onNewConnection);
     fixedDelayMs = 0;
@@ -298,13 +298,23 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
         quint16 qty = (d[10] << 8) | d[11];
         quint8 byteCount = d[12];
         if (data.size() < 13 + byteCount) return;
-        QMutexLocker locker(&mutex);
-        for (int i = 0; i < qty; ++i) {
-            int idx = 13 + i*2;
-            if (idx + 1 >= data.size()) break;
-            quint16 v = ( (unsigned char)d[idx] << 8) | (unsigned char)d[idx+1];
-            quint16 addr = start + i;
-            if (addr < (quint16)holding.size()) holding[addr] = v;
+        QVector<QPair<quint16, quint16>> writeOps;
+        writeOps.reserve(qty);
+        {
+            QMutexLocker locker(&mutex);
+            for (int i = 0; i < qty; ++i) {
+                int idx = 13 + i*2;
+                if (idx + 1 >= data.size()) break;
+                quint16 v = ( (unsigned char)d[idx] << 8) | (unsigned char)d[idx+1];
+                quint16 addr = start + i;
+                if (addr < (quint16)holding.size()) {
+                    holding[addr] = v;
+                    writeOps.append(qMakePair(addr, v));
+                }
+            }
+        }
+        for (const auto &op : writeOps) {
+            emit registerOperation(op.first, op.second, QString("write"));
         }
         QByteArray payload;
         payload.append(char(func));

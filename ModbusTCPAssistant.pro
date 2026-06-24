@@ -12,11 +12,16 @@ CONFIG += c++17
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
-    modbusslave.cpp
+    modbusslave.cpp \
+    lifeassistantwidget.cpp \
+    ruledialog.cpp
 
 HEADERS += \
     mainwindow.h \
-    modbusslave.h
+    modbusslave.h \
+    lifeassistantwidget.h \
+    capturewindow.h \
+    ruledialog.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

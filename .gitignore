@@ -31,3 +31,32 @@ build/
 
 # Automatically added by Assistant
 *.pro.user
+
+# Added from Qt template by Assistant
+*.LOG
+*.autosave
+*.log
+*.pro.user*
+*.qbs.user*
+*_qml.cpp
+.vscode/
+/third_party/*.tar.gz
+/third_party/libmodbus*/
+/third_party/libmodbus-3.1.11/
+/third_party/libmodbus-aarch64/
+/third_party/libmodbus-build/
+/third_party/libmodbus/
+180
+624
+archive/
+build.log
+build_error*.txt
+build_output.txt
+compile_commands.json
+docs/doxygen/html/
+docs/source_txt/
+moc_predefs.h
+patch.txt
+qmlcache_loader.cpp
+res_qmlcache.qrc
+system_check.log

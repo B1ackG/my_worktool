@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "lifeassistantwidget.h"
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QDateTime>
@@ -50,6 +51,215 @@
 #include <QSet>
 
 namespace {
+
+constexpr int kGitGoalLinesPerStar = 5000;
+constexpr int kGitGoalMaxAutoStars = 10;
+
+bool finishGitProcess(QProcess &process, int timeoutMs = -1)
+{
+    const bool finished = timeoutMs < 0
+                              ? process.waitForFinished(-1)
+                              : process.waitForFinished(timeoutMs);
+    if (!finished && process.state() != QProcess::NotRunning) {
+        process.kill();
+        process.waitForFinished(3000);
+    }
+    return finished;
+}
+
+int gitLinesToStarCount(int lines)
+{
+    if (lines <= 0) {
+        return 0;
+    }
+    return (lines + kGitGoalLinesPerStar - 1) / kGitGoalLinesPerStar;
+}
+
+double gitLinesToStarWeight(int lines)
+{
+    return static_cast<double>(lines) / static_cast<double>(kGitGoalLinesPerStar);
+}
+
+static const int kDefaultStringRegisterCount = 15;
+
+int parseStringRegisterCount(const QString &regFmt, int defaultCount = kDefaultStringRegisterCount)
+{
+    const QRegularExpression re(QStringLiteral(R"(STRING\s*\[\s*(\d+)\s*\])"),
+                                QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = re.match(regFmt.trimmed());
+    if (match.hasMatch()) {
+        const int count = match.captured(1).toInt();
+        return count > 0 ? count : defaultCount;
+    }
+    if (regFmt.trimmed().contains(QStringLiteral("STRING"), Qt::CaseInsensitive)
+        || regFmt.trimmed().contains(QStringLiteral("WSTRING"), Qt::CaseInsensitive)) {
+        return defaultCount;
+    }
+    return -1;
+}
+
+QString decodeUtf8FromRegisters(const QVector<quint16> &regs)
+{
+    QByteArray bytes;
+    bytes.reserve(regs.size() * 2);
+    for (quint16 w : regs) {
+        bytes.append(static_cast<char>((w >> 8) & 0xFF));
+        bytes.append(static_cast<char>(w & 0xFF));
+    }
+    while (!bytes.isEmpty() && bytes.back() == '\0') {
+        bytes.chop(1);
+    }
+    return QString::fromUtf8(bytes);
+}
+
+QVector<quint16> encodeUtf8ToRegisters(const QString &str, int regCount)
+{
+    QVector<quint16> regs;
+    if (regCount <= 0) {
+        return regs;
+    }
+
+    QByteArray bytes = str.toUtf8();
+    const int targetSize = regCount * 2;
+    if (bytes.size() < targetSize) {
+        bytes.append(QByteArray(targetSize - bytes.size(), '\0'));
+    } else if (bytes.size() > targetSize) {
+        bytes.truncate(targetSize);
+    }
+    regs.reserve(regCount);
+    for (int i = 0; i < regCount; ++i) {
+        const quint8 hi = (i * 2 < bytes.size()) ? static_cast<quint8>(bytes[i * 2]) : 0;
+        const quint8 lo = (i * 2 + 1 < bytes.size()) ? static_cast<quint8>(bytes[i * 2 + 1]) : 0;
+        regs << static_cast<quint16>((static_cast<quint16>(hi) << 8) | lo);
+    }
+    return regs;
+}
+
+int simFormatWordCount(const QString &fmt, int stringRegCount = kDefaultStringRegisterCount)
+{
+    if (fmt == QStringLiteral("String")) {
+        return qMax(1, stringRegCount);
+    }
+    if (fmt.startsWith(QStringLiteral("64-bit"))) {
+        return 4;
+    }
+    if (fmt.startsWith(QStringLiteral("32-bit"))) {
+        return 2;
+    }
+    return 1;
+}
+
+QStringList parseBitDescriptionsFromComment(const QString &comment)
+{
+    QStringList bits;
+    for (int i = 0; i < 16; ++i) {
+        bits.append(QString());
+    }
+
+    const QString text = comment.simplified();
+    if (text.isEmpty()) {
+        return bits;
+    }
+
+    // 标准导入格式：各位说明以 "0 名称 ... 1 名称 ..." 形式合并在同一描述中
+    const QRegularExpression re(
+        QStringLiteral("(?:^|\\s)(\\d{1,2})\\s+(.*?)(?=\\s\\d{1,2}\\s|$)"));
+    QRegularExpressionMatchIterator it = re.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        const int bit = m.captured(1).toInt();
+        const QString desc = m.captured(2).trimmed();
+        if (bit >= 0 && bit <= 15 && !desc.isEmpty()) {
+            bits[bit] = desc;
+        }
+    }
+
+    return bits;
+}
+
+quint16 swapBytes16(quint16 w)
+{
+    return static_cast<quint16>(((w & 0xFF) << 8) | ((w >> 8) & 0xFF));
+}
+
+QString float32WordOrderLabel(MainWindow::Float32WordOrder order)
+{
+    switch (order) {
+    case MainWindow::Float32WordOrder::CDAB: return QStringLiteral("CDAB");
+    case MainWindow::Float32WordOrder::ABCD: return QStringLiteral("ABCD");
+    case MainWindow::Float32WordOrder::BADC: return QStringLiteral("BADC");
+    case MainWindow::Float32WordOrder::DCBA: return QStringLiteral("DCBA");
+    }
+    return QStringLiteral("CDAB");
+}
+
+QString float64WordOrderLabel(MainWindow::Float64WordOrder order)
+{
+    switch (order) {
+    case MainWindow::Float64WordOrder::GHEF_CDAB: return QStringLiteral("GHEF CDAB");
+    case MainWindow::Float64WordOrder::ABCD_EFGH: return QStringLiteral("ABCD EFGH");
+    case MainWindow::Float64WordOrder::BADC_FEHG: return QStringLiteral("BADC FEHG");
+    case MainWindow::Float64WordOrder::DCBA_HGFE: return QStringLiteral("DCBA HGFE");
+    }
+    return QStringLiteral("GHEF CDAB");
+}
+
+MainWindow::Float32WordOrder float32WordOrderFromString(const QString &text)
+{
+    const QString key = text.trimmed().toUpper();
+    if (key == QStringLiteral("ABCD")) return MainWindow::Float32WordOrder::ABCD;
+    if (key == QStringLiteral("BADC")) return MainWindow::Float32WordOrder::BADC;
+    if (key == QStringLiteral("DCBA")) return MainWindow::Float32WordOrder::DCBA;
+    return MainWindow::Float32WordOrder::CDAB;
+}
+
+MainWindow::Float64WordOrder float64WordOrderFromString(const QString &text)
+{
+    const QString key = text.trimmed().toUpper().remove(QLatin1Char(' '));
+    if (key == QStringLiteral("ABCD_EFGH") || key == QStringLiteral("ABCDEFGH")) {
+        return MainWindow::Float64WordOrder::ABCD_EFGH;
+    }
+    if (key == QStringLiteral("BADC_FEHG") || key == QStringLiteral("BADCFEHG")) {
+        return MainWindow::Float64WordOrder::BADC_FEHG;
+    }
+    if (key == QStringLiteral("DCBA_HGFE") || key == QStringLiteral("DCBAHGFE")) {
+        return MainWindow::Float64WordOrder::DCBA_HGFE;
+    }
+    return MainWindow::Float64WordOrder::GHEF_CDAB;
+}
+
+QString mapRegisterFormatToSimFormat(const QString &regFmt)
+{
+    const QString fmtText = regFmt.trimmed().toUpper();
+    if (fmtText.isEmpty()) {
+        return QStringLiteral("Unsigned");
+    }
+    if (fmtText.contains(QStringLiteral("LREAL"))) {
+        return QStringLiteral("64-bit Float");
+    }
+    if (fmtText.contains(QStringLiteral("REAL"))) {
+        return QStringLiteral("32-bit Float");
+    }
+    if (fmtText.contains(QStringLiteral("DINT")) || fmtText.contains(QStringLiteral("INT32"))) {
+        return QStringLiteral("32-bit Signed");
+    }
+    if (fmtText.contains(QStringLiteral("UDINT")) || fmtText.contains(QStringLiteral("UINT32"))) {
+        return QStringLiteral("32-bit Unsigned");
+    }
+    if (fmtText.contains(QStringLiteral("STRING")) || fmtText.contains(QStringLiteral("WSTRING"))) {
+        return QStringLiteral("String");
+    }
+    if (fmtText.contains(QStringLiteral("BOOL"))) {
+        return QStringLiteral("Binary");
+    }
+    if (fmtText.contains(QStringLiteral("UINT")) || fmtText.contains(QStringLiteral("WORD"))) {
+        return QStringLiteral("Unsigned");
+    }
+    if (fmtText.contains(QStringLiteral("INT"))) {
+        return QStringLiteral("Signed");
+    }
+    return QStringLiteral("Unsigned");
+}
 
 QString gitIgnoreDefaultTemplate(const QString &type)
 {
@@ -240,6 +450,8 @@ MainWindow::MainWindow(QWidget *parent)
     , monitorFile(nullptr)
     , monitorStream(nullptr)
     , cpuThresholdValue(90.0)
+    , float32WordOrder(Float32WordOrder::CDAB)
+    , float64WordOrder(Float64WordOrder::GHEF_CDAB)
 {
     setWindowTitle("李晨阳的linux工作助手");
     resize(1200, 720);
@@ -250,6 +462,10 @@ MainWindow::MainWindow(QWidget *parent)
     serialPort = new QSerialPort(this);
     simMainDevice = new ModbusSlave(this);
     simAGVDevice = new ModbusSlave(this);
+    simWriteRefreshTimer = new QTimer(this);
+    simWriteRefreshTimer->setSingleShot(true);
+    simWriteRefreshTimer->setInterval(0);
+    connect(simWriteRefreshTimer, &QTimer::timeout, this, &MainWindow::flushPendingSimWriteRefresh);
     monitorTimer = new QTimer(this);
     tcpServer = new QTcpServer(this);
     tcpAssistantSocket = nullptr; // Initialize in connect/onNewConnection
@@ -264,6 +480,9 @@ MainWindow::MainWindow(QWidget *parent)
     // Load History
     loadConnectionHistory();
     loadGitHistory();
+    loadGitDiffReminderSettings();
+    QTimer::singleShot(0, this, &MainWindow::deferredGitRepoInit);
+    loadModbusFloatOrderSettings();
     loadRegisterTables();
     loadAutoScene(); // 自动加载上次保存的寄存器设置、格式和波形
     syncSimulatorTablesFromMaps();
@@ -347,6 +566,7 @@ void MainWindow::createWidgets()
     navWidget->addItem("Modbus 从站模拟器");
     navWidget->addItem("TCP 通讯助手");
     navWidget->addItem("性能监控器");
+    navWidget->addItem("生活办公助手");
     navWidget->setFixedWidth(160);
     navWidget->setStyleSheet("QListWidget::item { height: 50px; padding-left: 10px; font-size: 14px; } "
                              "QListWidget::item:selected { background-color: #3399ff; color: white; }");
@@ -426,7 +646,7 @@ void MainWindow::createWidgets()
 
     lblDisplayFormat = new QLabel("格式:");
     cmbDisplayFormat = new QComboBox();
-    cmbDisplayFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数");
+    cmbDisplayFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数" << "字符串");
 
     btnReadCoils = new QPushButton("读线圈(01)");
     btnReadInputs = new QPushButton("读输入(02)");
@@ -455,7 +675,7 @@ void MainWindow::createWidgets()
 
     lblWriteFormat = new QLabel("格式:");
     cmbWriteFormat = new QComboBox();
-    cmbWriteFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数");
+    cmbWriteFormat->addItems(QStringList() << "十进制" << "十六进制" << "二进制" << "32位浮点数" << "64位浮点数" << "字符串");
 
     btnWriteSingleCoil = new QPushButton("写单线圈(05)");
     btnWriteSingleRegister = new QPushButton("写单Reg(06)");
@@ -577,6 +797,7 @@ void MainWindow::createWidgets()
     tblGitGoals->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tblGitGoals->verticalHeader()->setVisible(false);
     tblGitGoals->setMinimumHeight(120);
+    tblGitGoals->setToolTip(QStringLiteral("双击行可将目标分支下拉框切换到该目标绑定的分支"));
 
     btnGitGoalAdd = new QPushButton("添加目标");
     btnGitGoalEdit = new QPushButton("编辑目标");
@@ -584,6 +805,10 @@ void MainWindow::createWidgets()
     btnGitGoalStart = new QPushButton("目标开始");
     btnGitGoalStart->setToolTip("记录开始日期并补齐上级未填写的开始日期；可翻译分支名并选择是否创建 Git 分支");
     btnGitGoalStart->setStyleSheet("background-color: #c8e6c9; font-weight: bold;");
+
+    lblGitCurrentBranch = new QLabel(QStringLiteral("(未知)"));
+    lblGitCurrentBranch->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    lblGitCurrentBranch->setMinimumWidth(120);
 
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
@@ -607,6 +832,9 @@ void MainWindow::createWidgets()
     btnGitPush = new QPushButton("git push (推送)");
     btnGitPull = new QPushButton("git pull (拉取)");
     btnGitMerge = new QPushButton("git merge (合并)");
+    btnGitRebase = new QPushButton("git rebase (变基)");
+    btnGitRebase->setToolTip("将当前分支的提交重新应用到所选分支之上（会改写当前分支历史）");
+    btnGitRebase->setStyleSheet("background-color: #fff8e1; font-weight: bold;");
     btnGitStatus = new QPushButton("git status (状态)");
     btnGitDiff = new QPushButton("git diff (差异)");
     btnGitDiff->setToolTip("显示工作区与暂存区的差异");
@@ -614,19 +842,19 @@ void MainWindow::createWidgets()
     btnGitStash = new QPushButton("git stash (临时存档)");
     btnGitStashPop = new QPushButton("git stash pop (恢复临存)");
     btnGitSetDiffRule = new QPushButton("设置Diff提醒标准");
-    btnGitAutoDiffReminder = new QPushButton("开启每小时Diff提醒");
+    btnGitAutoDiffReminder = new QPushButton("开启Diff提醒");
     btnGitAutoDiffReminder->setCheckable(true);
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
     spinGitDiffIntervalMinutes = new QSpinBox();
     spinGitDiffIntervalMinutes->setRange(1, 24 * 60);
-    spinGitDiffIntervalMinutes->setValue(60);
+    spinGitDiffIntervalMinutes->setValue(30);
     spinGitDiffIntervalMinutes->setSuffix(" 分钟");
     spinGitDiffFileThreshold = new QSpinBox();
     spinGitDiffFileThreshold->setRange(1, 5000);
     spinGitDiffFileThreshold->setValue(5);
     spinGitDiffLineThreshold = new QSpinBox();
     spinGitDiffLineThreshold->setRange(1, 200000);
-    spinGitDiffLineThreshold->setValue(100);
+    spinGitDiffLineThreshold->setValue(kGitGoalLinesPerStar);
     btnGitOpenIgnore = new QPushButton("管理 .gitignore");
     btnGitGetSshKey = new QPushButton("获取SSH公钥"); 
     btnGitGetSshKey->setToolTip("获取本机 SSH 公钥并复制到剪贴板，用于上传 GitHub");
@@ -912,9 +1140,6 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layRepo = new QHBoxLayout();
     layRepo->addWidget(new QLabel("路径:"));
     
-    // cmbGitDir is already initialized in createWidgets()
-    loadGitHistory(); // Load saved paths
-    
     layRepo->addWidget(cmbGitDir, 1);
     layRepo->addWidget(btnGitSelectDir);
     layRepo->addWidget(btnGitRemoveHistory);
@@ -940,8 +1165,14 @@ QWidget* MainWindow::createGitPage()
     QVBoxLayout *layOps = new QVBoxLayout();
     
     // Branch Selection
+    QHBoxLayout *layCurrentBranch = new QHBoxLayout();
+    layCurrentBranch->addWidget(new QLabel(QStringLiteral("当前分支:")));
+    layCurrentBranch->addWidget(lblGitCurrentBranch, 1);
+    layCurrentBranch->addStretch();
+    layOps->addLayout(layCurrentBranch);
+
     QHBoxLayout *layBranch = new QHBoxLayout();
-    layBranch->addWidget(new QLabel("当前/目标分支:"));
+    layBranch->addWidget(new QLabel(QStringLiteral("目标分支:")));
     layBranch->addWidget(cmbGitBranches, 1);
     layBranch->addWidget(btnGitRefreshBranches);
     layBranch->addWidget(btnGitCheckout);
@@ -969,6 +1200,7 @@ QWidget* MainWindow::createGitPage()
     layBtns->addWidget(btnGitPush, 1, 3);
     layBtns->addWidget(btnGitPull, 1, 4);
     layBtns->addWidget(btnGitMerge, 1, 5);
+    layBtns->addWidget(btnGitRebase, 1, 6);
 
     layBtns->addWidget(btnGitStash, 2, 0);
     layBtns->addWidget(btnGitStashPop, 2, 1);
@@ -1042,7 +1274,7 @@ QWidget* MainWindow::createGitPage()
     lblMemUsage = new QLabel("MEM: 0%");
     chartMem = new MonitorChart();
     gitDiffReminderTimer = new QTimer(this);
-    gitDiffReminderTimer->setInterval(60 * 60 * 1000);
+    gitDiffReminderTimer->setInterval(30 * 60 * 1000);
     
     layMon->addWidget(lblCpuUsage);
     layMon->addWidget(chartCpu);
@@ -1065,8 +1297,6 @@ QWidget* MainWindow::createGitPage()
     layout->setStretch(1, 0);
     layout->setStretch(2, 0);
     layout->setStretch(3, 1);
-    
-    refreshGitGoalsTable();
     return page;
 }
 
@@ -1136,7 +1366,7 @@ QWidget* MainWindow::createSimulatorPage()
     cmbWaveDevice = new QComboBox(); cmbWaveDevice->addItems(QStringList() << "主设备" << "AGV");
     glWave->addWidget(cmbWaveDevice, 0, 1);
     glWave->addWidget(new QLabel("地址:"), 0, 2);
-    spinWaveAddr = new QSpinBox(); spinWaveAddr->setRange(0, 9999);
+    spinWaveAddr = new QSpinBox(); spinWaveAddr->setRange(0, ModbusSlave::MaxHoldingRegisterAddress);
     glWave->addWidget(spinWaveAddr, 0, 3);
     glWave->addWidget(new QLabel("类型:"), 1, 0);
     cmbWaveType = new QComboBox(); cmbWaveType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机" << "来回增减");
@@ -1257,6 +1487,10 @@ void MainWindow::createMenus()
     actAutostart->setCheckable(true);
     connect(actAutostart, &QAction::toggled, this, &MainWindow::onAutostartToggled);
 
+    settingsMenu->addSeparator();
+    QAction *actFloatOrder = settingsMenu->addAction(QStringLiteral("Modbus 浮点字序…"));
+    connect(actFloatOrder, &QAction::triggered, this, &MainWindow::showModbusFloatOrderDialog);
+
     syncAutostartActionState();
 }
 
@@ -1364,6 +1598,7 @@ void MainWindow::createLayouts()
     simulatorPageWidget = createSimulatorPage();
     tcpAssistantPageWidget = createTcpAssistantPage();
     performancePageWidget = createPerformancePage();
+    lifeAssistantPageWidget = createLifeAssistantPage();
     
     stackedWidget->addWidget(modbusPageWidget);
     stackedWidget->addWidget(serialPageWidget);
@@ -1371,6 +1606,7 @@ void MainWindow::createLayouts()
     stackedWidget->addWidget(simulatorPageWidget);
     stackedWidget->addWidget(tcpAssistantPageWidget);
     stackedWidget->addWidget(performancePageWidget);
+    stackedWidget->addWidget(lifeAssistantPageWidget);
     
     mainLayout->addWidget(navWidget);
     mainLayout->addWidget(stackedWidget);
@@ -1437,6 +1673,11 @@ void MainWindow::createConnections()
             spinWriteQuantity->setValue(2);
         } else if (index == FormatDouble) {
             spinWriteQuantity->setValue(4);
+        } else if (index == FormatString) {
+            spinWriteQuantity->setValue(kDefaultStringRegisterCount);
+            txtWriteValues->setPlaceholderText(QStringLiteral("输入 UTF-8 文本，如：你好"));
+        } else {
+            txtWriteValues->setPlaceholderText(QStringLiteral("e.g. 100,200,300"));
         }
     });
     connect(btnClearLog, &QPushButton::clicked, this, &MainWindow::onClearLogClicked);
@@ -1458,6 +1699,7 @@ void MainWindow::createConnections()
     connect(btnGitGoalEdit, &QPushButton::clicked, this, &MainWindow::onGitGoalEditClicked);
     connect(btnGitGoalDelete, &QPushButton::clicked, this, &MainWindow::onGitGoalDeleteClicked);
     connect(btnGitGoalStart, &QPushButton::clicked, this, &MainWindow::onGitGoalStartClicked);
+    connect(tblGitGoals, &QTableWidget::cellDoubleClicked, this, &MainWindow::onGitGoalRowDoubleClicked);
     connect(btnGitRefreshBranches, &QPushButton::clicked, this, &MainWindow::onGitRefreshBranchesClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
     connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
@@ -1468,6 +1710,7 @@ void MainWindow::createConnections()
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
     connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
+    connect(btnGitRebase, &QPushButton::clicked, this, &MainWindow::onGitRebaseClicked);
     connect(btnGitStatus, &QPushButton::clicked, this, &MainWindow::onGitStatusClicked);
     connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
     connect(btnGitGetSshKey, &QPushButton::clicked, this, &MainWindow::onGitGetSshKeyClicked);
@@ -1491,6 +1734,13 @@ void MainWindow::createConnections()
         if (btnGitAutoDiffReminder->isChecked()) {
             txtGitLog->append(QString("[Diff提醒] 间隔已更新为 %1 分钟").arg(minutes));
         }
+        saveGitDiffReminderSettings();
+    });
+    connect(spinGitDiffFileThreshold, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        saveGitDiffReminderSettings();
+    });
+    connect(spinGitDiffLineThreshold, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        saveGitDiffReminderSettings();
     });
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
@@ -1687,19 +1937,15 @@ void MainWindow::onSimTimerTick()
             }
 
             if (fmt == "32-bit Float") {
-                target->setFloat(t.addr, (float)val);
+                writeFloat32ToSlave(target, t.addr, static_cast<float>(val));
             } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
                 uint32_t val32 = (fmt == "32-bit Signed") ? (uint32_t)(int32_t)val : (uint32_t)val;
                 target->setRegister(t.addr, (quint16)(val32 >> 16));
                 target->setRegister(t.addr + 1, (quint16)(val32 & 0xFFFF));
             } else if (fmt == "64-bit Float") {
-                double d = val;
-                quint64 raw = 0;
-                memcpy(&raw, &d, sizeof(double));
-                target->setRegister(t.addr,     (quint16)((raw >> 48) & 0xFFFF));
-                target->setRegister(t.addr + 1, (quint16)((raw >> 32) & 0xFFFF));
-                target->setRegister(t.addr + 2, (quint16)((raw >> 16) & 0xFFFF));
-                target->setRegister(t.addr + 3, (quint16)(raw & 0xFFFF));
+                writeFloat64ToSlave(target, t.addr, static_cast<double>(val));
+            } else if (fmt == "String") {
+                // String 格式不支持数值波形写入
             } else {
                 // 普通 16 位模式
                 quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
@@ -1713,6 +1959,9 @@ void MainWindow::onSimTimerTick()
                 int wordCount = 1;
                 if (fmt.startsWith("64-bit")) wordCount = 4;
                 else if (fmt.startsWith("32-bit")) wordCount = 2;
+                else if (fmt == "String") {
+                    wordCount = simTableStringLengths.value(table).value(foundRow, kDefaultStringRegisterCount);
+                }
                 for (int w = 1; w < wordCount; ++w) {
                     refreshSimRowDisplay(table, foundRow + w);
                 }
@@ -1721,11 +1970,12 @@ void MainWindow::onSimTimerTick()
                 for (int k = 0; k < table->rowCount(); ++k) {
                     if (k == foundRow) continue;
                     QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
-                    if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit")) continue;
+                    if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit") && fmtk != "String") continue;
                     QTableWidgetItem *aItem = table->item(k, 0);
                     if (!aItem) continue;
                     quint16 a = (quint16)aItem->text().toUInt();
-                    int wordsK = fmtk.startsWith("64-bit") ? 4 : 2;
+                    int wordsK = fmtk.startsWith("64-bit") ? 4 : (fmtk.startsWith("32-bit") ? 2
+                        : simTableStringLengths.value(table).value(k, kDefaultStringRegisterCount));
                     for (int w = 0; w < wordsK; ++w) {
                         if ((quint16)(a + w) == t.addr) {
                             refreshSimRowDisplay(table, k);
@@ -1976,24 +2226,28 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
         
         if (displayFormat == FormatFloat && byteCount >= 4) {
             for (int i = 0; i < byteCount / 4; ++i) {
-                quint16 cd, ab;
-                stream >> cd >> ab; // CDAB: [CD, AB]
-                quint32 raw = (quint32(ab) << 16) | cd;
-                float f;
-                memcpy(&f, &raw, 4);
+                quint16 w0, w1;
+                stream >> w0 >> w1;
+                const float f = decodeFloat32Words(w0, w1);
                 regs << QString::number(f, 'f', 4);
             }
-        } 
+        }
         else if (displayFormat == FormatDouble && byteCount >= 8) {
             for (int i = 0; i < byteCount / 8; ++i) {
-                quint16 gh, ef, cd, ab;
-                stream >> gh >> ef >> cd >> ab;
-                // GHEF CDAB: [GH, EF, CD, AB] -> 与主机 memcpy 的 uint64 小端字序一致
-                quint64 raw = quint64(ab) | (quint64(cd) << 16) | (quint64(ef) << 32) | (quint64(gh) << 48);
-                double d;
-                memcpy(&d, &raw, 8);
+                quint16 w0, w1, w2, w3;
+                stream >> w0 >> w1 >> w2 >> w3;
+                const double d = decodeFloat64Words(w0, w1, w2, w3);
                 regs << QString::number(d, 'g', 8);
             }
+        }
+        else if (displayFormat == FormatString && byteCount >= 2) {
+            QVector<quint16> stringRegs;
+            for (int i = 0; i < byteCount / 2; ++i) {
+                quint16 val;
+                stream >> val;
+                stringRegs << val;
+            }
+            resultStr = decodeUtf8FromRegisters(stringRegs);
         }
         else {
             for (int i=0; i<byteCount/2; ++i) {
@@ -2001,8 +2255,8 @@ void MainWindow::parseModbusResponse(const QByteArray &response)
                 stream >> val;
                 regs << formatValue(val);
             }
+            resultStr = regs.join(", ");
         }
-        resultStr = regs.join(", ");
     }
     else {
         resultStr = "写入成功";
@@ -2081,18 +2335,18 @@ void MainWindow::onWriteSingleRegisterClicked() {
         val = txt.toUShort(nullptr, 16);
     } else if (format == FormatBinary) {
         val = txt.toUShort(nullptr, 2);
+    } else if (format == FormatString) {
+        const QString stringText = txtWriteValues->text().trimmed();
+        const QVector<quint16> encoded = encodeUtf8ToRegisters(stringText, 1);
+        val = encoded.isEmpty() ? 0 : encoded.first();
     } else if (format == FormatFloat || format == FormatDouble) {
-        // 单寄存器写浮点仅取字序中的首字：32 位 CDAB 取 CD，64 位 GHEF CDAB 取 GH
         if (format == FormatFloat) {
-            float f = txt.toFloat();
-            quint32 raw;
-            memcpy(&raw, &f, sizeof(float));
-            val = (quint16)((raw >> 16) & 0xFFFF);
+            const QPair<quint16, quint16> words = encodeFloat32Words(txt.toFloat());
+            val = words.first;
         } else {
-            double d = txt.toDouble();
-            quint64 raw;
-            memcpy(&raw, &d, sizeof(double));
-            val = (quint16)((raw >> 48) & 0xFFFF);
+            quint16 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+            encodeFloat64Words(txt.toDouble(), w0, w1, w2, w3);
+            val = w0;
         }
     } else {
         val = (quint16)spinWriteValue->value();
@@ -2115,22 +2369,18 @@ void MainWindow::onWriteMultipleRegistersClicked() {
 
      if (format == FormatFloat) {
          for (const QString &s : items) {
-             float f = s.toFloat();
-             quint32 raw;
-             memcpy(&raw, &f, 4);
-             vals << (quint16)((raw >> 16) & 0xFFFF); // CDAB: CD
-             vals << (quint16)(raw & 0xFFFF);         // AB
+             const QPair<quint16, quint16> words = encodeFloat32Words(s.toFloat());
+             vals << words.first << words.second;
          }
      } else if (format == FormatDouble) {
          for (const QString &s : items) {
-             double d = s.toDouble();
-             quint64 raw;
-             memcpy(&raw, &d, 8);
-             vals << (quint16)((raw >> 48) & 0xFFFF); // GHEF CDAB: GH
-             vals << (quint16)((raw >> 32) & 0xFFFF); // EF
-             vals << (quint16)((raw >> 16) & 0xFFFF); // CD
-             vals << (quint16)(raw & 0xFFFF);         // AB
+             quint16 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+             encodeFloat64Words(s.toDouble(), w0, w1, w2, w3);
+             vals << w0 << w1 << w2 << w3;
          }
+     } else if (format == FormatString) {
+         const int regCount = spinWriteQuantity->value();
+         vals = encodeUtf8ToRegisters(txtWriteValues->text(), regCount);
      } else {
          for(auto s : items) {
              if (format == FormatHex) {
@@ -2182,6 +2432,10 @@ void MainWindow::onDisplayFormatChanged(int index) {
     } else if (displayFormat == FormatDouble) {
         spinReadQuantity->setValue(4);
         // spinReadQuantity->setEnabled(false);
+    } else if (displayFormat == FormatString) {
+        if (spinReadQuantity->value() < 2) {
+            spinReadQuantity->setValue(kDefaultStringRegisterCount);
+        }
     } else {
         // spinReadQuantity->setEnabled(true);
     }
@@ -2218,6 +2472,7 @@ QString MainWindow::formatValue(quint16 value, bool isBit) const {
     if (isBit) return value ? "1" : "0";
     if (displayFormat == FormatHex) return QString("0x%1").arg(value, 4, 16, QChar('0')).toUpper();
     if (displayFormat == FormatBinary) return QString("0b%1").arg(value, 16, 2, QChar('0'));
+    if (displayFormat == FormatString) return decodeUtf8FromRegisters(QVector<quint16>() << value);
     return QString::number(value);
 }
 
@@ -2294,8 +2549,8 @@ void MainWindow::onSimSetRegisterClicked()
 {
     bool ok;
     int addr = simAddrEdit->text().toInt(&ok);
-    if (!ok || addr < 0 || addr > 1000) {
-        QMessageBox::warning(this, "错误", "地址需在 0~1000 之间");
+    if (!ok || addr < 0 || addr > ModbusSlave::MaxHoldingRegisterAddress) {
+        QMessageBox::warning(this, "错误", QString("地址需在 0~%1 之间").arg(ModbusSlave::MaxHoldingRegisterAddress));
         return;
     }
     quint16 val = quint16(simValueEdit->text().toUShort());
@@ -2336,7 +2591,7 @@ void MainWindow::onSimWriteValuesClicked()
         uint addr = addrItem->text().trimmed().toUInt(&okAddr, 10);
         uint val = valItem->text().trimmed().toUInt(&okVal, 0);
 
-        if (!okAddr || addr > 1000 || !okVal || val > 65535) {
+        if (!okAddr || addr > ModbusSlave::MaxHoldingRegisterAddress || !okVal || val > 65535) {
             skipped++;
             continue;
         }
@@ -2365,7 +2620,7 @@ void MainWindow::onSimRandomValuesClicked()
 
         bool okAddr = false;
         uint addr = addrItem->text().trimmed().toUInt(&okAddr, 10);
-        if (!okAddr || addr > 1000) continue;
+        if (!okAddr || addr > ModbusSlave::MaxHoldingRegisterAddress) continue;
 
         if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
         quint16 randomValue = static_cast<quint16>(QRandomGenerator::global()->bounded(65536));
@@ -2391,7 +2646,7 @@ void MainWindow::onSimRandomAndWriteClicked()
 
         bool okAddr = false;
         uint addr = addrItem->text().trimmed().toUInt(&okAddr, 10);
-        if (!okAddr || addr > 1000) { skipped++; continue; }
+        if (!okAddr || addr > ModbusSlave::MaxHoldingRegisterAddress) { skipped++; continue; }
 
         quint16 randomValue = static_cast<quint16>(QRandomGenerator::global()->bounded(65536));
         if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
@@ -2645,7 +2900,10 @@ void MainWindow::onSimImportCsvClicked()
         // 尝试解析并设置寄存器值
         bool ok = false;
         if (fmt == "32-bit Float") {
-            slave->setFloat(addr, valStr.toFloat(&ok));
+            float fv = valStr.toFloat(&ok);
+            if (ok) {
+                writeFloat32ToSlave(slave, addr, fv);
+            }
         } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
             uint32_t v32 = valStr.toUInt(&ok);
             slave->setRegister(addr, (quint16)(v32 >> 16));
@@ -2653,13 +2911,15 @@ void MainWindow::onSimImportCsvClicked()
         } else if (fmt == "64-bit Float") {
             double d = valStr.toDouble(&ok);
             if (ok) {
-                quint64 raw = 0;
-                memcpy(&raw, &d, sizeof(double));
-                slave->setRegister(addr,     (quint16)((raw >> 48) & 0xFFFF));
-                slave->setRegister(addr + 1, (quint16)((raw >> 32) & 0xFFFF));
-                slave->setRegister(addr + 2, (quint16)((raw >> 16) & 0xFFFF));
-                slave->setRegister(addr + 3, (quint16)(raw & 0xFFFF));
+                writeFloat64ToSlave(slave, addr, d);
             }
+        } else if (fmt == "String") {
+            const int regCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+            const QVector<quint16> encoded = encodeUtf8ToRegisters(valStr, regCount);
+            for (int i = 0; i < encoded.size(); ++i) {
+                slave->setRegister(static_cast<quint16>(addr + i), encoded[i]);
+            }
+            ok = true;
         } else {
             slave->setRegister(addr, (quint16)valStr.toUInt(&ok));
         }
@@ -2720,13 +2980,14 @@ void MainWindow::onSimRunScriptClicked()
                 bool acted = false;
                 if (!deviceToken.isEmpty()) {
                     ModbusSlave *dev = (deviceToken == "agv") ? simAGVDevice : simMainDevice;
-                    if (isFloat) { float fv = valueToken.toFloat(); dev->setFloat(addr, fv); acted = true; }
+                    if (isFloat) { writeFloat32ToSlave(dev, addr, valueToken.toFloat()); acted = true; }
                     else { quint16 v = (quint16)QString(valueToken).toUShort(); dev->setRegister(addr, v); acted = true; }
                 } else {
                     // try main first, then agv
                     if (isFloat) {
                         float fv = valueToken.toFloat();
-                        if (simMainDevice->setFloat(addr, fv)) acted = true; else if (simAGVDevice->setFloat(addr, fv)) acted = true;
+                        if (writeFloat32ToSlave(simMainDevice, addr, fv)) acted = true;
+                        else if (writeFloat32ToSlave(simAGVDevice, addr, fv)) acted = true;
                     } else {
                         quint16 v = (quint16)QString(valueToken).toUShort();
                         if (simMainDevice->setRegister(addr, v)) acted = true; else if (simAGVDevice->setRegister(addr, v)) acted = true;
@@ -2776,6 +3037,48 @@ void MainWindow::onSimStopScriptClicked()
     txtSimLog->append("脚本调度已停止");
 }
 
+void MainWindow::refreshSimTableForAddr(QTableWidget *table, quint16 addr)
+{
+    if (!table) {
+        return;
+    }
+    for (int k = 0; k < table->rowCount(); ++k) {
+        const QString fmtk = simTableFormats.value(table).value(k, QStringLiteral("Unsigned"));
+        const int stringRegCount = simTableStringLengths.value(table).value(k, kDefaultStringRegisterCount);
+        const int wordCount = simFormatWordCount(fmtk, stringRegCount);
+        QTableWidgetItem *aItem = table->item(k, 0);
+        if (!aItem || aItem->text().isEmpty()) {
+            continue;
+        }
+        const quint16 baseAddr = static_cast<quint16>(aItem->text().toUInt());
+        if (wordCount > 1) {
+            for (int w = 0; w < wordCount; ++w) {
+                if (static_cast<quint16>(baseAddr + w) == addr) {
+                    refreshSimMultiWordRows(table, k);
+                    break;
+                }
+            }
+        } else if (baseAddr == addr) {
+            refreshSimRowDisplay(table, k);
+        }
+    }
+}
+
+void MainWindow::flushPendingSimWriteRefresh()
+{
+    const QHash<QTableWidget *, QSet<quint16>> pending = simPendingWriteAddrs;
+    simPendingWriteAddrs.clear();
+    for (auto it = pending.constBegin(); it != pending.constEnd(); ++it) {
+        QTableWidget *table = it.key();
+        if (!table) {
+            continue;
+        }
+        for (quint16 addr : it.value()) {
+            refreshSimTableForAddr(table, addr);
+        }
+    }
+}
+
 void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString &opType)
 {
     QJsonObject entry;
@@ -2805,28 +3108,13 @@ void MainWindow::onRegisterOperation(quint16 addr, quint16 value, const QString 
     registerHistory.append(entry);
     if (registerHistory.size() > 5000) registerHistory.removeFirst();
     
-    // 1. 同步到 UI 寄存器表整数列
+    // 1. 同步到 UI 寄存器表（写入操作延迟到同一事件循环末尾，避免 LREAL 多寄存器写入中间态）
     if (table) {
-        for (int r = 0; r < table->rowCount(); ++r) {
-            QTableWidgetItem *addrItem = table->item(r, 0);
-            if (addrItem && (quint16)addrItem->text().toUInt() == addr) {
-                refreshSimRowDisplay(table, r);
-                for (int k = 0; k < table->rowCount(); ++k) {
-                    QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
-                    if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit")) continue;
-                    QTableWidgetItem *aItem = table->item(k, 0);
-                    if (!aItem) continue;
-                    quint16 a = (quint16)aItem->text().toUInt();
-                    int words = fmtk.startsWith("64-bit") ? 4 : 2;
-                    for (int w = 0; w < words; ++w) {
-                        if ((quint16)(a + w) == addr) {
-                            refreshSimRowDisplay(table, k);
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
+        if (isWrite) {
+            simPendingWriteAddrs[table].insert(addr);
+            simWriteRefreshTimer->start();
+        } else {
+            refreshSimTableForAddr(table, addr);
         }
     }
 
@@ -3088,8 +3376,7 @@ bool MainWindow::runGitCommand(const QStringList &args) {
          return false;
     }
     
-    // Default wait 30s
-    if (!process.waitForFinished(30000)) {
+    if (!finishGitProcess(process, 30000)) {
          txtGitLog->append("<font color='red'>部分超时或后台运行...</font>");
          return false;
     }
@@ -3116,21 +3403,44 @@ bool MainWindow::runGitCommand(const QStringList &args) {
     return process.exitCode() == 0;
 }
 
-void MainWindow::onGitRefreshBranchesClicked() {
+bool MainWindow::gitHasUncommittedChanges(const QString &workDir) const {
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"), QStringList() << QStringLiteral("status") << QStringLiteral("--porcelain"));
+#else
+    process.start(QStringLiteral("git"), QStringList() << QStringLiteral("status") << QStringLiteral("--porcelain"));
+#endif
+
+    if (!finishGitProcess(process, 15000) || process.exitCode() != 0) {
+        const_cast<MainWindow *>(this)->txtGitLog->append(
+            QStringLiteral("<font color='orange'>[传输前检查] git status --porcelain 执行失败，跳过 git add / commit。</font>"));
+        return false;
+    }
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+#endif
+    return !output.isEmpty();
+}
+
+void MainWindow::onGitRefreshBranchesClicked(bool fetchRemote) {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
     
-    // 1. 先进行 fetch 获取最新远程分支信息
-    QProcess fetchProcess;
-    fetchProcess.setWorkingDirectory(workDir);
+    if (fetchRemote) {
+        QProcess fetchProcess;
+        fetchProcess.setWorkingDirectory(workDir);
 #ifdef Q_OS_WIN
-    fetchProcess.start("git.exe", QStringList() << "fetch" << "--prune");
+        fetchProcess.start("git.exe", QStringList() << "fetch" << "--prune");
 #else
-    fetchProcess.start("git", QStringList() << "fetch" << "--prune");
+        fetchProcess.start("git", QStringList() << "fetch" << "--prune");
 #endif
-    fetchProcess.waitForFinished();
+        finishGitProcess(fetchProcess, 60000);
+    }
 
-    // 2. 获取所有本地和远程分支 (git branch -a)
     QProcess process;
     process.setWorkingDirectory(workDir);
 #ifdef Q_OS_WIN
@@ -3138,7 +3448,7 @@ void MainWindow::onGitRefreshBranchesClicked() {
 #else
     process.start("git", QStringList() << "branch" << "-a");
 #endif
-    process.waitForFinished();
+    finishGitProcess(process, 30000);
     
 #ifdef Q_OS_WIN
     QString output = QString::fromUtf8(process.readAllStandardOutput());
@@ -3151,16 +3461,18 @@ void MainWindow::onGitRefreshBranchesClicked() {
     QStringList lines = output.split('\n', QString::SkipEmptyParts);
 #endif
     
+    const QString previousTarget = cmbGitBranches->currentText().trimmed();
+
     cmbGitBranches->blockSignals(true);
     cmbGitBranches->clear();
-    QString currentBranch;
-    
+    QString checkedOutBranch;
+
     for (QString line : lines) {
         line = line.trimmed();
         bool isCurrent = line.startsWith("* ");
         if (isCurrent) {
             line = line.mid(2).trimmed();
-            currentBranch = line;
+            checkedOutBranch = line;
         }
 
         bool isRemote = line.startsWith("remotes/");
@@ -3175,10 +3487,17 @@ void MainWindow::onGitRefreshBranchesClicked() {
             cmbGitBranches->setItemData(lastIndex, QBrush(Qt::black), Qt::ForegroundRole);
         }
     }
-    
-    if (!currentBranch.isEmpty())
-        cmbGitBranches->setCurrentText(currentBranch);
+
+    if (!previousTarget.isEmpty() && cmbGitBranches->findText(previousTarget) >= 0) {
+        cmbGitBranches->setCurrentText(previousTarget);
+    }
     cmbGitBranches->blockSignals(false);
+
+    if (lblGitCurrentBranch) {
+        lblGitCurrentBranch->setText(checkedOutBranch.isEmpty()
+                                         ? QStringLiteral("(未检出)")
+                                         : checkedOutBranch);
+    }
 
     txtGitLog->append("<font color='gray'>已刷新本地及远程分支（红色为远程分支）。</font>");
 
@@ -3189,6 +3508,7 @@ void MainWindow::onGitRefreshBranchesClicked() {
 
     syncGitMainBranchSetting(workDir);
     onGitRefreshLogClicked();
+    updateGitGoalBranchHighlights();
 }
 
 void MainWindow::onGitDiffClicked() {
@@ -3213,17 +3533,19 @@ void MainWindow::onGitSetDiffRuleClicked() {
     int lineThreshold = spinGitDiffLineThreshold->value();
 
     QStringList options;
-    options << "只要有改动就提醒"
+    options << QStringLiteral("只要有改动就提醒")
             << QString("改动文件数 >= %1 时提醒").arg(fileThreshold)
-            << QString("新增+删除总行数 >= %1 时提醒").arg(lineThreshold)
-            << "涉及配置文件改动时提醒"
-            << "涉及源码文件改动时提醒";
+            << QString("新增+删除总行数 >= %1 时提醒（%2 星）")
+                   .arg(lineThreshold)
+                   .arg(gitLinesToStarCount(lineThreshold))
+            << QStringLiteral("涉及配置文件改动时提醒")
+            << QStringLiteral("涉及源码文件改动时提醒");
 
-    int defaultIndex = (gitDiffReminderRule >= 0 && gitDiffReminderRule < options.size()) ? gitDiffReminderRule : 0;
+    int defaultIndex = (gitDiffReminderRule >= 0 && gitDiffReminderRule < options.size()) ? gitDiffReminderRule : 2;
     bool ok = false;
     QString selected = QInputDialog::getItem(this,
-                                             "Diff 提醒标准",
-                                             "请选择每小时检查 git diff 的判断标准:",
+                                             QStringLiteral("Diff 提醒标准"),
+                                             QStringLiteral("请选择定时检查 git diff 的判断标准:"),
                                              options,
                                              defaultIndex,
                                              false,
@@ -3231,31 +3553,28 @@ void MainWindow::onGitSetDiffRuleClicked() {
     if (!ok) return;
 
     gitDiffReminderRule = options.indexOf(selected);
+    saveGitDiffReminderSettings();
     txtGitLog->append(QString("[Diff提醒] 已设置标准: %1").arg(selected));
 }
 
 void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
+    gitDiffReminderEnabled = checked;
+    saveGitDiffReminderSettings();
+
     if (checked) {
-        if (gitDiffReminderRule < 0) {
-            onGitSetDiffRuleClicked();
+        if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
+            gitDiffReminderRule = 2;
         }
 
-        if (gitDiffReminderRule < 0) {
-            btnGitAutoDiffReminder->blockSignals(true);
-            btnGitAutoDiffReminder->setChecked(false);
-            btnGitAutoDiffReminder->blockSignals(false);
-            return;
-        }
-
-        btnGitAutoDiffReminder->setText("关闭每小时Diff提醒");
-    gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
+        btnGitAutoDiffReminder->setText(QStringLiteral("关闭Diff提醒"));
+        gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
         gitDiffReminderTimer->start();
-    txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
-                  .arg(spinGitDiffIntervalMinutes->value()));
+        txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
+                              .arg(spinGitDiffIntervalMinutes->value()));
         onGitAutoDiffReminderTick();
     } else {
         gitDiffReminderTimer->stop();
-        btnGitAutoDiffReminder->setText("开启每小时Diff提醒");
+        btnGitAutoDiffReminder->setText(QStringLiteral("开启Diff提醒"));
         txtGitLog->append("[Diff提醒] 已关闭。");
     }
 }
@@ -3263,14 +3582,7 @@ void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
 void MainWindow::onGitAutoDiffReminderTick() {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty() || !QDir(workDir).exists()) {
-        txtGitLog->append("[Diff提醒] 失败: Git 仓库目录无效，已停止提醒。");
-        gitDiffReminderTimer->stop();
-        if (btnGitAutoDiffReminder->isChecked()) {
-            btnGitAutoDiffReminder->blockSignals(true);
-            btnGitAutoDiffReminder->setChecked(false);
-            btnGitAutoDiffReminder->setText("开启每小时Diff提醒");
-            btnGitAutoDiffReminder->blockSignals(false);
-        }
+        txtGitLog->append("[Diff提醒] Git 仓库目录无效，跳过本次检查。");
         return;
     }
 
@@ -3282,7 +3594,7 @@ void MainWindow::onGitAutoDiffReminderTick() {
     process.start("git", QStringList() << "diff" << "--numstat");
 #endif
 
-    if (!process.waitForFinished(15000)) {
+    if (!finishGitProcess(process, 15000)) {
         txtGitLog->append("[Diff提醒] git diff --numstat 执行超时。");
         return;
     }
@@ -3364,7 +3676,9 @@ void MainWindow::onGitAutoDiffReminderTick() {
         break;
     case 2:
         shouldRemind = totalLines >= lineThreshold;
-        ruleDesc = QString("新增+删除总行数 >= %1").arg(lineThreshold);
+        ruleDesc = QString("新增+删除总行数 >= %1（%2 星）")
+                       .arg(lineThreshold)
+                       .arg(gitLinesToStarCount(lineThreshold));
         break;
     case 3:
         shouldRemind = configTouched > 0;
@@ -3581,18 +3895,14 @@ void MainWindow::onGitWorktreeListClicked() {
 }
 
 void MainWindow::onGitWorktreeAddClicked() {
-    QString currentBranch = cmbGitBranches->currentText().trimmed();
-    if (currentBranch.startsWith("+ ")) {
-        currentBranch = currentBranch.mid(2).trimmed();
-    }
-
-    if (currentBranch.isEmpty()) {
-        txtGitLog->append("<font color='red'>错误: 请先选择或输入一个分支来创建该分支的 Worktree!</font>");
-        return;
-    }
-
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
+
+    QString currentBranch = gitCheckedOutBranch(workDir);
+    if (currentBranch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，请先切换到一个有效分支。</font>");
+        return;
+    }
 
     // 1. 检查该分支是否已被其他 Worktree 占用
     QProcess checkProc;
@@ -3782,20 +4092,31 @@ void MainWindow::onGitCommitClicked() {
 }
 
 void MainWindow::onGitPushClicked() {
-    // Push current branch to selected remote
-    QString branch = cmbGitBranches->currentText();
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
+
+    QString branch = gitCheckedOutBranch(workDir);
     QString remote = cmbGitRemote->currentText();
-    if (branch.isEmpty()) branch = "master"; 
+    if (branch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，无法推送。</font>");
+        return;
+    }
     if (remote.isEmpty()) remote = "origin";
-    
+
     // Use -u to set upstream as requested
     runGitCommand(QStringList() << "push" << "-u" << remote << branch);
 }
 
 void MainWindow::onGitPullClicked() {
-    QString branch = cmbGitBranches->currentText();
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
+
+    QString branch = gitCheckedOutBranch(workDir);
     QString remote = cmbGitRemote->currentText();
-    if (branch.isEmpty()) branch = "master";
+    if (branch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，无法拉取。</font>");
+        return;
+    }
     if (remote.isEmpty()) remote = "origin";
     runGitCommand(QStringList() << "pull" << remote << branch);
 }
@@ -3811,23 +4132,19 @@ void MainWindow::onGitMergeClicked() {
     }
     
     if (branchToMerge.isEmpty()) {
-        txtGitLog->append("<font color='red'>错误: 请先在下拉框选择要合并进来的目标分支!</font>");
+        txtGitLog->append("<font color='red'>错误: 请先在目标分支中选择要合并进来的分支!</font>");
         return;
     }
 
-    // Detect current branch (where we are)
-    QProcess process;
-    process.setWorkingDirectory(workDir);
-#ifdef Q_OS_WIN
-    process.start("git.exe", QStringList() << "rev-parse" << "--abbrev-ref" << "HEAD");
-#else
-    process.start("git", QStringList() << "rev-parse" << "--abbrev-ref" << "HEAD");
-#endif
-    process.waitForFinished();
-    QString currentBranch = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    QString currentBranch = gitCheckedOutBranch(workDir);
     
+    if (currentBranch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，无法合并。</font>");
+        return;
+    }
+
     if (branchToMerge == currentBranch) {
-        QMessageBox::warning(this, "合并提示", "当前已经在分支 [" + currentBranch + "] 上，无需合并自身。请在下拉框选择其他分支。");
+        QMessageBox::warning(this, "合并提示", "当前已经在分支 [" + currentBranch + "] 上，无需合并自身。请在目标分支中选择其他分支。");
         return;
     }
 
@@ -3838,6 +4155,47 @@ void MainWindow::onGitMergeClicked() {
     
     if (reply == QMessageBox::Yes) {
         runGitCommand(QStringList() << "merge" << branchToMerge);
+    }
+}
+
+void MainWindow::onGitRebaseClicked() {
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
+
+    QString upstreamBranch = cmbGitBranches->currentText().trimmed();
+    if (upstreamBranch.startsWith("+ ")) {
+        upstreamBranch = upstreamBranch.mid(2).trimmed();
+    }
+
+    if (upstreamBranch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 请先在目标分支中选择要变基到的基准分支!</font>");
+        return;
+    }
+
+    QString currentBranch = gitCheckedOutBranch(workDir);
+
+    if (currentBranch.isEmpty()) {
+        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，无法变基。</font>");
+        return;
+    }
+
+    if (upstreamBranch == currentBranch) {
+        QMessageBox::warning(this, "变基提示",
+                             "当前已经在分支 [" + currentBranch + "] 上，无法变基到自身。请在目标分支中选择其他分支作为基准。");
+        return;
+    }
+
+    const QString confirmMsg = QString(
+        "确定要将当前分支 [%1] 变基到 [%2] 之上吗？\n\n"
+        "变基会把 [%1] 上独有的提交逐个重放到 [%2] 的最新提交之后，并改写 [%1] 的历史。\n"
+        "若 [%1] 已推送到远程，变基后通常需要 force push。")
+        .arg(currentBranch, upstreamBranch);
+
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, "确认变基", confirmMsg, QMessageBox::Yes | QMessageBox::No);
+
+    if (reply == QMessageBox::Yes) {
+        runGitCommand(QStringList() << "rebase" << upstreamBranch);
     }
 }
 
@@ -4026,7 +4384,7 @@ void MainWindow::onGitRefreshLogClicked() {
 #else
     process.start(QStringLiteral("git"), args);
 #endif
-    process.waitForFinished();
+    finishGitProcess(process, 30000);
     
 #ifdef Q_OS_WIN
     QString output = QString::fromUtf8(process.readAllStandardOutput());
@@ -4160,15 +4518,15 @@ void MainWindow::onGitCopyForDailyReportClicked() {
         return;
     }
 
-    QString finalContent;
+    QString commitsPart;
     for (int i = 0; i < todayCommits.size(); ++i) {
-        finalContent += QString("%1. %2\n").arg(i + 1).arg(todayCommits[i]);
+        commitsPart += QString("%1. %2\n").arg(i + 1).arg(todayCommits[i]);
     }
-    finalContent = finalContent.trimmed();
+    commitsPart = commitsPart.trimmed();
 
     QList<GitWorkGoal> goals = loadGitGoals(workDir);
     if (QDir(workDir).exists()) {
-        syncGoalDifficultyFromCommits(workDir, goals);
+        syncGoalDifficultyFromDiffLines(workDir, goals);
     }
     QList<const GitWorkGoal *> rootGoals;
     for (const GitWorkGoal &g : goals) {
@@ -4177,6 +4535,7 @@ void MainWindow::onGitCopyForDailyReportClicked() {
         }
     }
 
+    QString finalContent = commitsPart;
     if (rootGoals.size() > 1) {
         QStringList titles;
         for (const GitWorkGoal *g : rootGoals) {
@@ -4189,8 +4548,10 @@ void MainWindow::onGitCopyForDailyReportClicked() {
         txtGitLog->append(QStringLiteral("<font color='orange'>[日报] %1</font>").arg(warnMsg));
         QMessageBox::warning(this, QStringLiteral("复制到日报"), warnMsg);
     } else if (rootGoals.size() == 1) {
-        const GitRootProgressInfo progress = calcRootGoalProgress(workDir, *rootGoals.first(), goals);
-        finalContent += QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
+        const GitWorkGoal *root = rootGoals.first();
+        const GitRootProgressInfo progress = calcRootGoalProgress(workDir, *root, goals);
+        finalContent = root->title + QLatin1Char('\n') + commitsPart
+                       + QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
     }
 
     QGuiApplication::clipboard()->setText(finalContent);
@@ -4213,45 +4574,49 @@ void MainWindow::onScpTransferClicked() {
 
     QString password = txtScpPassword->text();
 
-    // 每次“搜索并传输”前自动执行 add + commit，确保代码状态可追溯。
-    runGitCommand(QStringList() << "add" << ".");
+    // 有未提交改动时才执行 add + commit，确保代码状态可追溯。
+    if (gitHasUncommittedChanges(dir)) {
+        runGitCommand(QStringList() << "add" << ".");
 
-    if (spinGitDiffIntervalMinutes && spinGitDiffIntervalMinutes->value() < 10) {
-        if (QMessageBox::question(this,
-                                  "传输前检查",
-                                  "当前间隔设置小于10分钟，是否先执行一次软回退 (git reset --soft HEAD^)？",
-                                  QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
-            runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
-            onGitRefreshLogClicked();
+        if (spinGitDiffIntervalMinutes && spinGitDiffIntervalMinutes->value() < 10) {
+            if (QMessageBox::question(this,
+                                      "传输前检查",
+                                      "当前间隔设置小于10分钟，是否先执行一次软回退 (git reset --soft HEAD^)？",
+                                      QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
+                onGitRefreshLogClicked();
+            }
         }
+
+        bool ok = false;
+        QString defaultMsg = txtGitCommitMsg->text().trimmed();
+        QString commitMsg = QInputDialog::getText(
+            this,
+            "Git 提交信息",
+            "请输入本次传输前的提交信息:",
+            QLineEdit::Normal,
+            defaultMsg,
+            &ok
+        ).trimmed();
+
+        if (!ok || commitMsg.isEmpty()) {
+            txtGitLog->append("已取消传输：未提供提交信息，未执行 git commit。");
+            return;
+        }
+
+        if (QMessageBox::question(this,
+                                  "确认提交",
+                                  QString("确认执行 git commit -m \"%1\" 并继续传输吗？").arg(commitMsg),
+                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+            txtGitLog->append("已取消传输：用户取消 git commit。");
+            return;
+        }
+
+        txtGitCommitMsg->setText(commitMsg);
+        runGitCommand(QStringList() << "commit" << "-m" << commitMsg);
+    } else {
+        txtGitLog->append("工作区无未提交改动，跳过 git add / commit，继续搜索可执行文件...");
     }
-
-    bool ok = false;
-    QString defaultMsg = txtGitCommitMsg->text().trimmed();
-    QString commitMsg = QInputDialog::getText(
-        this,
-        "Git 提交信息",
-        "请输入本次传输前的提交信息:",
-        QLineEdit::Normal,
-        defaultMsg,
-        &ok
-    ).trimmed();
-
-    if (!ok || commitMsg.isEmpty()) {
-        txtGitLog->append("已取消传输：未提供提交信息，未执行 git commit。");
-        return;
-    }
-
-    if (QMessageBox::question(this,
-                              "确认提交",
-                              QString("确认执行 git commit -m \"%1\" 并继续传输吗？").arg(commitMsg),
-                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
-        txtGitLog->append("已取消传输：用户取消 git commit。");
-        return;
-    }
-
-    txtGitCommitMsg->setText(commitMsg);
-    runGitCommand(QStringList() << "commit" << "-m" << commitMsg);
 
     // 递归查找目录下最深层、最新的可执行文件
     QString latestFile;
@@ -4804,7 +5169,8 @@ void MainWindow::runCrashDiagnostics() {
     }
 }
 
-void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QString &selectPath) {
+void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QString &selectPath,
+                                        bool activateRepo) {
     cmbGitDir->blockSignals(true);
     cmbGitDir->clear();
     cmbGitDir->addItems(history);
@@ -4814,6 +5180,9 @@ void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QStrin
         cmbGitDir->setCurrentIndex(0);
     }
     cmbGitDir->blockSignals(false);
+    if (!activateRepo) {
+        return;
+    }
     const QString path = selectPath.isEmpty() && !history.isEmpty() ? history.first() : selectPath;
     activateGitRepo(path.isEmpty() ? cmbGitDir->currentText().trimmed() : path);
     refreshGitGoalsTable();
@@ -4841,7 +5210,97 @@ void MainWindow::saveGitHistory(const QString &dir) {
 void MainWindow::loadGitHistory() {
     QSettings settings("LiChenYang", "LinuxHelper");
     QStringList history = settings.value("GitHistory").toStringList();
-    applyGitHistoryToCombo(history);
+    applyGitHistoryToCombo(history, QString(), false);
+}
+
+void MainWindow::loadGitDiffReminderSettings() {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("gitDiffReminder"));
+
+    gitDiffReminderEnabled = settings.value(QStringLiteral("enabled"), true).toBool();
+    gitDiffReminderRule = settings.value(QStringLiteral("rule"), 2).toInt();
+
+    if (spinGitDiffIntervalMinutes) {
+        spinGitDiffIntervalMinutes->setValue(
+            settings.value(QStringLiteral("intervalMinutes"), 30).toInt());
+    }
+    if (spinGitDiffFileThreshold) {
+        spinGitDiffFileThreshold->setValue(
+            settings.value(QStringLiteral("fileThreshold"), 5).toInt());
+    }
+    if (spinGitDiffLineThreshold) {
+        spinGitDiffLineThreshold->setValue(
+            settings.value(QStringLiteral("lineThreshold"), kGitGoalLinesPerStar).toInt());
+    }
+
+    settings.endGroup();
+
+    if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
+        gitDiffReminderRule = 2;
+    }
+    if (gitDiffReminderTimer && spinGitDiffIntervalMinutes) {
+        gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
+    }
+}
+
+void MainWindow::saveGitDiffReminderSettings() {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("gitDiffReminder"));
+    settings.setValue(QStringLiteral("enabled"), gitDiffReminderEnabled);
+    settings.setValue(QStringLiteral("rule"), gitDiffReminderRule);
+    if (spinGitDiffIntervalMinutes) {
+        settings.setValue(QStringLiteral("intervalMinutes"), spinGitDiffIntervalMinutes->value());
+    }
+    if (spinGitDiffFileThreshold) {
+        settings.setValue(QStringLiteral("fileThreshold"), spinGitDiffFileThreshold->value());
+    }
+    if (spinGitDiffLineThreshold) {
+        settings.setValue(QStringLiteral("lineThreshold"), spinGitDiffLineThreshold->value());
+    }
+    settings.endGroup();
+}
+
+void MainWindow::applyGitDiffReminderEnabled(bool enabled) {
+    gitDiffReminderEnabled = enabled;
+
+    if (btnGitAutoDiffReminder) {
+        btnGitAutoDiffReminder->blockSignals(true);
+        btnGitAutoDiffReminder->setChecked(enabled);
+        btnGitAutoDiffReminder->setText(enabled ? QStringLiteral("关闭Diff提醒")
+                                                : QStringLiteral("开启Diff提醒"));
+        btnGitAutoDiffReminder->blockSignals(false);
+    }
+
+    if (!gitDiffReminderTimer) {
+        return;
+    }
+
+    if (enabled) {
+        if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
+            gitDiffReminderRule = 2;
+        }
+        const int minutes = spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 30;
+        gitDiffReminderTimer->setInterval(qMax(1, minutes) * 60 * 1000);
+        gitDiffReminderTimer->start();
+    } else {
+        gitDiffReminderTimer->stop();
+    }
+}
+
+void MainWindow::deferredGitRepoInit() {
+    const QString repoDir = cmbGitDir->currentText().trimmed();
+    if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
+        activateGitRepo(repoDir, false);
+        refreshGitGoalsTable();
+    }
+
+    if (gitDiffReminderEnabled) {
+        applyGitDiffReminderEnabled(true);
+        saveGitDiffReminderSettings();
+        txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
+                              .arg(spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 30));
+        onGitAutoDiffReminderTick();
+    }
 }
 
 void MainWindow::removeGitHistoryPath(const QString &dir) {
@@ -4883,14 +5342,17 @@ void MainWindow::onGitRemoveHistoryClicked() {
 void MainWindow::onGitDirChanged() {
     activateGitRepo(cmbGitDir->currentText().trimmed());
     refreshGitGoalsTable();
+    if (gitDiffReminderEnabled && gitDiffReminderTimer && !gitDiffReminderTimer->isActive()) {
+        gitDiffReminderTimer->start();
+    }
 }
 
-void MainWindow::activateGitRepo(const QString &repoDir) {
+void MainWindow::activateGitRepo(const QString &repoDir, bool fetchRemote) {
     if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
         return;
     }
 
-    onGitRefreshBranchesClicked();
+    onGitRefreshBranchesClicked(fetchRemote);
 
     QList<GitWorkGoal> goals = loadGitGoals(repoDir);
     syncChildGoalEndDatesFromParents(goals);
@@ -4904,6 +5366,7 @@ void MainWindow::onGitBranchSelectionChanged() {
         return;
     }
     onGitRefreshLogClicked();
+    updateGitGoalBranchHighlights();
 }
 
 QString MainWindow::gitGoalsRepoKey(const QString &repoDir) const {
@@ -4935,7 +5398,7 @@ QList<GitWorkGoal> MainWindow::loadGitGoals(const QString &repoDir) const {
         g.difficulty = settings.value("difficulty", 0).toInt();
         if (!g.parentId.isEmpty()) {
             if (g.difficulty < 1) {
-                g.difficulty = 3; // 默认 3 星（预计 3 次提交）
+                g.difficulty = 3; // 默认 3 星（约 15000 行变更）
             } else if (g.difficulty > 5) {
                 // 旧版半格存储 → 整星（四舍五入）
                 g.difficulty = qMax(1, static_cast<int>(std::lround(g.difficulty * 0.5)));
@@ -5010,22 +5473,25 @@ QDate MainWindow::gitGoalEffectiveStartDate(const GitWorkGoal &goal,
     return QDate();
 }
 
-int MainWindow::gitBranchCommitCountSince(const QString &repoDir, const QString &branchRef,
-                                          const QDate &sinceDate) const {
-    if (repoDir.isEmpty() || branchRef.isEmpty() || !sinceDate.isValid()) {
+int MainWindow::gitBranchDiffLineCountVsMain(const QString &repoDir, const QString &branchRef,
+                                             const QString &mainBranch) const {
+    if (repoDir.isEmpty() || branchRef.isEmpty() || mainBranch.isEmpty()) {
         return 0;
     }
 
     const QString branch = normalizeLocalBranchRef(branchRef);
-    if (branch.isEmpty() || !gitBranchExists(repoDir, branch)) {
+    const QString main = normalizeLocalBranchRef(mainBranch);
+    if (branch.isEmpty() || main.isEmpty() || branch == main) {
+        return 0;
+    }
+    if (!gitBranchExists(repoDir, branch) || !gitBranchExists(repoDir, main)) {
         return 0;
     }
 
     QStringList args;
-    args << QStringLiteral("rev-list")
-         << QStringLiteral("--count")
-         << branch
-         << QStringLiteral("--since=%1").arg(sinceDate.toString(QStringLiteral("yyyy-MM-dd")));
+    args << QStringLiteral("diff")
+         << QStringLiteral("--numstat")
+         << QStringLiteral("%1...%2").arg(main, branch);
 
     QProcess process;
     process.setWorkingDirectory(repoDir);
@@ -5034,34 +5500,60 @@ int MainWindow::gitBranchCommitCountSince(const QString &repoDir, const QString 
 #else
     process.start(QStringLiteral("git"), args);
 #endif
-    process.waitForFinished(10000);
-    if (process.exitCode() != 0) {
+    if (!finishGitProcess(process, 10000) || process.exitCode() != 0) {
         return 0;
     }
 
 #ifdef Q_OS_WIN
-    const QString output = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
 #else
-    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
 #endif
-    bool ok = false;
-    const int count = output.toInt(&ok);
-    return ok ? count : 0;
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+
+    int total = 0;
+    for (const QString &line : lines) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        const QStringList parts = line.split(QLatin1Char('\t'), Qt::KeepEmptyParts);
+#else
+        const QStringList parts = line.split(QLatin1Char('\t'), QString::KeepEmptyParts);
+#endif
+        if (parts.size() < 2) {
+            continue;
+        }
+        if (parts[0] == QStringLiteral("-")) {
+            continue;
+        }
+        bool okIns = false;
+        bool okDel = false;
+        const int ins = parts[0].toInt(&okIns);
+        const int del = parts[1].toInt(&okDel);
+        if (okIns) {
+            total += ins;
+        }
+        if (okDel) {
+            total += del;
+        }
+    }
+    return total;
 }
 
-int MainWindow::gitGoalActualCommits(const QString &repoDir, const GitWorkGoal &goal,
-                                     const QList<GitWorkGoal> &goals) const {
+int MainWindow::gitGoalActualDiffLines(const QString &repoDir, const GitWorkGoal &goal) const {
     if (goal.branchName.isEmpty()) {
         return 0;
     }
-    const QDate since = gitGoalEffectiveStartDate(goal, goals);
-    if (!since.isValid()) {
+    const QString mainBranch = resolveGitMainBranch(repoDir);
+    if (mainBranch.isEmpty()) {
         return 0;
     }
-    return gitBranchCommitCountSince(repoDir, goal.branchName, since);
+    return gitBranchDiffLineCountVsMain(repoDir, goal.branchName, mainBranch);
 }
 
-bool MainWindow::syncGoalDifficultyFromCommits(const QString &repoDir, QList<GitWorkGoal> &goals) {
+bool MainWindow::syncGoalDifficultyFromDiffLines(const QString &repoDir, QList<GitWorkGoal> &goals) {
     if (repoDir.isEmpty()) {
         return false;
     }
@@ -5071,11 +5563,15 @@ bool MainWindow::syncGoalDifficultyFromCommits(const QString &repoDir, QList<Git
         if (g.parentId.isEmpty() || gitGoalHasChildren(g.id, goals)) {
             continue;
         }
-        const int presetCommits = qMax(1, g.difficulty);
-        const int actual = gitGoalActualCommits(repoDir, g, goals);
-        if (actual > presetCommits) {
-            g.difficulty = actual;
-            changed = true;
+        const int presetStars = qMax(1, g.difficulty);
+        const int actualLines = gitGoalActualDiffLines(repoDir, g);
+        const int actualStars = gitLinesToStarCount(actualLines);
+        if (actualStars > presetStars) {
+            const int raised = qMin(actualStars, kGitGoalMaxAutoStars);
+            if (raised > presetStars) {
+                g.difficulty = raised;
+                changed = true;
+            }
         }
     }
     return changed;
@@ -5231,14 +5727,15 @@ GitRootProgressInfo MainWindow::calcRootGoalProgress(const QString &repoDir, con
                 continue;
             }
 
-            const int presetCommits = qMax(1, sub->difficulty);
-            const int actual = repoDir.isEmpty() ? 0 : gitGoalActualCommits(repoDir, *sub, goals);
-            const int effectiveExpected = qMax(presetCommits, actual);
+            const double presetStars = static_cast<double>(qMax(1, sub->difficulty));
+            const int actualLines = repoDir.isEmpty() ? 0 : gitGoalActualDiffLines(repoDir, *sub);
+            const double actualStars = gitLinesToStarWeight(actualLines);
+            const double effectiveExpected = qMax(presetStars, actualStars);
             const bool completed = isGitSubGoalCompleted(*sub);
 
-            const double denom = completed ? qMax(actual, 1) : effectiveExpected;
+            const double denom = completed ? qMax(actualStars, 1.0) : effectiveExpected;
             info.totalWeight += denom;
-            info.completedWeight += static_cast<double>(actual);
+            info.completedWeight += actualStars;
             if (completed) {
                 info.completedCount++;
             }
@@ -5431,13 +5928,14 @@ void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal
                           .arg(QString::number(progress.totalPercent, 'f', 1))
                           .arg(QString::number(progress.timePercent, 'f', 1));
         if (progress.hasSubGoals) {
-            tip += QStringLiteral("\n子任务进度 %1%（%2/%3 已完成，提交加权 %4/%5）")
+            tip += QStringLiteral("\n子任务进度 %1%（%2/%3 已完成，行数加权 %4/%5）")
                        .arg(QString::number(progress.taskPercent, 'f', 1))
                        .arg(progress.completedCount)
                        .arg(progress.descendantCount)
                        .arg(QString::number(progress.completedWeight, 'f', 1))
                        .arg(QString::number(progress.totalWeight, 'f', 1));
-            tip += QStringLiteral("\n未完成最下级子任务按分支提交数计分；已完成按实际提交数计权");
+            tip += QStringLiteral("\n未完成最下级子任务按相对主分支的 +/− 行数计分（%1 行 = 1 星）；已完成按实际星级计权")
+                       .arg(kGitGoalLinesPerStar);
         } else {
             tip += QStringLiteral("\n无子任务，进度仅按时间计算");
         }
@@ -5449,9 +5947,10 @@ void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal
         const bool hasChildren = gitGoalHasChildren(g.id, allGoals);
         const int starCount = hasChildren ? gitGoalDisplayDifficulty(g, allGoals)
                                           : qMax(1, g.difficulty);
-        const int actualCommits = (!hasChildren && !repoDir.isEmpty())
-                                      ? gitGoalActualCommits(repoDir, g, allGoals)
-                                      : 0;
+        const int actualDiffLines = (!hasChildren && !repoDir.isEmpty())
+                                        ? gitGoalActualDiffLines(repoDir, g)
+                                        : 0;
+        const QString mainBranch = repoDir.isEmpty() ? QString() : resolveGitMainBranch(repoDir);
         QTableWidgetItem *diffItem = new QTableWidgetItem();
         diffItem->setData(Qt::DecorationRole, gitDifficultyStarPixmap(starCount, 14));
         diffItem->setText(formatDifficultyStars(starCount));
@@ -5459,11 +5958,16 @@ void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal
             diffItem->setToolTip(QStringLiteral("由下级子目标星级相加，合计 %1 星").arg(starCount));
         } else {
             diffItem->setToolTip(
-                QStringLiteral("预计 %1 次提交（%1 星）；目标开始日期后分支 %2 已有 %3 次提交\n"
-                               "超出预设时程序自动抬升星级（无上限）")
+                QStringLiteral("预计 %1 星（约 %2 行）；分支 %3 相对主分支 %4 共 %5 行（约 %6 星，+与−之和）\n"
+                               "%7 行 = 1 星；超出预设时自动抬升星级（最高 %8 星）")
                     .arg(starCount)
+                    .arg(starCount * kGitGoalLinesPerStar)
                     .arg(g.branchName.isEmpty() ? QStringLiteral("（未绑定）") : g.branchName)
-                    .arg(actualCommits));
+                    .arg(mainBranch.isEmpty() ? QStringLiteral("（未配置）") : mainBranch)
+                    .arg(actualDiffLines)
+                    .arg(gitLinesToStarCount(actualDiffLines))
+                    .arg(kGitGoalLinesPerStar)
+                    .arg(kGitGoalMaxAutoStars));
         }
         tblGitGoals->setItem(row, 3, diffItem);
     }
@@ -5504,6 +6008,115 @@ void MainWindow::appendGitGoalTableRow(const QString &repoDir, const GitWorkGoal
         remarkItem->setToolTip(g.remark.trimmed());
     }
     tblGitGoals->setItem(row, 9, remarkItem);
+
+    applyGitGoalRowBranchHighlight(row, gitGoalBranchHighlight(g));
+}
+
+MainWindow::GitGoalBranchHighlight MainWindow::gitGoalBranchHighlight(const GitWorkGoal &goal) const {
+    if (goal.branchName.isEmpty()) {
+        return GitGoalBranchHighlight::None;
+    }
+    const QString goalBranch = normalizeLocalBranchRef(goal.branchName);
+    if (goalBranch.isEmpty()) {
+        return GitGoalBranchHighlight::None;
+    }
+
+    QString currentBranch;
+    if (lblGitCurrentBranch) {
+        currentBranch = normalizeLocalBranchRef(lblGitCurrentBranch->text());
+        if (currentBranch == QStringLiteral("(未检出)") || currentBranch == QStringLiteral("(未知)")) {
+            currentBranch.clear();
+        }
+    }
+
+    QString targetBranch;
+    if (cmbGitBranches) {
+        targetBranch = normalizeLocalBranchRef(cmbGitBranches->currentText());
+    }
+
+    const bool matchCurrent = !currentBranch.isEmpty()
+                              && currentBranch.compare(goalBranch, Qt::CaseInsensitive) == 0;
+    const bool matchTarget = !targetBranch.isEmpty()
+                             && targetBranch.compare(goalBranch, Qt::CaseInsensitive) == 0;
+
+    if (matchCurrent && matchTarget) {
+        return GitGoalBranchHighlight::Both;
+    }
+    if (matchCurrent) {
+        return GitGoalBranchHighlight::CurrentBranch;
+    }
+    if (matchTarget) {
+        return GitGoalBranchHighlight::TargetBranch;
+    }
+    return GitGoalBranchHighlight::None;
+}
+
+void MainWindow::applyGitGoalRowBranchHighlight(int row, GitGoalBranchHighlight highlight) {
+    if (!tblGitGoals || row < 0 || row >= tblGitGoals->rowCount()) {
+        return;
+    }
+
+    QColor bg;
+    QString tipSuffix;
+    switch (highlight) {
+    case GitGoalBranchHighlight::CurrentBranch:
+        bg = QColor(QStringLiteral("#c8e6c9"));
+        tipSuffix = QStringLiteral("（与 Git 操作中的当前分支一致）");
+        break;
+    case GitGoalBranchHighlight::TargetBranch:
+        bg = QColor(QStringLiteral("#e3f2fd"));
+        tipSuffix = QStringLiteral("（与 Git 操作中的目标分支一致）");
+        break;
+    case GitGoalBranchHighlight::Both:
+        bg = QColor(QStringLiteral("#fff9c4"));
+        tipSuffix = QStringLiteral("（与 Git 操作中的当前、目标分支均一致）");
+        break;
+    default:
+        return;
+    }
+
+    const QBrush brush(bg);
+    for (int col = 0; col < tblGitGoals->columnCount(); ++col) {
+        if (QTableWidgetItem *item = tblGitGoals->item(row, col)) {
+            item->setBackground(brush);
+        }
+    }
+
+    if (QTableWidgetItem *branchItem = tblGitGoals->item(row, 8)) {
+        const QString branchText = branchItem->text();
+        if (branchText != QStringLiteral("—")) {
+            branchItem->setToolTip(branchText + tipSuffix);
+        }
+    }
+}
+
+void MainWindow::updateGitGoalBranchHighlights() {
+    if (!tblGitGoals) {
+        return;
+    }
+
+    for (int row = 0; row < tblGitGoals->rowCount(); ++row) {
+        for (int col = 0; col < tblGitGoals->columnCount(); ++col) {
+            if (QTableWidgetItem *item = tblGitGoals->item(row, col)) {
+                item->setBackground(QBrush());
+                if (col == 8 && item->text() != QStringLiteral("—")) {
+                    item->setToolTip(QString());
+                }
+            }
+        }
+
+        QTableWidgetItem *branchItem = tblGitGoals->item(row, 8);
+        if (!branchItem) {
+            continue;
+        }
+
+        GitWorkGoal goal;
+        goal.branchName = branchItem->text();
+        if (goal.branchName == QStringLiteral("—")) {
+            goal.branchName.clear();
+        }
+        applyGitGoalRowBranchHighlight(row, gitGoalBranchHighlight(goal));
+    }
 }
 
 void MainWindow::refreshGitGoalsTable() {
@@ -5513,7 +6126,7 @@ void MainWindow::refreshGitGoalsTable() {
     QList<GitWorkGoal> goals = loadGitGoals(repoDir);
     if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
         bool changed = syncParentStartDatesFromLeaves(goals);
-        if (syncGoalDifficultyFromCommits(repoDir, goals)) {
+        if (syncGoalDifficultyFromDiffLines(repoDir, goals)) {
             changed = true;
         }
         if (changed) {
@@ -5719,6 +6332,35 @@ QString MainWindow::suggestBranchNameFromTitle(const QString &title) {
     return translateGoalTitleToEnglish(title);
 }
 
+QString MainWindow::gitCheckedOutBranch(const QString &repoDir) const {
+    const QString workDir = repoDir.trimmed();
+    if (workDir.isEmpty() || !QDir(workDir).exists()) {
+        return QString();
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"),
+                  QStringList() << QStringLiteral("rev-parse") << QStringLiteral("--abbrev-ref") << QStringLiteral("HEAD"));
+#else
+    process.start(QStringLiteral("git"),
+                  QStringList() << QStringLiteral("rev-parse") << QStringLiteral("--abbrev-ref") << QStringLiteral("HEAD"));
+#endif
+    if (!process.waitForFinished(10000)) {
+        return QString();
+    }
+#ifdef Q_OS_WIN
+    const QString branch = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+#else
+    const QString branch = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+#endif
+    if (branch.isEmpty() || branch == QStringLiteral("HEAD")) {
+        return QString();
+    }
+    return branch;
+}
+
 QStringList MainWindow::gitBranchHintLinesFromCombo() const {
     QStringList hints;
     if (!cmbGitBranches) {
@@ -5749,6 +6391,40 @@ bool MainWindow::branchNameInBranchHints(const QStringList &hints, const QString
     return false;
 }
 
+bool MainWindow::selectGitBranchInCombo(const QString &branchName) {
+    if (!cmbGitBranches) {
+        return false;
+    }
+    const QString target = normalizeLocalBranchRef(branchName);
+    if (target.isEmpty()) {
+        return false;
+    }
+
+    int localMatch = -1;
+    int remoteMatch = -1;
+    for (int i = 0; i < cmbGitBranches->count(); ++i) {
+        const QString line = cmbGitBranches->itemText(i).trimmed();
+        if (normalizeLocalBranchRef(line).compare(target, Qt::CaseInsensitive) != 0) {
+            continue;
+        }
+        if (line.startsWith(QStringLiteral("remotes/"))) {
+            if (remoteMatch < 0) {
+                remoteMatch = i;
+            }
+        } else {
+            localMatch = i;
+            break;
+        }
+    }
+
+    const int index = localMatch >= 0 ? localMatch : remoteMatch;
+    if (index < 0) {
+        return false;
+    }
+    cmbGitBranches->setCurrentIndex(index);
+    return true;
+}
+
 QString MainWindow::detectDefaultMainBranch(const QString &repoDir, const QStringList &branchHints) const {
     auto branchPresent = [&](const QString &name) -> bool {
         if (!repoDir.isEmpty() && gitBranchExists(repoDir, name)) {
@@ -5775,7 +6451,7 @@ QString MainWindow::detectDefaultMainBranch(const QString &repoDir, const QStrin
                   QStringList() << QStringLiteral("symbolic-ref")
                                 << QStringLiteral("refs/remotes/origin/HEAD"));
 #endif
-    if (process.waitForFinished(5000) && process.exitCode() == 0) {
+    if (finishGitProcess(process, 5000) && process.exitCode() == 0) {
         const QString sym = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
         const int slash = sym.lastIndexOf(QLatin1Char('/'));
         if (slash >= 0) {
@@ -5949,7 +6625,9 @@ bool MainWindow::gitBranchExists(const QString &repoDir, const QString &branchNa
                                                        << QStringLiteral("--quiet")
                                                        << QStringLiteral("refs/heads/") + branchName);
 #endif
-    process.waitForFinished(5000);
+    if (!finishGitProcess(process, 5000)) {
+        return false;
+    }
     return process.exitCode() == 0;
 }
 
@@ -5963,7 +6641,7 @@ bool MainWindow::checkoutGitBranch(const QString &repoDir, const QString &branch
 #endif
     process.setArguments(QStringList() << QStringLiteral("checkout") << branchName);
     process.start();
-    if (!process.waitForFinished(30000)) {
+    if (!finishGitProcess(process, 30000)) {
         txtGitLog->append(QStringLiteral("<font color='red'>[Git] 切换分支超时</font>"));
         return false;
     }
@@ -6004,7 +6682,7 @@ bool MainWindow::createGitBranch(const QString &repoDir, const QString &branchNa
 #endif
     process.setArguments(QStringList() << QStringLiteral("checkout") << QStringLiteral("-b") << branchName);
     process.start();
-    if (!process.waitForFinished(30000)) {
+    if (!finishGitProcess(process, 30000)) {
         txtGitLog->append(QStringLiteral("<font color='red'>[工作目标] 创建分支超时</font>"));
         return false;
     }
@@ -6183,8 +6861,10 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     }
 
     QLabel *lblPlanHint = new QLabel(
-        QStringLiteral("无父目标时需填写计划开始与计划结束，列表显示综合进度条；子目标 1 星 = 1 次预计提交，"
-                       "未完成时按分支 log 数计进度，超出预设时自动抬升星级，完成后以实际提交数计权。"));
+        QStringLiteral("无父目标时需填写计划开始与计划结束，列表显示综合进度条；子目标 1 星 = %1 行 +/− 变更，"
+                       "未完成时按分支相对主分支的行数折算星级计进度，超出预设时自动抬升星级（最高 %2 星），完成后以实际星级计权。")
+            .arg(kGitGoalLinesPerStar)
+            .arg(kGitGoalMaxAutoStars));
     lblPlanHint->setWordWrap(true);
     lblPlanHint->setStyleSheet(QStringLiteral("color: #555; font-size: 11px;"));
 
@@ -6288,7 +6968,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
     form->addRow(rowStart);
     form->addRow(rowEnd);
     form->addRow(lblChildPlanEnd);
-    form->addRow(QStringLiteral("预计提交（星）:"), rowDifficulty);
+    form->addRow(QStringLiteral("预计星级 (%1行/星):").arg(kGitGoalLinesPerStar), rowDifficulty);
     form->addRow(QStringLiteral("备注:"), txtRemark);
     form->addRow(chkActual);
     form->addRow(QStringLiteral("实际完成:"), dateActual);
@@ -6464,6 +7144,31 @@ void MainWindow::onGitGoalStartClicked() {
                                createBranch ? QStringLiteral("，分支 ") + branchName : QStringLiteral("（未创建分支）")));
 }
 
+void MainWindow::onGitGoalRowDoubleClicked(int row, int column) {
+    Q_UNUSED(column);
+    if (row < 0 || !tblGitGoals) {
+        return;
+    }
+
+    QTableWidgetItem *branchItem = tblGitGoals->item(row, 8);
+    if (!branchItem) {
+        return;
+    }
+
+    const QString branch = branchItem->text().trimmed();
+    if (branch.isEmpty() || branch == QStringLiteral("—")) {
+        return;
+    }
+
+    if (selectGitBranchInCombo(branch)) {
+        txtGitLog->append(QStringLiteral("<font color='gray'>[工作目标] 已切换目标分支: %1</font>").arg(branch));
+        return;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='orange'>[工作目标] 分支 %1 不在当前分支列表中，请先刷新分支。</font>")
+                          .arg(branch));
+}
+
 void MainWindow::onGitGoalEditClicked() {
     const QString repoDir = cmbGitDir->currentText().trimmed();
     if (repoDir.isEmpty()) {
@@ -6584,6 +7289,7 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
         if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem("0"));
     }
     connect(table, &QTableWidget::cellChanged, this, &MainWindow::onSimTableRowChanged);
+    connect(table, &QTableWidget::cellDoubleClicked, this, &MainWindow::onSimCellDoubleClicked);
 }
 
 void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
@@ -6593,6 +7299,11 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
 
     QTableWidgetItem *addrItem = table->item(row, 0);
     if (!addrItem || addrItem->text().isEmpty()) return;
+
+    QTableWidgetItem *valueItem = table->item(row, 2);
+    if (valueItem && !(valueItem->flags() & Qt::ItemIsEditable)) {
+        return;
+    }
 
     ModbusSlave *target = (table == tblSimAGV) ? simAGVDevice : simMainDevice;
     if (!target) return;
@@ -6609,34 +7320,24 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
         char c1 = (char)((val >> 8) & 0xFF);
         char c2 = (char)(val & 0xFF);
         display = QString("'%1%2'").arg(c1 > 31 ? QChar(c1) : '.').arg(c2 > 31 ? QChar(c2) : '.');
-    } else if (fmt.startsWith("32-bit")) {
-        uint32_t val32;
-        if (fmt == "32-bit Float") {
-            // CDAB: [CD, AB] -> CD is high 16 bits of quint32 (which is low part of float? No, CDAB means big-endian order for the 32-bit float but words swapped?)
-            // Normally CDAB for float means: Word0=CD, Word1=AB. 
-            // If float is IEEE754: [Byte3 Byte2 Byte1 Byte0]
-            // CDAB usually means [Byte3 Byte2] [Byte1 Byte1]
-            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
-        } else {
-            val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+    } else if (fmt == "String") {
+        const int regCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+        QVector<quint16> stringRegs;
+        stringRegs.reserve(regCount);
+        for (int i = 0; i < regCount; ++i) {
+            stringRegs << target->getRegister(static_cast<quint16>(addr + i));
         }
-        if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
-        else if (fmt == "32-bit Unsigned") display = QString::number(val32);
-        else if (fmt == "32-bit Float") {
-            float f;
-            memcpy(&f, &val32, 4);
-            display = QString::number(f, 'f', 2);
+        display = decodeUtf8FromRegisters(stringRegs);
+    } else if (fmt.startsWith("32-bit")) {
+        if (fmt == "32-bit Float") {
+            display = QString::number(readFloat32FromSlave(target, addr), 'f', 2);
+        } else {
+            const uint32_t val32 = ((uint32_t)target->getRegister(addr) << 16) | target->getRegister(addr + 1);
+            if (fmt == "32-bit Signed") display = QString::number((int32_t)val32);
+            else if (fmt == "32-bit Unsigned") display = QString::number(val32);
         }
     } else if (fmt == "64-bit Float") {
-        quint64 raw = 0;
-        // GHEF CDAB：addr 起为 GH, EF, CD, AB
-        raw |= (quint64)target->getRegister(addr + 3);
-        raw |= ((quint64)target->getRegister(addr + 2) << 16);
-        raw |= ((quint64)target->getRegister(addr + 1) << 32);
-        raw |= ((quint64)target->getRegister(addr) << 48);
-        double d = 0.0;
-        memcpy(&d, &raw, sizeof(double));
-        display = QString::number(d, 'f', 6);
+        display = QString::number(readFloat64FromSlave(target, addr), 'f', 6);
     }
     if (display.isEmpty()) display = QString::number(val);
 
@@ -6657,8 +7358,15 @@ void MainWindow::setSimRowEnabled(QTableWidget *table, int row, bool enabled)
         Qt::ItemFlags flags = item->flags();
         if (enabled) {
             flags |= (Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            if (col == 2) flags |= Qt::ItemIsEditable;
-            else flags &= ~Qt::ItemIsEditable;
+            if (col == 2) {
+                const QString fmt = simTableFormats.value(table).value(row, QStringLiteral("Unsigned"));
+                if (fmt == QStringLiteral("Binary"))
+                    flags &= ~Qt::ItemIsEditable;
+                else
+                    flags |= Qt::ItemIsEditable;
+            } else {
+                flags &= ~Qt::ItemIsEditable;
+            }
             item->setForeground(QBrush(Qt::black));
         } else {
             flags &= ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
@@ -6688,10 +7396,8 @@ void MainWindow::onSimTableRowChanged(int row, int column)
         if (fmt == "32-bit Float") {
             float f = valStr.toFloat(&ok);
             if (ok) {
-                target->setFloat(addr, f);
-                // 只需要填写首寄存器，后续寄存器按地址顺序自动参与转换。
-                refreshSimRowDisplay(table, row);
-                refreshSimRowDisplay(table, row + 1);
+                writeFloat32ToSlave(target, addr, f);
+                refreshSimMultiWordRows(table, row);
             }
         } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
             bool ok32 = false;
@@ -6702,24 +7408,23 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             if (ok32) {
                 target->setRegister(addr, (quint16)(val32 >> 16));
                 target->setRegister(addr + 1, (quint16)(val32 & 0xFFFF));
-                refreshSimRowDisplay(table, row);
-                refreshSimRowDisplay(table, row + 1);
-                ok = true; // 标记为已处理
+                refreshSimMultiWordRows(table, row);
+                ok = true;
             }
         } else if (fmt == "64-bit Float") {
             double d = valStr.toDouble(&ok);
             if (ok) {
-                quint64 raw = 0;
-                memcpy(&raw, &d, sizeof(double));
-                target->setRegister(addr,     (quint16)((raw >> 48) & 0xFFFF));
-                target->setRegister(addr + 1, (quint16)((raw >> 32) & 0xFFFF));
-                target->setRegister(addr + 2, (quint16)((raw >> 16) & 0xFFFF));
-                target->setRegister(addr + 3, (quint16)(raw & 0xFFFF));
-                refreshSimRowDisplay(table, row);
-                refreshSimRowDisplay(table, row + 1);
-                refreshSimRowDisplay(table, row + 2);
-                refreshSimRowDisplay(table, row + 3);
+                writeFloat64ToSlave(target, addr, d);
+                refreshSimMultiWordRows(table, row);
             }
+        } else if (fmt == "String") {
+            const int regCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+            const QVector<quint16> encoded = encodeUtf8ToRegisters(valStr, regCount);
+            for (int i = 0; i < encoded.size(); ++i) {
+                target->setRegister(static_cast<quint16>(addr + i), encoded[i]);
+            }
+            refreshSimMultiWordRows(table, row);
+            ok = true;
         } else {
             // 原有的 16 位逻辑
             if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
@@ -6737,7 +7442,7 @@ void MainWindow::onSimTableRowChanged(int row, int column)
             }
         }
 
-        if (!ok && fmt != "32-bit Float" && fmt != "64-bit Float" && !fmt.startsWith("32-bit")) {
+        if (!ok && fmt != "32-bit Float" && fmt != "64-bit Float" && fmt != "String" && !fmt.startsWith("32-bit")) {
             // 如果解析失败且不是32位格式，还原显示
             refreshSimRowDisplay(table, row);
         }
@@ -6746,57 +7451,399 @@ void MainWindow::onSimTableRowChanged(int row, int column)
     }
     else if (column == 3) { // Float changed
         float f = table->item(row, 3)->text().toFloat();
-        target->setFloat(addr, f);
-        if (table->item(row, 2)) table->item(row, 2)->setText(QString::number(target->getRegister(addr)));
-        // also check next row
-        for (int r=0; r < table->rowCount(); ++r) {
-            if (table->item(r,0) && table->item(r,0)->text().toUInt() == (uint)(addr+1)) {
-                if (table->item(r,2)) table->item(r,2)->setText(QString::number(target->getRegister(addr+1)));
-                break;
-            }
-        }
+        writeFloat32ToSlave(target, addr, f);
+        refreshSimMultiWordRows(table, row);
     }
 }
 
-void MainWindow::onSimShowBitEditor(int row)
+void MainWindow::onSimCellDoubleClicked(int row, int column)
 {
-    QTableWidget *table = (tabSimRegisterMaps->currentIndex() == 0) ? tblSimAGV : tblSimMain;
-    ModbusSlave *target = (tabSimRegisterMaps->currentIndex() == 0) ? simAGVDevice : simMainDevice;
-    
+    if (column != 2) return;
+    QTableWidget *table = qobject_cast<QTableWidget*>(sender());
+    if (!table) return;
+    if (simTableFormats.value(table).value(row, QStringLiteral("Unsigned")) != QStringLiteral("Binary")) return;
+    onSimShowBitEditor(table, row);
+}
+
+void MainWindow::onSimShowBitEditor(QTableWidget *table, int row)
+{
+    if (!table) return;
+    ModbusSlave *target = (table == tblSimAGV) ? simAGVDevice : simMainDevice;
+    if (!target) return;
+
     QTableWidgetItem *addrItem = table->item(row, 0);
     if (!addrItem || addrItem->text().isEmpty()) return;
     quint16 addr = (quint16)addrItem->text().toUInt();
     quint16 val = target->getRegister(addr);
-    
-    QDialog *dlg = new QDialog(this);
-    dlg->setWindowTitle(QString("地址 %1 位编辑器").arg(addr));
-    QVBoxLayout *v = new QVBoxLayout(dlg);
+
+    const QTableWidgetItem *descItem = table->item(row, 1);
+    const QStringList bitDescs = parseBitDescriptionsFromComment(descItem ? descItem->text() : QString());
+    bool hasBitDesc = false;
+    for (const QString &d : bitDescs) {
+        if (!d.isEmpty()) {
+            hasBitDesc = true;
+            break;
+        }
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("地址 %1 位编辑器").arg(addr));
+    if (hasBitDesc) {
+        dlg.setMinimumWidth(520);
+    }
+    QVBoxLayout *v = new QVBoxLayout(&dlg);
+
+    if (descItem && !descItem->text().trimmed().isEmpty() && !hasBitDesc) {
+        QLabel *descLabel = new QLabel(descItem->text().trimmed());
+        descLabel->setWordWrap(true);
+        descLabel->setStyleSheet(QStringLiteral("color: gray; margin-bottom: 4px;"));
+        v->addWidget(descLabel);
+    }
+
     QGridLayout *g = new QGridLayout();
     QList<QCheckBox*> checks;
-    for (int i=0; i<16; ++i) {
-        QCheckBox *cb = new QCheckBox(QString("Bit %1").arg(i));
+    for (int i = 0; i < 16; ++i) {
+        QString label = QString("位%1").arg(i);
+        if (!bitDescs[i].isEmpty()) {
+            label += QString("  %1").arg(bitDescs[i]);
+        }
+        QCheckBox *cb = new QCheckBox(label);
         cb->setChecked((val >> i) & 1);
-        g->addWidget(cb, i/4, i%4);
+        if (hasBitDesc) {
+            g->addWidget(cb, i, 0);
+        } else {
+            g->addWidget(cb, i / 4, i % 4);
+        }
         checks.append(cb);
     }
     v->addLayout(g);
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
     QPushButton *btnOk = new QPushButton("确定");
-    v->addWidget(btnOk);
-    connect(btnOk, &QPushButton::clicked, dlg, &QDialog::accept);
-    
-    if (dlg->exec() == QDialog::Accepted) {
+    QPushButton *btnCancel = new QPushButton("取消");
+    btnLayout->addWidget(btnOk);
+    btnLayout->addWidget(btnCancel);
+    v->addLayout(btnLayout);
+    connect(btnOk, &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() == QDialog::Accepted) {
         quint16 newVal = 0;
-        for (int i=0; i<16; ++i) if (checks[i]->isChecked()) newVal |= (1 << i);
+        for (int i = 0; i < 16; ++i) {
+            if (checks[i]->isChecked()) newVal |= (1 << i);
+        }
         target->setRegister(addr, newVal);
-        table->blockSignals(true);
-        if (table->item(row, 2)) table->item(row, 2)->setText(QString::number(newVal));
-        table->blockSignals(false);
+        refreshSimRowDisplay(table, row);
     }
-    dlg->deleteLater();
+}
+
+QPair<quint16, quint16> MainWindow::encodeFloat32Words(float value) const
+{
+    quint32 u = 0;
+    memcpy(&u, &value, sizeof(float));
+    const quint16 ab = static_cast<quint16>(u & 0xFFFF);
+    const quint16 cd = static_cast<quint16>((u >> 16) & 0xFFFF);
+    quint16 w0 = 0;
+    quint16 w1 = 0;
+    switch (float32WordOrder) {
+    case Float32WordOrder::CDAB:
+        w0 = cd; w1 = ab;
+        break;
+    case Float32WordOrder::ABCD:
+        w0 = ab; w1 = cd;
+        break;
+    case Float32WordOrder::BADC:
+        w0 = swapBytes16(ab); w1 = swapBytes16(cd);
+        break;
+    case Float32WordOrder::DCBA:
+        w0 = swapBytes16(cd); w1 = swapBytes16(ab);
+        break;
+    }
+    return QPair<quint16, quint16>(w0, w1);
+}
+
+float MainWindow::decodeFloat32Words(quint16 w0, quint16 w1) const
+{
+    quint16 ab = 0;
+    quint16 cd = 0;
+    switch (float32WordOrder) {
+    case Float32WordOrder::CDAB:
+        cd = w0; ab = w1;
+        break;
+    case Float32WordOrder::ABCD:
+        ab = w0; cd = w1;
+        break;
+    case Float32WordOrder::BADC:
+        ab = swapBytes16(w0); cd = swapBytes16(w1);
+        break;
+    case Float32WordOrder::DCBA:
+        cd = swapBytes16(w0); ab = swapBytes16(w1);
+        break;
+    }
+    const quint32 u = static_cast<quint32>(cd) << 16 | ab;
+    float f = 0.0f;
+    memcpy(&f, &u, sizeof(float));
+    return f;
+}
+
+void MainWindow::encodeFloat64Words(double value, quint16 &w0, quint16 &w1, quint16 &w2, quint16 &w3) const
+{
+    quint64 raw = 0;
+    memcpy(&raw, &value, sizeof(double));
+    const quint16 ab = static_cast<quint16>(raw & 0xFFFF);
+    const quint16 cd = static_cast<quint16>((raw >> 16) & 0xFFFF);
+    const quint16 ef = static_cast<quint16>((raw >> 32) & 0xFFFF);
+    const quint16 gh = static_cast<quint16>((raw >> 48) & 0xFFFF);
+    quint16 words[4] = {0, 0, 0, 0};
+    switch (float64WordOrder) {
+    case Float64WordOrder::GHEF_CDAB:
+        words[0] = gh; words[1] = ef; words[2] = cd; words[3] = ab;
+        break;
+    case Float64WordOrder::ABCD_EFGH:
+        words[0] = ab; words[1] = cd; words[2] = ef; words[3] = gh;
+        break;
+    case Float64WordOrder::BADC_FEHG:
+        words[0] = swapBytes16(ab); words[1] = swapBytes16(cd);
+        words[2] = swapBytes16(ef); words[3] = swapBytes16(gh);
+        break;
+    case Float64WordOrder::DCBA_HGFE:
+        words[0] = swapBytes16(cd); words[1] = swapBytes16(ab);
+        words[2] = swapBytes16(ef); words[3] = swapBytes16(gh);
+        break;
+    }
+    w0 = words[0]; w1 = words[1]; w2 = words[2]; w3 = words[3];
+}
+
+double MainWindow::decodeFloat64Words(quint16 w0, quint16 w1, quint16 w2, quint16 w3) const
+{
+    quint16 ab = 0;
+    quint16 cd = 0;
+    quint16 ef = 0;
+    quint16 gh = 0;
+    switch (float64WordOrder) {
+    case Float64WordOrder::GHEF_CDAB:
+        gh = w0; ef = w1; cd = w2; ab = w3;
+        break;
+    case Float64WordOrder::ABCD_EFGH:
+        ab = w0; cd = w1; ef = w2; gh = w3;
+        break;
+    case Float64WordOrder::BADC_FEHG:
+        ab = swapBytes16(w0); cd = swapBytes16(w1);
+        ef = swapBytes16(w2); gh = swapBytes16(w3);
+        break;
+    case Float64WordOrder::DCBA_HGFE:
+        cd = swapBytes16(w0); ab = swapBytes16(w1);
+        ef = swapBytes16(w2); gh = swapBytes16(w3);
+        break;
+    }
+    const quint64 raw = static_cast<quint64>(ab)
+                        | (static_cast<quint64>(cd) << 16)
+                        | (static_cast<quint64>(ef) << 32)
+                        | (static_cast<quint64>(gh) << 48);
+    double d = 0.0;
+    memcpy(&d, &raw, sizeof(double));
+    return d;
+}
+
+bool MainWindow::writeFloat32ToSlave(ModbusSlave *slave, quint16 addr, float value)
+{
+    if (!slave) {
+        return false;
+    }
+    const QPair<quint16, quint16> words = encodeFloat32Words(value);
+    return slave->setRegister(addr, words.first) && slave->setRegister(addr + 1, words.second);
+}
+
+float MainWindow::readFloat32FromSlave(ModbusSlave *slave, quint16 addr) const
+{
+    if (!slave) {
+        return 0.0f;
+    }
+    return decodeFloat32Words(slave->getRegister(addr), slave->getRegister(addr + 1));
+}
+
+bool MainWindow::writeFloat64ToSlave(ModbusSlave *slave, quint16 addr, double value)
+{
+    if (!slave) {
+        return false;
+    }
+    quint16 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+    encodeFloat64Words(value, w0, w1, w2, w3);
+    return slave->setRegister(addr, w0)
+           && slave->setRegister(addr + 1, w1)
+           && slave->setRegister(addr + 2, w2)
+           && slave->setRegister(addr + 3, w3);
+}
+
+double MainWindow::readFloat64FromSlave(ModbusSlave *slave, quint16 addr) const
+{
+    if (!slave) {
+        return 0.0;
+    }
+    return decodeFloat64Words(slave->getRegister(addr),
+                              slave->getRegister(addr + 1),
+                              slave->getRegister(addr + 2),
+                              slave->getRegister(addr + 3));
+}
+
+void MainWindow::loadModbusFloatOrderSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    float32WordOrder = float32WordOrderFromString(
+        settings.value(QStringLiteral("modbus/float32WordOrder"), QStringLiteral("CDAB")).toString());
+    float64WordOrder = float64WordOrderFromString(
+        settings.value(QStringLiteral("modbus/float64WordOrder"), QStringLiteral("GHEF_CDAB")).toString());
+}
+
+void MainWindow::saveModbusFloatOrderSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.setValue(QStringLiteral("modbus/float32WordOrder"), float32WordOrderLabel(float32WordOrder));
+    settings.setValue(QStringLiteral("modbus/float64WordOrder"), float64WordOrderLabel(float64WordOrder));
+}
+
+void MainWindow::applyFloatWordOrderToSimulatorTables()
+{
+    if (tblSimAGV) {
+        rebuildSimRowStates(tblSimAGV);
+    }
+    if (tblSimMain) {
+        rebuildSimRowStates(tblSimMain);
+    }
+}
+
+void MainWindow::showModbusFloatOrderDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Modbus 浮点字序"));
+    QFormLayout *form = new QFormLayout(&dlg);
+
+    QComboBox *cb32 = new QComboBox(&dlg);
+    cb32->addItems(QStringList()
+                     << QStringLiteral("CDAB")
+                     << QStringLiteral("ABCD")
+                     << QStringLiteral("BADC")
+                     << QStringLiteral("DCBA"));
+    cb32->setCurrentText(float32WordOrderLabel(float32WordOrder));
+
+    QComboBox *cb64 = new QComboBox(&dlg);
+    cb64->addItems(QStringList()
+                    << QStringLiteral("GHEF CDAB")
+                    << QStringLiteral("ABCD EFGH")
+                    << QStringLiteral("BADC FEHG")
+                    << QStringLiteral("DCBA HGFE"));
+    cb64->setCurrentText(float64WordOrderLabel(float64WordOrder));
+
+    form->addRow(QStringLiteral("REAL (32-bit) 字序:"), cb32);
+    form->addRow(QStringLiteral("LREAL (64-bit) 字序:"), cb64);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    float32WordOrder = float32WordOrderFromString(cb32->currentText());
+    float64WordOrder = float64WordOrderFromString(cb64->currentText());
+    saveModbusFloatOrderSettings();
+    applyFloatWordOrderToSimulatorTables();
+    if (txtSimLog) {
+        txtSimLog->append(QStringLiteral("[%1] 浮点字序已更新: REAL=%2, LREAL=%3")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+                              .arg(float32WordOrderLabel(float32WordOrder))
+                              .arg(float64WordOrderLabel(float64WordOrder)));
+    }
+}
+
+void MainWindow::refreshSimMultiWordRows(QTableWidget *table, int startRow)
+{
+    if (!table || startRow < 0 || startRow >= table->rowCount()) {
+        return;
+    }
+    refreshSimRowDisplay(table, startRow);
+    QTableWidgetItem *addrItem = table->item(startRow, 0);
+    if (!addrItem || addrItem->text().isEmpty()) {
+        return;
+    }
+    const QString fmt = simTableFormats.value(table).value(startRow, QStringLiteral("Unsigned"));
+    const int stringRegCount = simTableStringLengths.value(table).value(startRow, kDefaultStringRegisterCount);
+    const int wordCount = simFormatWordCount(fmt, stringRegCount);
+    if (wordCount <= 1) {
+        return;
+    }
+    const quint16 addr = static_cast<quint16>(addrItem->text().toUInt());
+    for (int w = 1; w < wordCount; ++w) {
+        const int subRow = findSimRowByAddress(table, addr + w);
+        if (subRow >= 0) {
+            refreshSimRowDisplay(table, subRow);
+        }
+    }
+}
+
+int MainWindow::findSimRowByAddress(QTableWidget *table, quint16 addr) const
+{
+    if (!table) {
+        return -1;
+    }
+    for (int r = 0; r < table->rowCount(); ++r) {
+        QTableWidgetItem *item = table->item(r, 0);
+        if (item && (quint16)item->text().toUInt() == addr) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+void MainWindow::rebuildSimRowStates(QTableWidget *table)
+{
+    if (!table) {
+        return;
+    }
+
+    for (int r = 0; r < table->rowCount(); ++r) {
+        setSimRowEnabled(table, r, true);
+    }
+
+    for (int r = 0; r < table->rowCount(); ++r) {
+        const QString fmt = simTableFormats.value(table).value(r, QStringLiteral("Unsigned"));
+        const int stringRegCount = simTableStringLengths.value(table).value(r, kDefaultStringRegisterCount);
+        const int wordCount = simFormatWordCount(fmt, stringRegCount);
+        if (wordCount <= 1) {
+            continue;
+        }
+
+        QTableWidgetItem *addrItem = table->item(r, 0);
+        if (!addrItem || addrItem->text().isEmpty()) {
+            continue;
+        }
+        const quint16 addr = (quint16)addrItem->text().toUInt();
+
+        for (int w = 1; w < wordCount; ++w) {
+            const int subRow = findSimRowByAddress(table, addr + w);
+            if (subRow < 0) {
+                continue;
+            }
+            setSimRowEnabled(table, subRow, false);
+            simTableFormats[table].remove(subRow);
+            table->blockSignals(true);
+            if (!table->item(subRow, 2)) {
+                table->setItem(subRow, 2, new QTableWidgetItem());
+            }
+            table->item(subRow, 2)->setText(QString());
+            table->blockSignals(false);
+        }
+    }
+
+    for (int r = 0; r < table->rowCount(); ++r) {
+        refreshSimRowDisplay(table, r);
+    }
 }
 
 void MainWindow::syncSimulatorTablesFromMaps() {
-    auto syncOne = [](QTableWidget *src, QTableWidget *dst) {
+    auto syncOne = [this](QTableWidget *src, QTableWidget *dst) {
         if (!src || !dst) return;
         if (dst->rowCount() < src->rowCount()) dst->setRowCount(src->rowCount());
 
@@ -6807,14 +7854,25 @@ void MainWindow::syncSimulatorTablesFromMaps() {
 
             QTableWidgetItem *srcAddr = src->item(row, 0);
             QTableWidgetItem *srcCmt = src->item(row, 1);
+            QTableWidgetItem *srcFmt = src->item(row, 2);
             dst->item(row, 0)->setText(srcAddr ? srcAddr->text() : "");
             dst->item(row, 1)->setText(srcCmt ? srcCmt->text() : "");
+
+            const QString regFmt = srcFmt ? srcFmt->text() : QString();
+            if (!regFmt.trimmed().isEmpty()) {
+                simTableFormats[dst][row] = mapRegisterFormatToSimFormat(regFmt);
+                if (simTableFormats[dst][row] == QStringLiteral("String")) {
+                    simTableStringLengths[dst][row] = parseStringRegisterCount(regFmt, kDefaultStringRegisterCount);
+                }
+            }
 
             Qt::ItemFlags flags0 = dst->item(row, 0)->flags();
             Qt::ItemFlags flags1 = dst->item(row, 1)->flags();
             dst->item(row, 0)->setFlags(flags0 & ~Qt::ItemIsEditable);
             dst->item(row, 1)->setFlags(flags1 & ~Qt::ItemIsEditable);
         }
+
+        rebuildSimRowStates(dst);
     };
 
     syncOne(tblAGV, tblSimAGV);
@@ -6849,6 +7907,9 @@ void MainWindow::onRegisterTableCellClicked(int row, int column) {
         } else if (fmtText.contains("REAL")) {
             formatIndex = 3; // 32-bit Float
             readQty = 2;
+        } else if (fmtText.contains("STRING") || fmtText.contains("WSTRING")) {
+            formatIndex = 5; // String
+            readQty = parseStringRegisterCount(formatItem->text(), kDefaultStringRegisterCount);
         } else if (fmtText.contains("BOOL")) {
             formatIndex = 2; // Binary
             readQty = 1;
@@ -7287,20 +8348,34 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     // Format Submenu
     QMenu *formatMenu = menu.addMenu("Format");
     QStringList formats = {
-        "Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary",
+        "Signed", "Unsigned", "Hex", "ASCII - Hex", "Binary", "String",
         "32-bit Signed", "32-bit Unsigned", "32-bit Float", "64-bit Float"
     };
     for (const QString &fmt : formats) {
         QAction *a = formatMenu->addAction(fmt);
-        connect(a, &QAction::triggered, this, [this, table, row, fmt](){ 
+        connect(a, &QAction::triggered, this, [this, table, row, fmt](){
             simTableFormats[table][row] = fmt;
-            refreshSimRowDisplay(table, row);
+            if (fmt == QStringLiteral("String")) {
+                bool ok = false;
+                const int count = QInputDialog::getInt(this,
+                                                       QStringLiteral("String 寄存器数"),
+                                                       QStringLiteral("占用寄存器数量:"),
+                                                       kDefaultStringRegisterCount,
+                                                       1,
+                                                       60,
+                                                       1,
+                                                       &ok);
+                simTableStringLengths[table][row] = ok ? count : kDefaultStringRegisterCount;
+            } else {
+                simTableStringLengths[table].remove(row);
+            }
+            rebuildSimRowStates(table);
         });
     }
 
     menu.addSeparator();
     QAction *actBit = menu.addAction("bit Edit");
-    connect(actBit, &QAction::triggered, this, [this, row](){ onSimShowBitEditor(row); });
+    connect(actBit, &QAction::triggered, this, [this, table, row](){ onSimShowBitEditor(table, row); });
 
     QAction *actWave = menu.addAction("periodic waveformation");
     connect(actWave, &QAction::triggered, this, [this, row](){ onSimShowWaveformEditor(row); });
@@ -7424,7 +8499,7 @@ void MainWindow::saveAutoScene()
     auto exportDeviceHolding = [this](ModbusSlave *dev, QTableWidget *table) {
         QJsonObject obj;
         if (!dev || !table) return obj;
-        QJsonObject values, formats;
+        QJsonObject values, formats, stringLengths;
         for (int i = 0; i < table->rowCount(); ++i) {
             QTableWidgetItem *addrItem = table->item(i, 0);
             if (!addrItem) continue;
@@ -7435,9 +8510,18 @@ void MainWindow::saveAutoScene()
             if (val != 0) values.insert(QString::number(addr), int(val));
             QString fmt = simTableFormats.value(table).value(i, "Unsigned");
             if (fmt != "Unsigned") formats.insert(QString::number(i), fmt);
+            if (fmt == "String") {
+                const int regCount = simTableStringLengths.value(table).value(i, kDefaultStringRegisterCount);
+                if (regCount != kDefaultStringRegisterCount) {
+                    stringLengths.insert(QString::number(i), regCount);
+                }
+            }
         }
         obj.insert("values", values);
         obj.insert("formats", formats);
+        if (!stringLengths.isEmpty()) {
+            obj.insert("stringLengths", stringLengths);
+        }
         return obj;
     };
     root.insert("main", exportDeviceHolding(simMainDevice, tblSimMain));
@@ -7480,9 +8564,22 @@ void MainWindow::loadAutoScene()
                 int row = it.key().toInt();
                 QString fmt = it.value().toString();
                 simTableFormats[table][row] = fmt;
+                if (fmt == "String") {
+                    simTableStringLengths[table][row] = kDefaultStringRegisterCount;
+                }
                 refreshSimRowDisplay(table, row);
             }
         }
+        if (obj.contains("stringLengths")) {
+            QJsonObject lengthsObj = obj.value("stringLengths").toObject();
+            for (auto it = lengthsObj.begin(); it != lengthsObj.end(); ++it) {
+                const int row = it.key().toInt();
+                const int regCount = it.value().toInt(kDefaultStringRegisterCount);
+                simTableStringLengths[table][row] = qMax(1, regCount);
+                refreshSimRowDisplay(table, row);
+            }
+        }
+        rebuildSimRowStates(table);
     };
     if (root.contains("main")) {
         QJsonObject mainObj = root.value("main").toObject();
@@ -7986,6 +9083,11 @@ QWidget* MainWindow::createPerformancePage()
     layout->addWidget(txtPerfLog);
 
     return page;
+}
+
+QWidget *MainWindow::createLifeAssistantPage()
+{
+    return new LifeAssistantWidget(this);
 }
 
 void MainWindow::onPerformanceMonitorToggled(bool checked)
