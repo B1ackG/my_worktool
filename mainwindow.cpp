@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "lifeassistantwidget.h"
+#include "inputquickerwidget.h"
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QDateTime>
@@ -226,6 +227,81 @@ MainWindow::Float64WordOrder float64WordOrderFromString(const QString &text)
         return MainWindow::Float64WordOrder::DCBA_HGFE;
     }
     return MainWindow::Float64WordOrder::GHEF_CDAB;
+}
+
+namespace RegisterMapCol {
+constexpr int Direction = 0;
+constexpr int Address = 1;
+constexpr int Comment = 2;
+constexpr int Format = 3;
+constexpr int ColumnCount = 4;
+}
+
+namespace SimRegisterCol {
+constexpr int Direction = 0;
+constexpr int Address = 1;
+constexpr int Description = 2;
+constexpr int Value = 3;
+constexpr int ColumnCount = 4;
+}
+
+enum class RegisterMapDirection { Unknown, Read, Write };
+
+RegisterMapDirection parseRegisterMapDirection(const QString &text)
+{
+    const QString t = text.trimmed();
+    if (t.isEmpty()) {
+        return RegisterMapDirection::Unknown;
+    }
+    const QString lower = t.toLower();
+    if (t == QStringLiteral("读") || lower == QStringLiteral("read") || lower == QStringLiteral("r")) {
+        return RegisterMapDirection::Read;
+    }
+    if (t == QStringLiteral("写") || lower == QStringLiteral("write") || lower == QStringLiteral("w")) {
+        return RegisterMapDirection::Write;
+    }
+    return RegisterMapDirection::Unknown;
+}
+
+QString stripUtf8Bom(QString text)
+{
+    if (text.startsWith(QChar(0xFEFF))) {
+        text = text.mid(1);
+    }
+    return text;
+}
+
+QStringList parseRegisterMapCsvLine(const QString &line)
+{
+    QStringList parts;
+    bool inQuotes = false;
+    QString field;
+    for (int i = 0; i < line.length(); ++i) {
+        const QChar c = line[i];
+        if (c == '"') {
+            if (inQuotes && i + 1 < line.length() && line[i + 1] == '"') {
+                field += '"';
+                ++i;
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (c == ',' && !inQuotes) {
+            parts.append(stripUtf8Bom(field.trimmed()));
+            field.clear();
+        } else {
+            field += c;
+        }
+    }
+    parts.append(stripUtf8Bom(field.trimmed()));
+    return parts;
+}
+
+QString escapeRegisterMapCsvField(QString value)
+{
+    if (value.contains(',') || value.contains('"') || value.contains('\n')) {
+        return QStringLiteral("\"") + value.replace('"', QStringLiteral("\"\"")) + QStringLiteral("\"");
+    }
+    return value;
 }
 
 QString mapRegisterFormatToSimFormat(const QString &regFmt)
@@ -476,7 +552,7 @@ MainWindow::MainWindow(QWidget *parent)
     createLayouts();
     createMenus();
     createConnections();
-    
+
     // Load History
     loadConnectionHistory();
     loadGitHistory();
@@ -566,6 +642,7 @@ void MainWindow::createWidgets()
     navWidget->addItem("Modbus 从站模拟器");
     navWidget->addItem("TCP 通讯助手");
     navWidget->addItem("性能监控器");
+    navWidget->addItem("快捷助手");
     navWidget->addItem("生活办公助手");
     navWidget->setFixedWidth(160);
     navWidget->setStyleSheet("QListWidget::item { height: 50px; padding-left: 10px; font-size: 14px; } "
@@ -1598,6 +1675,7 @@ void MainWindow::createLayouts()
     simulatorPageWidget = createSimulatorPage();
     tcpAssistantPageWidget = createTcpAssistantPage();
     performancePageWidget = createPerformancePage();
+    inputQuickerPageWidget = new InputQuickerWidget(this);
     lifeAssistantPageWidget = createLifeAssistantPage();
     
     stackedWidget->addWidget(modbusPageWidget);
@@ -1606,6 +1684,7 @@ void MainWindow::createLayouts()
     stackedWidget->addWidget(simulatorPageWidget);
     stackedWidget->addWidget(tcpAssistantPageWidget);
     stackedWidget->addWidget(performancePageWidget);
+    stackedWidget->addWidget(inputQuickerPageWidget);
     stackedWidget->addWidget(lifeAssistantPageWidget);
     
     mainLayout->addWidget(navWidget);
@@ -1927,7 +2006,7 @@ void MainWindow::onSimTimerTick()
             int foundRow = -1;
             if (table) {
                 for (int r = 0; r < table->rowCount(); ++r) {
-                    QTableWidgetItem *addrItem = table->item(r, 0);
+                    QTableWidgetItem *addrItem = table->item(r, SimRegisterCol::Address);
                     if (addrItem && (quint16)addrItem->text().toUInt() == t.addr) {
                         fmt = simTableFormats.value(table).value(r, "Unsigned");
                         foundRow = r;
@@ -1971,7 +2050,7 @@ void MainWindow::onSimTimerTick()
                     if (k == foundRow) continue;
                     QString fmtk = simTableFormats.value(table).value(k, "Unsigned");
                     if (!fmtk.startsWith("32-bit") && !fmtk.startsWith("64-bit") && fmtk != "String") continue;
-                    QTableWidgetItem *aItem = table->item(k, 0);
+                    QTableWidgetItem *aItem = table->item(k, SimRegisterCol::Address);
                     if (!aItem) continue;
                     quint16 a = (quint16)aItem->text().toUInt();
                     int wordsK = fmtk.startsWith("64-bit") ? 4 : (fmtk.startsWith("32-bit") ? 2
@@ -2578,8 +2657,8 @@ void MainWindow::onSimWriteValuesClicked()
     int written = 0;
     int skipped = 0;
     for (int row = 0; row < table->rowCount(); ++row) {
-        QTableWidgetItem *addrItem = table->item(row, 0);
-        QTableWidgetItem *valItem = table->item(row, 2);
+        QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
+        QTableWidgetItem *valItem = table->item(row, SimRegisterCol::Value);
         if (!addrItem || addrItem->text().trimmed().isEmpty()) continue;
         if (!valItem || valItem->text().trimmed().isEmpty()) {
             skipped++;
@@ -2598,6 +2677,12 @@ void MainWindow::onSimWriteValuesClicked()
 
         if (target->setRegister(static_cast<quint16>(addr), static_cast<quint16>(val))) {
             written++;
+            for (int r = 0; r < table->rowCount(); ++r) {
+                QTableWidgetItem *a = table->item(r, SimRegisterCol::Address);
+                if (a && a->text().trimmed().toUInt() == addr) {
+                    refreshSimRowDisplay(table, r);
+                }
+            }
         } else {
             skipped++;
         }
@@ -2615,16 +2700,17 @@ void MainWindow::onSimRandomValuesClicked()
 
     int randomized = 0;
     for (int row = 0; row < table->rowCount(); ++row) {
-        QTableWidgetItem *addrItem = table->item(row, 0);
+        QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
         if (!addrItem || addrItem->text().trimmed().isEmpty()) continue;
 
         bool okAddr = false;
         uint addr = addrItem->text().trimmed().toUInt(&okAddr, 10);
         if (!okAddr || addr > ModbusSlave::MaxHoldingRegisterAddress) continue;
 
-        if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
+        if (!table->item(row, SimRegisterCol::Value))
+            table->setItem(row, SimRegisterCol::Value, new QTableWidgetItem());
         quint16 randomValue = static_cast<quint16>(QRandomGenerator::global()->bounded(65536));
-        table->item(row, 2)->setText(QString::number(randomValue));
+        table->item(row, SimRegisterCol::Value)->setText(QString::number(randomValue));
         randomized++;
     }
 
@@ -2641,7 +2727,7 @@ void MainWindow::onSimRandomAndWriteClicked()
     int written = 0;
     int skipped = 0;
     for (int row = 0; row < table->rowCount(); ++row) {
-        QTableWidgetItem *addrItem = table->item(row, 0);
+        QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
         if (!addrItem || addrItem->text().trimmed().isEmpty()) continue;
 
         bool okAddr = false;
@@ -2649,11 +2735,18 @@ void MainWindow::onSimRandomAndWriteClicked()
         if (!okAddr || addr > ModbusSlave::MaxHoldingRegisterAddress) { skipped++; continue; }
 
         quint16 randomValue = static_cast<quint16>(QRandomGenerator::global()->bounded(65536));
-        if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
-        table->item(row, 2)->setText(QString::number(randomValue));
+        if (!table->item(row, SimRegisterCol::Value))
+            table->setItem(row, SimRegisterCol::Value, new QTableWidgetItem());
+        table->item(row, SimRegisterCol::Value)->setText(QString::number(randomValue));
 
         if (target->setRegister(static_cast<quint16>(addr), randomValue)) {
             written++;
+            for (int r = 0; r < table->rowCount(); ++r) {
+                QTableWidgetItem *a = table->item(r, SimRegisterCol::Address);
+                if (a && a->text().trimmed().toUInt() == addr) {
+                    refreshSimRowDisplay(table, r);
+                }
+            }
         } else {
             skipped++;
         }
@@ -2683,12 +2776,12 @@ void MainWindow::onSimSaveSceneClicked()
         // Export only registers that are actually in the UI table to keep size reasonable
         // and ensure we capture what the user sees/configured.
         for (int i = 0; i < table->rowCount(); ++i) {
-            QTableWidgetItem *addrItem = table->item(i, 0);
+            QTableWidgetItem *addrItem = table->item(i, SimRegisterCol::Address);
             if (!addrItem) continue;
             bool ok;
             quint16 addr = (quint16)addrItem->text().toUInt(&ok);
             if (!ok) continue;
-            
+
             // Save value if non-zero
             quint16 val = dev->getRegister(addr);
             if (val != 0) {
@@ -2811,20 +2904,29 @@ void MainWindow::onSimExportCsvClicked()
     QTextStream out(&f);
     // BOM for Excel
     out.setGenerateByteOrderMark(true);
-    out << "Device,Address,Value,Format,Description\n";
+    out << "Device,Direction,Address,Value,Format,Description\n";
 
     auto exportTable = [&](QTableWidget *table, const QString &deviceName) {
         if (!table) return;
         for (int i = 0; i < table->rowCount(); ++i) {
-            QString addr = table->item(i, 0) ? table->item(i, 0)->text() : "";
-            QString val = table->item(i, 1) ? table->item(i, 1)->text() : "";
+            QString direction = table->item(i, SimRegisterCol::Direction)
+                                   ? table->item(i, SimRegisterCol::Direction)->text() : "";
+            QString addr = table->item(i, SimRegisterCol::Address)
+                               ? table->item(i, SimRegisterCol::Address)->text() : "";
+            QString val = table->item(i, SimRegisterCol::Value)
+                              ? table->item(i, SimRegisterCol::Value)->text() : "";
             QString fmt = simTableFormats.value(table).value(i, "Unsigned");
-            QString desc = table->item(i, 2) ? table->item(i, 2)->text() : "";
-            
-            // CSV escaping
-            if (desc.contains(",")) desc = "\"" + desc + "\"";
-            
-            out << deviceName << "," << addr << "," << val << "," << fmt << "," << desc << "\n";
+            QString desc = table->item(i, SimRegisterCol::Description)
+                               ? table->item(i, SimRegisterCol::Description)->text() : "";
+
+            if (direction.isEmpty() && addr.isEmpty() && val.isEmpty() && desc.isEmpty()) continue;
+
+            out << deviceName << ","
+                << escapeRegisterMapCsvField(direction) << ","
+                << escapeRegisterMapCsvField(addr) << ","
+                << escapeRegisterMapCsvField(val) << ","
+                << escapeRegisterMapCsvField(fmt) << ","
+                << escapeRegisterMapCsvField(desc) << "\n";
         }
     };
 
@@ -2848,56 +2950,108 @@ void MainWindow::onSimImportCsvClicked()
 
     QTextStream in(&f);
     in.setCodec("UTF-8");
-    QString header = in.readLine(); // skip header
+    const QString headerLine = in.readLine();
+    const QStringList headerParts = parseRegisterMapCsvLine(headerLine);
+
+    int deviceCol = 0;
+    int dirCol = -1;
+    int addrCol = 1;
+    int valCol = 2;
+    int fmtCol = 3;
+    int descCol = 4;
+    bool hasHeader = false;
+
+    for (int i = 0; i < headerParts.size(); ++i) {
+        const QString h = headerParts[i].trimmed().toLower();
+        if (h == QStringLiteral("device") || h == QStringLiteral("设备")) {
+            deviceCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("direction") || h == QStringLiteral("方向")) {
+            dirCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("address") || h == QStringLiteral("地址")) {
+            addrCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("value") || h == QStringLiteral("值")) {
+            valCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("format") || h == QStringLiteral("格式")) {
+            fmtCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("description") || h == QStringLiteral("描述") || h == QStringLiteral("comment")) {
+            descCol = i;
+            hasHeader = true;
+        }
+    }
+
+    if (!hasHeader) {
+        dirCol = -1;
+        deviceCol = 0;
+        addrCol = 1;
+        valCol = 2;
+        fmtCol = 3;
+        descCol = 4;
+    }
+
     int count = 0;
 
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        if (line.trimmed().isEmpty()) continue;
-        QStringList parts = line.split(",");
-        if (parts.size() < 3) continue;
+    auto importLine = [&](const QString &line) {
+        if (line.trimmed().isEmpty()) return;
+        const QStringList parts = parseRegisterMapCsvLine(line);
+        if (parts.size() < 3) return;
 
-        QString deviceStr = parts[0].trimmed();
-        quint16 addr = parts[1].trimmed().toUInt();
-        QString valStr = parts[2].trimmed();
-        QString fmt = (parts.size() >= 4) ? parts[3].trimmed() : "Unsigned";
-        QString desc = (parts.size() >= 5) ? parts[4].trimmed() : "";
-        
-        // 处理 CSV 中带引号的情况
-        if (desc.startsWith("\"") && desc.endsWith("\"")) desc = desc.mid(1, desc.length()-2);
+        const QString deviceStr = parts.value(deviceCol).trimmed();
+        const QString direction = dirCol >= 0 ? parts.value(dirCol).trimmed() : QString();
+        const quint16 addr = parts.value(addrCol).trimmed().toUInt();
+        const QString valStr = parts.value(valCol).trimmed();
+        const QString fmt = parts.value(fmtCol).trimmed().isEmpty()
+                                ? QStringLiteral("Unsigned")
+                                : parts.value(fmtCol).trimmed();
+        const QString desc = parts.value(descCol).trimmed();
 
-        QTableWidget *table = (deviceStr.toLower() == "main" || deviceStr == "主设备") ? tblSimMain : tblSimAGV;
-        ModbusSlave *slave = (deviceStr.toLower() == "main" || deviceStr == "主设备") ? simMainDevice : simAGVDevice;
+        QTableWidget *table = (deviceStr.toLower() == "main" || deviceStr == QStringLiteral("主设备"))
+                                  ? tblSimMain : tblSimAGV;
+        ModbusSlave *slave = (deviceStr.toLower() == "main" || deviceStr == QStringLiteral("主设备"))
+                                 ? simMainDevice : simAGVDevice;
 
-        if (!table || !slave) continue;
+        if (!table || !slave) return;
 
-        // 查找或添加行
         int row = -1;
         for (int r = 0; r < table->rowCount(); ++r) {
-            if (table->item(r, 0) && table->item(r, 0)->text().toUInt() == addr) {
-                row = r;
-                break;
+            QTableWidgetItem *addrItem = table->item(r, SimRegisterCol::Address);
+            QTableWidgetItem *dirItem = table->item(r, SimRegisterCol::Direction);
+            if (!addrItem || addrItem->text().toUInt() != addr) continue;
+            if (dirCol >= 0) {
+                const QString existingDir = dirItem ? dirItem->text().trimmed() : QString();
+                if (existingDir != direction) continue;
             }
+            row = r;
+            break;
         }
 
         if (row == -1) {
             row = table->rowCount();
             table->insertRow(row);
-            table->setItem(row, 0, new QTableWidgetItem(QString::number(addr)));
-            table->setItem(row, 1, new QTableWidgetItem(valStr));
-            table->setItem(row, 2, new QTableWidgetItem(desc));
-        } else {
-            if (!table->item(row, 1)) table->setItem(row, 1, new QTableWidgetItem(valStr));
-            else table->item(row, 1)->setText(valStr);
-            
-            if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem(desc));
-            else table->item(row, 2)->setText(desc);
+            for (int col = 0; col < SimRegisterCol::ColumnCount; ++col) {
+                table->setItem(row, col, new QTableWidgetItem());
+            }
+            table->item(row, SimRegisterCol::Address)->setText(QString::number(addr));
         }
 
-        // 更新格式和值
+        if (!table->item(row, SimRegisterCol::Direction))
+            table->setItem(row, SimRegisterCol::Direction, new QTableWidgetItem());
+        if (!table->item(row, SimRegisterCol::Description))
+            table->setItem(row, SimRegisterCol::Description, new QTableWidgetItem());
+        if (!table->item(row, SimRegisterCol::Value))
+            table->setItem(row, SimRegisterCol::Value, new QTableWidgetItem());
+
+        table->item(row, SimRegisterCol::Direction)->setText(direction);
+        table->item(row, SimRegisterCol::Description)->setText(desc);
+        table->item(row, SimRegisterCol::Value)->setText(valStr);
+        applyRegisterMapRowStyle(table, row);
+
         simTableFormats[table][row] = fmt;
-        
-        // 尝试解析并设置寄存器值
+
         bool ok = false;
         if (fmt == "32-bit Float") {
             float fv = valStr.toFloat(&ok);
@@ -2923,13 +3077,20 @@ void MainWindow::onSimImportCsvClicked()
         } else {
             slave->setRegister(addr, (quint16)valStr.toUInt(&ok));
         }
-        
+
         refreshSimRowDisplay(table, row);
         count++;
+    };
+
+    if (!hasHeader) {
+        importLine(headerLine);
+    }
+    while (!in.atEnd()) {
+        importLine(in.readLine());
     }
 
     f.close();
-    syncSimulatorTablesFromMaps(); // 额外同步一次确保全量更新
+    syncSimulatorTablesFromMaps();
     txtSimLog->append(QString("寄存器表已导入: %1 (共 %2 条)").arg(fn).arg(count));
 }
 
@@ -3046,7 +3207,7 @@ void MainWindow::refreshSimTableForAddr(QTableWidget *table, quint16 addr)
         const QString fmtk = simTableFormats.value(table).value(k, QStringLiteral("Unsigned"));
         const int stringRegCount = simTableStringLengths.value(table).value(k, kDefaultStringRegisterCount);
         const int wordCount = simFormatWordCount(fmtk, stringRegCount);
-        QTableWidgetItem *aItem = table->item(k, 0);
+        QTableWidgetItem *aItem = table->item(k, SimRegisterCol::Address);
         if (!aItem || aItem->text().isEmpty()) {
             continue;
         }
@@ -7243,8 +7404,12 @@ void MainWindow::onGitGoalDeleteClicked() {
 
 void MainWindow::setupRegisterTable(QTableWidget *table) {
     if(!table) return;
-    table->setColumnCount(3);
-    table->setHorizontalHeaderLabels(QStringList() << "地址" << "注释" << "寄存器格式");
+    table->setColumnCount(RegisterMapCol::ColumnCount);
+    table->setHorizontalHeaderLabels(QStringList()
+                                     << QStringLiteral("方向")
+                                     << QStringLiteral("地址")
+                                     << QStringLiteral("注释")
+                                     << QStringLiteral("寄存器格式"));
     table->horizontalHeader()->setStretchLastSection(true);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
@@ -7254,28 +7419,75 @@ void MainWindow::setupRegisterTable(QTableWidget *table) {
     // Add some default rows for testing
     table->setRowCount(51);
     for(int i=0; i<50; i++) {
-        table->setItem(i, 0, new QTableWidgetItem(QString::number(i)));
-        table->setItem(i, 1, new QTableWidgetItem(""));
-        table->setItem(i, 2, new QTableWidgetItem(QString::number(i)));
+        table->setItem(i, RegisterMapCol::Direction, new QTableWidgetItem(""));
+        table->setItem(i, RegisterMapCol::Address, new QTableWidgetItem(QString::number(i)));
+        table->setItem(i, RegisterMapCol::Comment, new QTableWidgetItem(""));
+        table->setItem(i, RegisterMapCol::Format, new QTableWidgetItem(QString::number(i)));
+        applyRegisterMapRowStyle(table, i);
     }
 
     // Keep one blank row at bottom for direct data entry.
-    table->setItem(50, 0, new QTableWidgetItem(""));
-    table->setItem(50, 1, new QTableWidgetItem(""));
-    table->setItem(50, 2, new QTableWidgetItem(""));
+    table->setItem(50, RegisterMapCol::Direction, new QTableWidgetItem(""));
+    table->setItem(50, RegisterMapCol::Address, new QTableWidgetItem(""));
+    table->setItem(50, RegisterMapCol::Comment, new QTableWidgetItem(""));
+    table->setItem(50, RegisterMapCol::Format, new QTableWidgetItem(""));
+    applyRegisterMapRowStyle(table, 50);
+}
+
+void MainWindow::applyRegisterMapRowStyle(QTableWidget *table, int row)
+{
+    if (!table || row < 0 || row >= table->rowCount()) {
+        return;
+    }
+
+    const QTableWidgetItem *dirItem = table->item(row, RegisterMapCol::Direction);
+    const RegisterMapDirection dir = parseRegisterMapDirection(dirItem ? dirItem->text() : QString());
+
+    QColor bg;
+    if (dir == RegisterMapDirection::Read) {
+        bg = QColor(QStringLiteral("#E8F4FD"));
+    } else if (dir == RegisterMapDirection::Write) {
+        bg = QColor(QStringLiteral("#FFF3E0"));
+    }
+
+    for (int col = 0; col < table->columnCount(); ++col) {
+        if (!table->item(row, col)) {
+            table->setItem(row, col, new QTableWidgetItem());
+        }
+        QTableWidgetItem *item = table->item(row, col);
+        if (dir == RegisterMapDirection::Unknown) {
+            item->setBackground(QBrush());
+        } else {
+            item->setBackground(QBrush(bg));
+        }
+    }
+}
+
+void MainWindow::applyRegisterMapTableStyles(QTableWidget *table)
+{
+    if (!table) {
+        return;
+    }
+    for (int row = 0; row < table->rowCount(); ++row) {
+        applyRegisterMapRowStyle(table, row);
+    }
 }
 
 void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     if (!table) return;
-    table->setColumnCount(3);
-    table->setHorizontalHeaderLabels(QStringList() << "地址" << "描述" << "值");
-    
-    // 重新规划列表宽度
-    table->setColumnWidth(0, 50);  // 地址列
-    table->setColumnWidth(1, 150); // 描述列
-    table->setColumnWidth(2, 100); // 值列
+    table->setColumnCount(SimRegisterCol::ColumnCount);
+    table->setHorizontalHeaderLabels(QStringList()
+                                     << QStringLiteral("方向")
+                                     << QStringLiteral("地址")
+                                     << QStringLiteral("描述")
+                                     << QStringLiteral("值"));
 
-    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch); // 描述列自适应剩余空间
+    table->setColumnWidth(SimRegisterCol::Direction, 40);
+    table->setColumnWidth(SimRegisterCol::Address, 50);
+    table->setColumnWidth(SimRegisterCol::Description, 150);
+    table->setColumnWidth(SimRegisterCol::Value, 100);
+
+    table->horizontalHeader()->setSectionResizeMode(SimRegisterCol::Description, QHeaderView::Stretch);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     table->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -7284,9 +7496,15 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     table->setRowCount(50);
 
     for (int i = 0; i < 50; ++i) {
-        if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem(QString::number(i)));
-        if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem(""));
-        if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem("0"));
+        if (!table->item(i, SimRegisterCol::Direction))
+            table->setItem(i, SimRegisterCol::Direction, new QTableWidgetItem(""));
+        if (!table->item(i, SimRegisterCol::Address))
+            table->setItem(i, SimRegisterCol::Address, new QTableWidgetItem(QString::number(i)));
+        if (!table->item(i, SimRegisterCol::Description))
+            table->setItem(i, SimRegisterCol::Description, new QTableWidgetItem(""));
+        if (!table->item(i, SimRegisterCol::Value))
+            table->setItem(i, SimRegisterCol::Value, new QTableWidgetItem("0"));
+        applyRegisterMapRowStyle(table, i);
     }
     connect(table, &QTableWidget::cellChanged, this, &MainWindow::onSimTableRowChanged);
     connect(table, &QTableWidget::cellDoubleClicked, this, &MainWindow::onSimCellDoubleClicked);
@@ -7297,10 +7515,10 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
     if (!table) return;
     if (row < 0 || row >= table->rowCount()) return;
 
-    QTableWidgetItem *addrItem = table->item(row, 0);
+    QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
     if (!addrItem || addrItem->text().isEmpty()) return;
 
-    QTableWidgetItem *valueItem = table->item(row, 2);
+    QTableWidgetItem *valueItem = table->item(row, SimRegisterCol::Value);
     if (valueItem && !(valueItem->flags() & Qt::ItemIsEditable)) {
         return;
     }
@@ -7342,8 +7560,8 @@ void MainWindow::refreshSimRowDisplay(QTableWidget *table, int row)
     if (display.isEmpty()) display = QString::number(val);
 
     table->blockSignals(true);
-    if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
-    table->item(row, 2)->setText(display);
+    if (!table->item(row, SimRegisterCol::Value)) table->setItem(row, SimRegisterCol::Value, new QTableWidgetItem());
+    table->item(row, SimRegisterCol::Value)->setText(display);
     table->blockSignals(false);
 }
 
@@ -7358,7 +7576,7 @@ void MainWindow::setSimRowEnabled(QTableWidget *table, int row, bool enabled)
         Qt::ItemFlags flags = item->flags();
         if (enabled) {
             flags |= (Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-            if (col == 2) {
+            if (col == SimRegisterCol::Value) {
                 const QString fmt = simTableFormats.value(table).value(row, QStringLiteral("Unsigned"));
                 if (fmt == QStringLiteral("Binary"))
                     flags &= ~Qt::ItemIsEditable;
@@ -7382,83 +7600,91 @@ void MainWindow::onSimTableRowChanged(int row, int column)
     if (!table) return;
     ModbusSlave *target = (table == tblSimAGV) ? simAGVDevice : simMainDevice;
     
-    QTableWidgetItem *addrItem = table->item(row, 0);
+    QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
     if (!addrItem || addrItem->text().isEmpty()) return;
     quint16 addr = (quint16)addrItem->text().toUInt();
     
-    if (column == 2) { 
-        QString valStr = table->item(row, 2)->text();
-        bool ok = false;
-        quint16 val = 0;
-        
-        QString fmt = simTableFormats.value(table).value(row, "Unsigned");
-
-        if (fmt == "32-bit Float") {
-            float f = valStr.toFloat(&ok);
-            if (ok) {
-                writeFloat32ToSlave(target, addr, f);
-                refreshSimMultiWordRows(table, row);
-            }
-        } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
-            bool ok32 = false;
-            uint32_t val32 = 0;
-            if (fmt == "32-bit Signed") val32 = (uint32_t)valStr.toInt(&ok32);
-            else val32 = valStr.toUInt(&ok32);
-
-            if (ok32) {
-                target->setRegister(addr, (quint16)(val32 >> 16));
-                target->setRegister(addr + 1, (quint16)(val32 & 0xFFFF));
-                refreshSimMultiWordRows(table, row);
-                ok = true;
-            }
-        } else if (fmt == "64-bit Float") {
-            double d = valStr.toDouble(&ok);
-            if (ok) {
-                writeFloat64ToSlave(target, addr, d);
-                refreshSimMultiWordRows(table, row);
-            }
-        } else if (fmt == "String") {
-            const int regCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
-            const QVector<quint16> encoded = encodeUtf8ToRegisters(valStr, regCount);
-            for (int i = 0; i < encoded.size(); ++i) {
-                target->setRegister(static_cast<quint16>(addr + i), encoded[i]);
-            }
-            refreshSimMultiWordRows(table, row);
-            ok = true;
-        } else {
-            // 原有的 16 位逻辑
-            if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
-                val = (quint16)valStr.toUInt(&ok, 16);
-            } else if (valStr.startsWith("0b", Qt::CaseInsensitive)) {
-                val = (quint16)valStr.mid(2).toUInt(&ok, 2);
-            } else {
-                val = (quint16)valStr.toUInt(&ok, 10);
-                if (!ok) val = (quint16)valStr.toInt(&ok, 10);
-            }
-
-            if (ok) {
-                target->setRegister(addr, val);
-                refreshSimRowDisplay(table, row);
-            }
-        }
-
-        if (!ok && fmt != "32-bit Float" && fmt != "64-bit Float" && fmt != "String" && !fmt.startsWith("32-bit")) {
-            // 如果解析失败且不是32位格式，还原显示
-            refreshSimRowDisplay(table, row);
-        }
-        
-        // 旧有的 Float 逻辑适配（如果有第4列）
+    if (column != SimRegisterCol::Value) {
+        return;
     }
-    else if (column == 3) { // Float changed
-        float f = table->item(row, 3)->text().toFloat();
-        writeFloat32ToSlave(target, addr, f);
+
+    QTableWidgetItem *valueItem = table->item(row, SimRegisterCol::Value);
+    if (!valueItem) return;
+    QString valStr = valueItem->text();
+    bool ok = false;
+    quint16 val = 0;
+    
+    QString fmt = simTableFormats.value(table).value(row, "Unsigned");
+
+    auto refreshSameAddressRows = [this, table, addr]() {
+        for (int r = 0; r < table->rowCount(); ++r) {
+            QTableWidgetItem *a = table->item(r, SimRegisterCol::Address);
+            if (a && (quint16)a->text().toUInt() == addr) {
+                refreshSimRowDisplay(table, r);
+            }
+        }
+    };
+
+    if (fmt == "32-bit Float") {
+        float f = valStr.toFloat(&ok);
+        if (ok) {
+            writeFloat32ToSlave(target, addr, f);
+            refreshSimMultiWordRows(table, row);
+            refreshSameAddressRows();
+        }
+    } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
+        bool ok32 = false;
+        uint32_t val32 = 0;
+        if (fmt == "32-bit Signed") val32 = (uint32_t)valStr.toInt(&ok32);
+        else val32 = valStr.toUInt(&ok32);
+
+        if (ok32) {
+            target->setRegister(addr, (quint16)(val32 >> 16));
+            target->setRegister(addr + 1, (quint16)(val32 & 0xFFFF));
+            refreshSimMultiWordRows(table, row);
+            refreshSameAddressRows();
+            ok = true;
+        }
+    } else if (fmt == "64-bit Float") {
+        double d = valStr.toDouble(&ok);
+        if (ok) {
+            writeFloat64ToSlave(target, addr, d);
+            refreshSimMultiWordRows(table, row);
+            refreshSameAddressRows();
+        }
+    } else if (fmt == "String") {
+        const int regCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+        const QVector<quint16> encoded = encodeUtf8ToRegisters(valStr, regCount);
+        for (int i = 0; i < encoded.size(); ++i) {
+            target->setRegister(static_cast<quint16>(addr + i), encoded[i]);
+        }
         refreshSimMultiWordRows(table, row);
+        refreshSameAddressRows();
+        ok = true;
+    } else {
+        if (valStr.startsWith("0x", Qt::CaseInsensitive)) {
+            val = (quint16)valStr.toUInt(&ok, 16);
+        } else if (valStr.startsWith("0b", Qt::CaseInsensitive)) {
+            val = (quint16)valStr.mid(2).toUInt(&ok, 2);
+        } else {
+            val = (quint16)valStr.toUInt(&ok, 10);
+            if (!ok) val = (quint16)valStr.toInt(&ok, 10);
+        }
+
+        if (ok) {
+            target->setRegister(addr, val);
+            refreshSameAddressRows();
+        }
+    }
+
+    if (!ok && fmt != "32-bit Float" && fmt != "64-bit Float" && fmt != "String" && !fmt.startsWith("32-bit")) {
+        refreshSimRowDisplay(table, row);
     }
 }
 
 void MainWindow::onSimCellDoubleClicked(int row, int column)
 {
-    if (column != 2) return;
+    if (column != SimRegisterCol::Value) return;
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
     if (!table) return;
     if (simTableFormats.value(table).value(row, QStringLiteral("Unsigned")) != QStringLiteral("Binary")) return;
@@ -7471,12 +7697,12 @@ void MainWindow::onSimShowBitEditor(QTableWidget *table, int row)
     ModbusSlave *target = (table == tblSimAGV) ? simAGVDevice : simMainDevice;
     if (!target) return;
 
-    QTableWidgetItem *addrItem = table->item(row, 0);
+    QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
     if (!addrItem || addrItem->text().isEmpty()) return;
     quint16 addr = (quint16)addrItem->text().toUInt();
     quint16 val = target->getRegister(addr);
 
-    const QTableWidgetItem *descItem = table->item(row, 1);
+    const QTableWidgetItem *descItem = table->item(row, SimRegisterCol::Description);
     const QStringList bitDescs = parseBitDescriptionsFromComment(descItem ? descItem->text() : QString());
     bool hasBitDesc = false;
     for (const QString &d : bitDescs) {
@@ -7764,7 +7990,7 @@ void MainWindow::refreshSimMultiWordRows(QTableWidget *table, int startRow)
         return;
     }
     refreshSimRowDisplay(table, startRow);
-    QTableWidgetItem *addrItem = table->item(startRow, 0);
+    QTableWidgetItem *addrItem = table->item(startRow, SimRegisterCol::Address);
     if (!addrItem || addrItem->text().isEmpty()) {
         return;
     }
@@ -7789,7 +8015,7 @@ int MainWindow::findSimRowByAddress(QTableWidget *table, quint16 addr) const
         return -1;
     }
     for (int r = 0; r < table->rowCount(); ++r) {
-        QTableWidgetItem *item = table->item(r, 0);
+        QTableWidgetItem *item = table->item(r, SimRegisterCol::Address);
         if (item && (quint16)item->text().toUInt() == addr) {
             return r;
         }
@@ -7815,7 +8041,7 @@ void MainWindow::rebuildSimRowStates(QTableWidget *table)
             continue;
         }
 
-        QTableWidgetItem *addrItem = table->item(r, 0);
+        QTableWidgetItem *addrItem = table->item(r, SimRegisterCol::Address);
         if (!addrItem || addrItem->text().isEmpty()) {
             continue;
         }
@@ -7829,16 +8055,17 @@ void MainWindow::rebuildSimRowStates(QTableWidget *table)
             setSimRowEnabled(table, subRow, false);
             simTableFormats[table].remove(subRow);
             table->blockSignals(true);
-            if (!table->item(subRow, 2)) {
-                table->setItem(subRow, 2, new QTableWidgetItem());
+            if (!table->item(subRow, SimRegisterCol::Value)) {
+                table->setItem(subRow, SimRegisterCol::Value, new QTableWidgetItem());
             }
-            table->item(subRow, 2)->setText(QString());
+            table->item(subRow, SimRegisterCol::Value)->setText(QString());
             table->blockSignals(false);
         }
     }
 
     for (int r = 0; r < table->rowCount(); ++r) {
         refreshSimRowDisplay(table, r);
+        applyRegisterMapRowStyle(table, r);
     }
 }
 
@@ -7848,15 +8075,22 @@ void MainWindow::syncSimulatorTablesFromMaps() {
         if (dst->rowCount() < src->rowCount()) dst->setRowCount(src->rowCount());
 
         for (int row = 0; row < src->rowCount(); ++row) {
-            if (!dst->item(row, 0)) dst->setItem(row, 0, new QTableWidgetItem());
-            if (!dst->item(row, 1)) dst->setItem(row, 1, new QTableWidgetItem());
-            if (!dst->item(row, 2)) dst->setItem(row, 2, new QTableWidgetItem("0"));
+            if (!dst->item(row, SimRegisterCol::Direction))
+                dst->setItem(row, SimRegisterCol::Direction, new QTableWidgetItem());
+            if (!dst->item(row, SimRegisterCol::Address))
+                dst->setItem(row, SimRegisterCol::Address, new QTableWidgetItem());
+            if (!dst->item(row, SimRegisterCol::Description))
+                dst->setItem(row, SimRegisterCol::Description, new QTableWidgetItem());
+            if (!dst->item(row, SimRegisterCol::Value))
+                dst->setItem(row, SimRegisterCol::Value, new QTableWidgetItem("0"));
 
-            QTableWidgetItem *srcAddr = src->item(row, 0);
-            QTableWidgetItem *srcCmt = src->item(row, 1);
-            QTableWidgetItem *srcFmt = src->item(row, 2);
-            dst->item(row, 0)->setText(srcAddr ? srcAddr->text() : "");
-            dst->item(row, 1)->setText(srcCmt ? srcCmt->text() : "");
+            QTableWidgetItem *srcDir = src->item(row, RegisterMapCol::Direction);
+            QTableWidgetItem *srcAddr = src->item(row, RegisterMapCol::Address);
+            QTableWidgetItem *srcCmt = src->item(row, RegisterMapCol::Comment);
+            QTableWidgetItem *srcFmt = src->item(row, RegisterMapCol::Format);
+            dst->item(row, SimRegisterCol::Direction)->setText(srcDir ? srcDir->text() : "");
+            dst->item(row, SimRegisterCol::Address)->setText(srcAddr ? srcAddr->text() : "");
+            dst->item(row, SimRegisterCol::Description)->setText(srcCmt ? srcCmt->text() : "");
 
             const QString regFmt = srcFmt ? srcFmt->text() : QString();
             if (!regFmt.trimmed().isEmpty()) {
@@ -7866,10 +8100,12 @@ void MainWindow::syncSimulatorTablesFromMaps() {
                 }
             }
 
-            Qt::ItemFlags flags0 = dst->item(row, 0)->flags();
-            Qt::ItemFlags flags1 = dst->item(row, 1)->flags();
-            dst->item(row, 0)->setFlags(flags0 & ~Qt::ItemIsEditable);
-            dst->item(row, 1)->setFlags(flags1 & ~Qt::ItemIsEditable);
+            for (int col : {SimRegisterCol::Direction, SimRegisterCol::Address, SimRegisterCol::Description}) {
+                Qt::ItemFlags flags = dst->item(row, col)->flags();
+                dst->item(row, col)->setFlags(flags & ~Qt::ItemIsEditable);
+            }
+
+            applyRegisterMapRowStyle(dst, row);
         }
 
         rebuildSimRowStates(dst);
@@ -7884,15 +8120,23 @@ void MainWindow::onRegisterTableCellClicked(int row, int column) {
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
     if(!table) return;
     
-    QTableWidgetItem *item = table->item(row, 0); // Address
-    QTableWidgetItem *formatItem = table->item(row, 2); // Format is col 2
+    QTableWidgetItem *item = table->item(row, RegisterMapCol::Address);
+    QTableWidgetItem *formatItem = table->item(row, RegisterMapCol::Format);
+    QTableWidgetItem *dirItem = table->item(row, RegisterMapCol::Direction);
+    const RegisterMapDirection dir = parseRegisterMapDirection(dirItem ? dirItem->text() : QString());
+    const bool fillRead = (dir != RegisterMapDirection::Write);
+    const bool fillWrite = (dir != RegisterMapDirection::Read);
     
     bool ok;
     if(item) {
         int addr = item->text().toInt(&ok);
         if(ok) {
-            spinReadStartAddr->setValue(addr);
-            spinWriteStartAddr->setValue(addr);
+            if (fillRead) {
+                spinReadStartAddr->setValue(addr);
+            }
+            if (fillWrite) {
+                spinWriteStartAddr->setValue(addr);
+            }
         }
     }
 
@@ -7918,13 +8162,17 @@ void MainWindow::onRegisterTableCellClicked(int row, int column) {
             readQty = 1;
         }
 
-        cmbDisplayFormat->setCurrentIndex(formatIndex);
-        cmbWriteFormat->setCurrentIndex(formatIndex);
-        spinReadQuantity->setValue(readQty);
-        spinWriteQuantity->setValue(readQty);
+        if (fillRead) {
+            cmbDisplayFormat->setCurrentIndex(formatIndex);
+            spinReadQuantity->setValue(readQty);
+        }
+        if (fillWrite) {
+            cmbWriteFormat->setCurrentIndex(formatIndex);
+            spinWriteQuantity->setValue(readQty);
+        }
     }
 
-    if (chkAutoReadOnMapClick && chkAutoReadOnMapClick->isChecked()) {
+    if (fillRead && chkAutoReadOnMapClick && chkAutoReadOnMapClick->isChecked()) {
         onReadHoldingRegistersClicked();
     }
     // Note: Writing is complex as it needs a value, so we only trigger if explicit.
@@ -7967,10 +8215,11 @@ void MainWindow::onRegisterTabChanged(int index) {
 bool MainWindow::isRegisterMapRowEmpty(const QTableWidget *table, int row) const {
     if (!table || row < 0 || row >= table->rowCount()) return true;
 
-    QString addr = table->item(row, 0) ? table->item(row, 0)->text().trimmed() : "";
-    QString cmt = table->item(row, 1) ? table->item(row, 1)->text().trimmed() : "";
-    QString regFmt = table->item(row, 2) ? table->item(row, 2)->text().trimmed() : "";
-    return addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty();
+    QString direction = table->item(row, RegisterMapCol::Direction) ? table->item(row, RegisterMapCol::Direction)->text().trimmed() : "";
+    QString addr = table->item(row, RegisterMapCol::Address) ? table->item(row, RegisterMapCol::Address)->text().trimmed() : "";
+    QString cmt = table->item(row, RegisterMapCol::Comment) ? table->item(row, RegisterMapCol::Comment)->text().trimmed() : "";
+    QString regFmt = table->item(row, RegisterMapCol::Format) ? table->item(row, RegisterMapCol::Format)->text().trimmed() : "";
+    return direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty();
 }
 
 void MainWindow::ensureRegisterMapEditableTailRow(QTableWidget *table) {
@@ -7989,13 +8238,17 @@ void MainWindow::ensureRegisterMapEditableTailRow(QTableWidget *table) {
     if (rows <= 0 || !isRegisterMapRowEmpty(table, rows - 1)) {
         int newRow = rows;
         table->insertRow(newRow);
-        table->setItem(newRow, 0, new QTableWidgetItem(""));
-        table->setItem(newRow, 1, new QTableWidgetItem(""));
-        table->setItem(newRow, 2, new QTableWidgetItem(""));
+        for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+            table->setItem(newRow, col, new QTableWidgetItem(""));
+        }
+        applyRegisterMapRowStyle(table, newRow);
     } else {
-        if (!table->item(rows - 1, 0)) table->setItem(rows - 1, 0, new QTableWidgetItem(""));
-        if (!table->item(rows - 1, 1)) table->setItem(rows - 1, 1, new QTableWidgetItem(""));
-        if (!table->item(rows - 1, 2)) table->setItem(rows - 1, 2, new QTableWidgetItem(""));
+        for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+            if (!table->item(rows - 1, col)) {
+                table->setItem(rows - 1, col, new QTableWidgetItem(""));
+            }
+        }
+        applyRegisterMapRowStyle(table, rows - 1);
     }
 
     table->blockSignals(false);
@@ -8059,6 +8312,7 @@ void MainWindow::pasteRegisterMapFromClipboard(QTableWidget *table, int startRow
     table->blockSignals(false);
 
     ensureRegisterMapEditableTailRow(table);
+    applyRegisterMapTableStyles(table);
     syncSimulatorTablesFromMaps();
 }
 
@@ -8088,9 +8342,11 @@ void MainWindow::onRegisterMapContextMenu(const QPoint &pos) {
 
 void MainWindow::onRegisterTableChanged(int row, int column) {
     Q_UNUSED(row);
-    Q_UNUSED(column);
     QTableWidget *table = qobject_cast<QTableWidget*>(sender());
     if (table) {
+        if (column == RegisterMapCol::Direction) {
+            applyRegisterMapRowStyle(table, row);
+        }
         ensureRegisterMapEditableTailRow(table);
     }
     syncSimulatorTablesFromMaps();
@@ -8104,9 +8360,11 @@ void MainWindow::saveRegisterTables() {
         settings.beginWriteArray(keyPrefix);
         for (int i = 0; i < rows; ++i) {
             settings.setArrayIndex(i);
-            QTableWidgetItem *addrItem = table->item(i, 0);
-            QTableWidgetItem *cmtItem = table->item(i, 1);
-            QTableWidgetItem *regFmtItem = table->item(i, 2);
+            QTableWidgetItem *dirItem = table->item(i, RegisterMapCol::Direction);
+            QTableWidgetItem *addrItem = table->item(i, RegisterMapCol::Address);
+            QTableWidgetItem *cmtItem = table->item(i, RegisterMapCol::Comment);
+            QTableWidgetItem *regFmtItem = table->item(i, RegisterMapCol::Format);
+            settings.setValue("direction", dirItem ? dirItem->text() : "");
             settings.setValue("addr", addrItem ? addrItem->text() : "");
             settings.setValue("cmt", cmtItem ? cmtItem->text() : "");
             settings.setValue("regfmt", regFmtItem ? regFmtItem->text() : "");
@@ -8124,28 +8382,31 @@ void MainWindow::loadRegisterTables() {
     auto loadTable = [&](QTableWidget* table, QString keyPrefix) {
         int size = settings.beginReadArray(keyPrefix);
         if (size > 0) {
-            // Adjust row count if needed, or keep fixed 50?
-            // User might want dynamic, but let's stick to max(50, size)
             if (size > table->rowCount()) table->setRowCount(size);
 
             table->blockSignals(true);
             
             for (int i = 0; i < size; ++i) {
                 settings.setArrayIndex(i);
+                QString direction = settings.value("direction").toString();
                 QString addr = settings.value("addr").toString();
                 QString cmt = settings.value("cmt").toString();
                 QString regfmt = settings.value("regfmt").toString();
                 
-                if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem());
-                if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem());
-                if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem());
+                for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+                    if (!table->item(i, col)) {
+                        table->setItem(i, col, new QTableWidgetItem());
+                    }
+                }
                 
-                table->item(i, 0)->setText(addr);
-                table->item(i, 1)->setText(cmt);
-                table->item(i, 2)->setText(regfmt);
+                table->item(i, RegisterMapCol::Direction)->setText(direction);
+                table->item(i, RegisterMapCol::Address)->setText(addr);
+                table->item(i, RegisterMapCol::Comment)->setText(cmt);
+                table->item(i, RegisterMapCol::Format)->setText(regfmt);
             }
 
             table->blockSignals(false);
+            applyRegisterMapTableStyles(table);
         }
         settings.endArray();
     };
@@ -8169,26 +8430,23 @@ void MainWindow::onExportRegisterMapClicked() {
 
     QTextStream out(&f);
     out.setGenerateByteOrderMark(true); // 保证 Excel 正常打开中文
-    out << "Tab,Address,Comment,RegisterFormat\n";
+    out << "Tab,Direction,Address,Comment,RegisterFormat\n";
 
     auto exportTable = [&](QTableWidget *table, const QString &tabName) {
         if (!table) return;
         for (int i = 0; i < table->rowCount(); ++i) {
-            QString addr = table->item(i, 0) ? table->item(i, 0)->text() : "";
-            QString cmt = table->item(i, 1) ? table->item(i, 1)->text() : "";
-            QString regFmt = table->item(i, 2) ? table->item(i, 2)->text() : "";
+            QString direction = table->item(i, RegisterMapCol::Direction) ? table->item(i, RegisterMapCol::Direction)->text() : "";
+            QString addr = table->item(i, RegisterMapCol::Address) ? table->item(i, RegisterMapCol::Address)->text() : "";
+            QString cmt = table->item(i, RegisterMapCol::Comment) ? table->item(i, RegisterMapCol::Comment)->text() : "";
+            QString regFmt = table->item(i, RegisterMapCol::Format) ? table->item(i, RegisterMapCol::Format)->text() : "";
             
-            if (addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty()) continue;
+            if (direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty()) continue;
             
-            // CSV 规范：如果内容包含逗号或双引号，需要用双引号包围，双引号需转义为两个双引号
-            if (cmt.contains(",") || cmt.contains("\"")) {
-                cmt = "\"" + cmt.replace("\"", "\"\"") + "\"";
-            }
-            if (regFmt.contains(",") || regFmt.contains("\"")) {
-                regFmt = "\"" + regFmt.replace("\"", "\"\"") + "\"";
-            }
-            
-            out << tabName << "," << addr << "," << cmt << "," << regFmt << "\n";
+            out << tabName << ","
+                << escapeRegisterMapCsvField(direction) << ","
+                << escapeRegisterMapCsvField(addr) << ","
+                << escapeRegisterMapCsvField(cmt) << ","
+                << escapeRegisterMapCsvField(regFmt) << "\n";
         }
     };
 
@@ -8210,18 +8468,49 @@ void MainWindow::onImportRegisterMapClicked() {
     }
 
     QTextStream in(&f);
-    QString header = in.readLine();
+    in.setCodec("UTF-8");
+    const QString headerLine = in.readLine();
+    const QStringList headerParts = parseRegisterMapCsvLine(headerLine);
+
+    int tabCol = 0;
+    int dirCol = -1;
+    int addrCol = 1;
+    int cmtCol = 2;
+    int fmtCol = 3;
+    bool hasHeader = false;
+
+    for (int i = 0; i < headerParts.size(); ++i) {
+        const QString h = headerParts[i].trimmed().toLower();
+        if (h == QStringLiteral("tab") || h == QStringLiteral("sheet") || h == QStringLiteral("worksheet")) {
+            tabCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("direction") || h == QStringLiteral("方向")) {
+            dirCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("address") || h == QStringLiteral("地址")) {
+            addrCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("comment") || h == QStringLiteral("注释")) {
+            cmtCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("registerformat") || h == QStringLiteral("寄存器格式")) {
+            fmtCol = i;
+            hasHeader = true;
+        }
+    }
+
+    const bool hasDirection = dirCol >= 0;
+    if (!hasHeader) {
+        dirCol = -1;
+        tabCol = 0;
+        addrCol = 1;
+        cmtCol = 2;
+        fmtCol = 3;
+    }
     
     auto clearTable = [&](QTableWidget* table) {
         table->blockSignals(true);
-        for(int i=0; i<table->rowCount(); i++) {
-            if (!table->item(i, 0)) table->setItem(i, 0, new QTableWidgetItem());
-            if (!table->item(i, 1)) table->setItem(i, 1, new QTableWidgetItem());
-            if (!table->item(i, 2)) table->setItem(i, 2, new QTableWidgetItem());
-            table->item(i, 0)->setText("");
-            table->item(i, 1)->setText("");
-            table->item(i, 2)->setText("");
-        }
+        table->setRowCount(0);
         table->blockSignals(false);
     };
 
@@ -8232,58 +8521,59 @@ void MainWindow::onImportRegisterMapClicked() {
     tabRowCounters["agv"] = 0;
     tabRowCounters["robot"] = 0;
 
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        if (line.trimmed().isEmpty()) continue;
-        
-        // 健壮的 CSV 解析逻辑
-        QStringList parts;
-        bool inQuotes = false;
-        QString field;
-        for (int i = 0; i < line.length(); ++i) {
-            QChar c = line[i];
-            if (c == '"') {
-                if (inQuotes && i + 1 < line.length() && line[i+1] == '"') {
-                    field += '"'; // 处理转义的双引号
-                    i++;
-                } else {
-                    inQuotes = !inQuotes;
-                }
-            } else if (c == ',' && !inQuotes) {
-                parts.append(field);
-                field.clear();
-            } else {
-                field += c;
+    auto importLine = [&](const QString &line) {
+        if (line.trimmed().isEmpty()) return;
+
+        const QStringList parts = parseRegisterMapCsvLine(line);
+        if (parts.size() < 3) return;
+
+        const QString tabStr = parts.value(tabCol).trimmed().toLower();
+        const QString direction = hasDirection ? parts.value(dirCol).trimmed() : QString();
+        const QString addr = parts.value(addrCol).trimmed();
+        const QString cmt = parts.value(cmtCol).trimmed();
+        QString regFmt = parts.value(fmtCol).trimmed();
+        if (regFmt.isEmpty()) {
+            regFmt = addr;
+        }
+        if (addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty() && direction.isEmpty()) {
+            return;
+        }
+
+        QTableWidget *table = (tabStr == "robot" || tabStr == QStringLiteral("机器人")) ? tblRobot : tblAGV;
+        const QString key = (tabStr == "robot" || tabStr == QStringLiteral("机器人")) ? "robot" : "agv";
+        const int row = tabRowCounters[key]++;
+
+        if (row >= table->rowCount()) {
+            table->setRowCount(row + 1);
+        }
+
+        table->blockSignals(true);
+        for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+            if (!table->item(row, col)) {
+                table->setItem(row, col, new QTableWidgetItem());
             }
         }
-        parts.append(field);
-
-        if (parts.size() < 3) continue;
-
-        QString tabStr = parts[0].trimmed().toLower();
-        QString addr = parts[1].trimmed();
-        QString cmt = parts[2].trimmed();
-        QString regFmt = parts.size() > 3 ? parts[3].trimmed() : addr;
-
-        QTableWidget *table = (tabStr == "robot" || tabStr == "机器人") ? tblRobot : tblAGV;
-        QString key = (tabStr == "robot" || tabStr == "机器人") ? "robot" : "agv";
-        int row = tabRowCounters[key]++;
-
-        if (row >= table->rowCount()) table->setRowCount(row + 1);
-        
-        table->blockSignals(true);
-        if (!table->item(row, 0)) table->setItem(row, 0, new QTableWidgetItem());
-        if (!table->item(row, 1)) table->setItem(row, 1, new QTableWidgetItem());
-        if (!table->item(row, 2)) table->setItem(row, 2, new QTableWidgetItem());
-        table->item(row, 0)->setText(addr);
-        table->item(row, 1)->setText(cmt);
-        table->item(row, 2)->setText(regFmt);
+        table->item(row, RegisterMapCol::Direction)->setText(direction);
+        table->item(row, RegisterMapCol::Address)->setText(addr);
+        table->item(row, RegisterMapCol::Comment)->setText(cmt);
+        table->item(row, RegisterMapCol::Format)->setText(regFmt);
         table->blockSignals(false);
+        applyRegisterMapRowStyle(table, row);
+    };
+
+    if (!hasHeader) {
+        importLine(headerLine);
+    }
+
+    while (!in.atEnd()) {
+        importLine(in.readLine());
     }
 
     f.close();
     ensureRegisterMapEditableTailRow(tblAGV);
     ensureRegisterMapEditableTailRow(tblRobot);
+    applyRegisterMapTableStyles(tblAGV);
+    applyRegisterMapTableStyles(tblRobot);
     saveRegisterTables();
     syncSimulatorTablesFromMaps();
     QMessageBox::information(this, "成功", "地址映射表 CSV 导入成功。");
@@ -8395,7 +8685,7 @@ void MainWindow::onSimSetFormat(const QString &format) {
 
 void MainWindow::onSimShowWaveformEditor(int row) {
     QTableWidget *table = (tabSimRegisterMaps->currentIndex() == 0) ? tblSimAGV : tblSimMain;
-    QTableWidgetItem *addrItem = table->item(row, 0);
+    QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
     if (!addrItem) return;
     int addr = addrItem->text().toInt();
 
@@ -8501,7 +8791,7 @@ void MainWindow::saveAutoScene()
         if (!dev || !table) return obj;
         QJsonObject values, formats, stringLengths;
         for (int i = 0; i < table->rowCount(); ++i) {
-            QTableWidgetItem *addrItem = table->item(i, 0);
+            QTableWidgetItem *addrItem = table->item(i, SimRegisterCol::Address);
             if (!addrItem) continue;
             bool ok;
             quint16 addr = (quint16)addrItem->text().toUInt(&ok);
@@ -8793,10 +9083,21 @@ void MainWindow::onImportStandardFileClicked()
     }
 
     struct MergedRow {
+        QString direction;
         QString address;
         QString dataType;
         QString comment;
         QString registerFormat;
+    };
+
+    auto inferDirectionFromName = [](const QString &name) -> QString {
+        if (name.contains(QStringLiteral("Read"), Qt::CaseInsensitive)) {
+            return QStringLiteral("读");
+        }
+        if (name.contains(QStringLiteral("Write"), Qt::CaseInsensitive)) {
+            return QStringLiteral("写");
+        }
+        return QString();
     };
 
     auto buildAddress = [](const QString &addrRaw, QString &finalAddr, QString &bitCommentPart) -> bool {
@@ -8869,8 +9170,11 @@ void MainWindow::onImportStandardFileClicked()
                 note = QString("%1 %2").arg(bitPart).arg(note).simplified();
             }
 
+            const QString rowDirection = inferDirectionFromName(name);
+
             if (!rowIndexByAddr.contains(finalAddr)) {
                 MergedRow mr;
+                mr.direction = rowDirection;
                 mr.address = finalAddr;
                 mr.dataType = dataType;
                 mr.comment = note;
@@ -8884,6 +9188,13 @@ void MainWindow::onImportStandardFileClicked()
                         mergedRows[idx].dataType = dataType;
                         mergedRows[idx].registerFormat = dataType;
                     }
+                    if (!mergedRows[idx].direction.isEmpty()
+                        && !rowDirection.isEmpty()
+                        && mergedRows[idx].direction != rowDirection) {
+                        mergedRows[idx].direction.clear();
+                    } else if (mergedRows[idx].direction.isEmpty()) {
+                        mergedRows[idx].direction = rowDirection;
+                    }
                     mergedRows[idx].comment = QString("%1 %2").arg(mergedRows[idx].comment).arg(note).simplified();
                 }
             }
@@ -8892,15 +9203,19 @@ void MainWindow::onImportStandardFileClicked()
         targetTable->blockSignals(true);
         targetTable->setRowCount(mergedRows.size());
         for (int i = 0; i < mergedRows.size(); ++i) {
-            if (!targetTable->item(i, 0)) targetTable->setItem(i, 0, new QTableWidgetItem());
-            if (!targetTable->item(i, 1)) targetTable->setItem(i, 1, new QTableWidgetItem());
-            if (!targetTable->item(i, 2)) targetTable->setItem(i, 2, new QTableWidgetItem());
-            targetTable->item(i, 0)->setText(mergedRows[i].address);
-            targetTable->item(i, 1)->setText(mergedRows[i].comment);
-            targetTable->item(i, 2)->setText(mergedRows[i].registerFormat);
+            for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+                if (!targetTable->item(i, col)) {
+                    targetTable->setItem(i, col, new QTableWidgetItem());
+                }
+            }
+            targetTable->item(i, RegisterMapCol::Direction)->setText(mergedRows[i].direction);
+            targetTable->item(i, RegisterMapCol::Address)->setText(mergedRows[i].address);
+            targetTable->item(i, RegisterMapCol::Comment)->setText(mergedRows[i].comment);
+            targetTable->item(i, RegisterMapCol::Format)->setText(mergedRows[i].registerFormat);
         }
         targetTable->blockSignals(false);
 
+        applyRegisterMapTableStyles(targetTable);
         ensureRegisterMapEditableTailRow(targetTable);
         return mergedRows.size();
     };

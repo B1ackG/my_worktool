@@ -1,0 +1,961 @@
+#include "inputquickermanager.h"
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QRegularExpression>
+#include <QTextStream>
+#include <QUuid>
+#include <grp.h>
+#include <pwd.h>
+#include <signal.h>
+#include <unistd.h>
+
+InputQuickerManager::InputQuickerManager(QObject *parent)
+    : QObject(parent)
+    , daemonProcess(new QProcess(this))
+    , monitorProcess(new QProcess(this))
+    , enabledValue(true)
+    , wheel2AxisValue(QStringLiteral("REL_HWHEEL"))
+    , grabDeviceValue(false)
+    , lastAppliedGrabDevice(false)
+{
+    daemonProcess->setProcessChannelMode(QProcess::MergedChannels);
+    connect(daemonProcess, &QProcess::readyReadStandardOutput, this, &InputQuickerManager::onDaemonOutput);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    connect(daemonProcess, &QProcess::errorOccurred, this, &InputQuickerManager::onDaemonError);
+    connect(monitorProcess, &QProcess::errorOccurred, this, &InputQuickerManager::onMonitorError);
+#else
+    connect(daemonProcess, QOverload<QProcess::ProcessError>::of(&QProcess::error),
+            this, &InputQuickerManager::onDaemonError);
+    connect(monitorProcess, QOverload<QProcess::ProcessError>::of(&QProcess::error),
+            this, &InputQuickerManager::onMonitorError);
+#endif
+    connect(daemonProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &InputQuickerManager::onDaemonFinished);
+
+    monitorProcess->setProcessChannelMode(QProcess::MergedChannels);
+    connect(monitorProcess, &QProcess::readyReadStandardOutput, this, &InputQuickerManager::onMonitorOutput);
+    connect(monitorProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &InputQuickerManager::onMonitorFinished);
+}
+
+InputQuickerManager::~InputQuickerManager()
+{
+    stopInputMonitor();
+    stopDaemon();
+}
+
+void InputQuickerManager::loadSettings()
+{
+    migrateLegacyConfigIfNeeded();
+    readJsonConfig();
+    emit bindingsChanged();
+    emitStatus();
+}
+
+void InputQuickerManager::saveSettings() const
+{
+    writeJsonConfig();
+}
+
+bool InputQuickerManager::applySettings()
+{
+    saveSettings();
+    emit logMessage(QStringLiteral("[快捷助手] 已保存 %1 条规则").arg(bindingsValue.size()));
+
+    if (!enabledValue || bindingsValue.isEmpty()) {
+        stopDaemon();
+        lastAppliedDevicePath.clear();
+        return true;
+    }
+
+    bool hasEnabled = false;
+    for (const QuickerBinding &binding : bindingsValue) {
+        if (binding.enabled) {
+            hasEnabled = true;
+            break;
+        }
+    }
+    if (!hasEnabled) {
+        stopDaemon();
+        lastAppliedDevicePath.clear();
+        return true;
+    }
+
+    if (isDaemonRunning() && !daemonNeedsRestart()) {
+        if (reloadDaemonViaSignal()) {
+            lastAppliedDevicePath = devicePathValue;
+            lastAppliedGrabDevice = grabDeviceValue;
+            emitStatus();
+            return true;
+        }
+    }
+
+    if (isDaemonRunning()) {
+        stopDaemon();
+    }
+    const bool started = startDaemon();
+    if (started) {
+        lastAppliedDevicePath = devicePathValue;
+        lastAppliedGrabDevice = grabDeviceValue;
+    }
+    return started;
+}
+
+bool InputQuickerManager::daemonNeedsRestart() const
+{
+    return devicePathValue != lastAppliedDevicePath
+           || grabDeviceValue != lastAppliedGrabDevice;
+}
+
+bool InputQuickerManager::reloadDaemonViaSignal()
+{
+    if (!isDaemonRunning()) {
+        return false;
+    }
+
+    const qint64 pid = daemonProcess->processId();
+    if (pid <= 0) {
+        return false;
+    }
+
+    if (::kill(static_cast<pid_t>(pid), SIGHUP) == 0) {
+        emit logMessage(QStringLiteral("[快捷助手] 配置已热加载（daemon 未重启）"));
+        return true;
+    }
+
+    emit logMessage(QStringLiteral("[快捷助手] 热加载失败，将重启 daemon"));
+    return false;
+}
+
+bool InputQuickerManager::startDaemon()
+{
+    if (isDaemonRunning()) {
+        emitStatus();
+        return true;
+    }
+
+    const QString scriptPath = daemonScriptPath();
+    if (!QFileInfo::exists(scriptPath)) {
+        emit logMessage(QStringLiteral("[快捷助手] 找不到 daemon 脚本: %1").arg(scriptPath));
+        emitStatus();
+        return false;
+    }
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("INPUT_QUICKER_CONFIG"), configFilePath());
+    daemonProcess->setProcessEnvironment(env);
+    daemonProcess->setProgram(QStringLiteral("python3"));
+    daemonProcess->setArguments(QStringList() << scriptPath);
+    daemonProcess->start();
+
+    if (!daemonProcess->waitForStarted(3000)) {
+        emit logMessage(QStringLiteral("[快捷助手] 启动失败: %1").arg(daemonProcess->errorString()));
+        emitStatus();
+        return false;
+    }
+
+    emit logMessage(QStringLiteral("[快捷助手] daemon 已启动"));
+    emitStatus();
+    return true;
+}
+
+void InputQuickerManager::stopDaemon()
+{
+    if (!isDaemonRunning()) {
+        emitStatus();
+        return;
+    }
+
+    daemonProcess->terminate();
+    if (!daemonProcess->waitForFinished(3000)) {
+        daemonProcess->kill();
+        daemonProcess->waitForFinished(1000);
+    }
+    emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+    emitStatus();
+}
+
+bool InputQuickerManager::startInputMonitor(const QString &devicePath)
+{
+    if (isMonitorRunning()) {
+        stopInputMonitor();
+    }
+
+    const QString scriptPath = monitorScriptPath();
+    if (!QFileInfo::exists(scriptPath)) {
+        emit logMessage(QStringLiteral("[快捷助手] 找不到监听脚本: %1").arg(scriptPath));
+        return false;
+    }
+
+    const QString utilsPath = deviceUtilsScriptPath();
+    if (QFileInfo::exists(utilsPath)) {
+        QProcess check;
+        QStringList checkArgs;
+        checkArgs << utilsPath;
+        if (!devicePath.isEmpty()) {
+            checkArgs << QStringLiteral("--choose") << devicePath;
+        }
+        check.start(QStringLiteral("python3"), checkArgs);
+        if (!check.waitForFinished(8000)) {
+            check.kill();
+            check.waitForFinished(1000);
+            emit logMessage(QStringLiteral("[快捷助手] 设备检测超时"));
+            return false;
+        }
+        if (check.exitCode() != 0) {
+            const QString err = formatCaptureError(
+                QString::fromLocal8Bit(check.readAllStandardError()).trimmed());
+            emit logMessage(QStringLiteral("[快捷助手] %1").arg(err));
+            return false;
+        }
+    }
+
+    QStringList args;
+    args << scriptPath << QStringLiteral("--json-lines");
+    if (!devicePath.isEmpty()) {
+        args << QStringLiteral("--device") << devicePath;
+    }
+
+    monitorLineBuffer.clear();
+    monitorProcess->setProgram(QStringLiteral("python3"));
+    monitorProcess->setArguments(args);
+    monitorProcess->start();
+
+    if (!monitorProcess->waitForStarted(3000)) {
+        emit logMessage(QStringLiteral("[快捷助手] 监听启动失败: %1").arg(monitorProcess->errorString()));
+        return false;
+    }
+
+    return true;
+}
+
+void InputQuickerManager::stopInputMonitor()
+{
+    if (!isMonitorRunning()) {
+        return;
+    }
+
+    monitorProcess->terminate();
+    if (!monitorProcess->waitForFinished(2000)) {
+        monitorProcess->kill();
+        monitorProcess->waitForFinished(1000);
+    }
+    monitorLineBuffer.clear();
+    emit monitorStopped();
+    emit logMessage(QStringLiteral("[快捷助手] 输入监听已停止"));
+}
+
+bool InputQuickerManager::isMonitorRunning() const
+{
+    return monitorProcess->state() != QProcess::NotRunning;
+}
+
+QList<InputQuickerManager::DeviceInfo> InputQuickerManager::refreshDeviceListFromProc() const
+{
+    QList<DeviceInfo> devices;
+    QFile file(QStringLiteral("/proc/bus/input/devices"));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return devices;
+    }
+
+    QTextStream stream(&file);
+    QString name;
+    QString handlers;
+    const QRegularExpression nameRegex(QStringLiteral("^N: Name=\"(.*)\""));
+    const QRegularExpression eventRegex(QStringLiteral("\\bevent\\d+\\b"));
+
+    auto flushDevice = [&]() {
+        const QRegularExpressionMatch eventMatch = eventRegex.match(handlers);
+        if (!eventMatch.hasMatch()) {
+            name.clear();
+            handlers.clear();
+            return;
+        }
+
+        DeviceInfo info;
+        info.path = QStringLiteral("/dev/input/%1").arg(eventMatch.captured(0));
+        info.name = name.isEmpty() ? info.path : name;
+        info.score = 1;
+        info.accessible = QFileInfo::exists(info.path);
+        info.recommended = false;
+        devices.append(info);
+        name.clear();
+        handlers.clear();
+    };
+
+    while (!stream.atEnd()) {
+        const QString line = stream.readLine();
+        if (line.trimmed().isEmpty()) {
+            flushDevice();
+            continue;
+        }
+
+        const QRegularExpressionMatch nameMatch = nameRegex.match(line);
+        if (nameMatch.hasMatch()) {
+            name = nameMatch.captured(1);
+        } else if (line.startsWith(QStringLiteral("H: Handlers="))) {
+            handlers = line.mid(QStringLiteral("H: Handlers=").length());
+        }
+    }
+    flushDevice();
+    return devices;
+}
+
+QList<InputQuickerManager::DeviceInfo> InputQuickerManager::refreshDeviceList() const
+{
+    const QString scriptPath = deviceUtilsScriptPath();
+    if (!QFileInfo::exists(scriptPath)) {
+        return refreshDeviceListFromProc();
+    }
+
+    QProcess process;
+    process.start(QStringLiteral("python3"),
+                  QStringList() << scriptPath << QStringLiteral("--list-json"));
+    if (!process.waitForFinished(8000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        return refreshDeviceListFromProc();
+    }
+
+    if (process.exitCode() != 0) {
+        return refreshDeviceListFromProc();
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(process.readAllStandardOutput());
+    if (!doc.isArray()) {
+        return refreshDeviceListFromProc();
+    }
+
+    QList<DeviceInfo> devices;
+    for (const QJsonValue &value : doc.array()) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = value.toObject();
+        DeviceInfo info;
+        info.path = obj.value(QStringLiteral("path")).toString();
+        info.name = obj.value(QStringLiteral("name")).toString();
+        info.score = obj.value(QStringLiteral("score")).toInt();
+        info.capsSummary = obj.value(QStringLiteral("caps_summary")).toString();
+        info.accessible = obj.value(QStringLiteral("accessible")).toBool();
+        info.recommended = obj.value(QStringLiteral("recommended")).toBool();
+        info.error = obj.value(QStringLiteral("error")).toString();
+        if (!info.path.isEmpty()) {
+            devices.append(info);
+        }
+    }
+    return devices;
+}
+
+InputQuickerEnvCheck InputQuickerManager::runEnvironmentCheck() const
+{
+    InputQuickerEnvCheck result;
+
+    {
+        QProcess process;
+        process.start(QStringLiteral("python3"),
+                      QStringList() << QStringLiteral("-c")
+                                    << QStringLiteral("import evdev; print('ok')"));
+        if (process.waitForFinished(5000) && process.exitCode() == 0) {
+            result.evdevOk = true;
+            result.messages.append(QStringLiteral("python3-evdev: 已安装"));
+        } else {
+            result.messages.append(QStringLiteral("python3-evdev: 未安装 (sudo apt install python3-evdev)"));
+        }
+    }
+
+    {
+        QProcess process;
+        process.start(QStringLiteral("which"), QStringList() << QStringLiteral("xdotool"));
+        if (process.waitForFinished(3000) && process.exitCode() == 0) {
+            result.xdotoolOk = true;
+            result.messages.append(QStringLiteral("xdotool: 已安装"));
+        } else {
+            result.messages.append(QStringLiteral("xdotool: 未安装 (sudo apt install xdotool)"));
+        }
+    }
+
+    const QList<DeviceInfo> devices = refreshDeviceList();
+    for (const DeviceInfo &device : devices) {
+        if (device.accessible) {
+            result.inputReadable = true;
+            break;
+        }
+    }
+    if (result.inputReadable) {
+        result.messages.append(QStringLiteral("/dev/input: 可读"));
+    } else if (devices.isEmpty()) {
+        result.messages.append(QStringLiteral("/dev/input: 未找到指针设备"));
+    } else {
+        result.messages.append(QStringLiteral("/dev/input: 无读取权限"));
+    }
+
+    gid_t groups[64];
+    const int groupCount = getgroups(64, groups);
+    for (int i = 0; i < groupCount; ++i) {
+        struct group *grp = getgrgid(groups[i]);
+        if (grp && QString::fromLocal8Bit(grp->gr_name) == QStringLiteral("input")) {
+            result.inInputGroup = true;
+            break;
+        }
+    }
+
+    const char *userName = qgetenv("USER").constData();
+    if (userName && *userName) {
+        struct group *inputGroup = getgrnam("input");
+        if (inputGroup && inputGroup->gr_mem) {
+            for (char **member = inputGroup->gr_mem; *member != nullptr; ++member) {
+                if (qstrcmp(*member, userName) == 0) {
+                    result.inputGroupConfigured = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (result.inInputGroup) {
+        result.messages.append(QStringLiteral("用户组: 当前会话已在 input 组"));
+    } else if (result.inputGroupConfigured) {
+        result.messages.append(
+            QStringLiteral("用户组: 已加入 input 组，但当前会话未生效（请注销并重新登录，或重启电脑）"));
+    } else {
+        result.messages.append(QStringLiteral("用户组: 未加入 input 组 (sudo usermod -aG input $USER)"));
+    }
+
+    return result;
+}
+
+QString InputQuickerManager::formatCaptureError(const QString &stderrText) const
+{
+    const QString text = stderrText.trimmed();
+    if (text.isEmpty()) {
+        return QStringLiteral("录制失败");
+    }
+    if (text.contains(QStringLiteral("no mouse device found"), Qt::CaseInsensitive)
+        || text.contains(QStringLiteral("no_device"))) {
+        return QStringLiteral("未找到鼠标设备。请先在上方选择输入设备，或点击「刷新设备」。");
+    }
+    if (text.contains(QStringLiteral("permission"), Qt::CaseInsensitive)
+        || text.contains(QStringLiteral("permission_denied"))) {
+        return QStringLiteral("无 /dev/input 读取权限。请执行: sudo usermod -aG input $USER，然后重新登录。");
+    }
+    if (text.contains(QStringLiteral("capture timeout"), Qt::CaseInsensitive)) {
+        return QStringLiteral("录制超时，请在时限内按下鼠标键或滚动滚轮。");
+    }
+    if (text.startsWith(QStringLiteral("ERROR:"))) {
+        const QString payload = text.mid(6).trimmed();
+        const int colon = payload.indexOf(QLatin1Char(':'));
+        if (colon > 0 && colon < payload.size() - 1) {
+            return payload.mid(colon + 1).trimmed();
+        }
+        return payload;
+    }
+    return text;
+}
+
+bool InputQuickerManager::isDaemonRunning() const
+{
+    return daemonProcess->state() != QProcess::NotRunning;
+}
+
+QString InputQuickerManager::statusText() const
+{
+    if (isDaemonRunning()) {
+        return QStringLiteral("运行中");
+    }
+    if (!enabledValue) {
+        return QStringLiteral("未启用");
+    }
+    return QStringLiteral("已停止");
+}
+
+QString InputQuickerManager::configFilePath() const
+{
+    return QDir::home().filePath(QStringLiteral(".config/LiChenYang/input_quicker.json"));
+}
+
+QString InputQuickerManager::scriptFallbackPath(const QString &scriptName) const
+{
+    return QFileInfo(QStringLiteral(__FILE__)).absoluteDir().filePath(QStringLiteral("scripts/") + scriptName);
+}
+
+QString InputQuickerManager::resolveScriptPath(const QString &scriptName) const
+{
+    const QStringList candidates = {
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("scripts/") + scriptName),
+        QDir(QDir::currentPath()).filePath(QStringLiteral("scripts/") + scriptName),
+        scriptFallbackPath(scriptName)
+    };
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return candidates.constLast();
+}
+
+QString InputQuickerManager::daemonScriptPath() const
+{
+    return resolveScriptPath(QStringLiteral("input_quicker_daemon.py"));
+}
+
+QString InputQuickerManager::captureScriptPath() const
+{
+    return resolveScriptPath(QStringLiteral("capture_input_trigger.py"));
+}
+
+QString InputQuickerManager::monitorScriptPath() const
+{
+    return resolveScriptPath(QStringLiteral("monitor_input_device.py"));
+}
+
+QString InputQuickerManager::deviceUtilsScriptPath() const
+{
+    return resolveScriptPath(QStringLiteral("input_device_utils.py"));
+}
+
+bool InputQuickerManager::enabled() const
+{
+    return enabledValue;
+}
+
+QString InputQuickerManager::devicePath() const
+{
+    return devicePathValue;
+}
+
+QString InputQuickerManager::wheel2Axis() const
+{
+    return wheel2AxisValue;
+}
+
+bool InputQuickerManager::grabDevice() const
+{
+    return grabDeviceValue;
+}
+
+QList<QuickerBinding> InputQuickerManager::bindings() const
+{
+    return bindingsValue;
+}
+
+void InputQuickerManager::setEnabled(bool enabled)
+{
+    enabledValue = enabled;
+}
+
+void InputQuickerManager::setDevicePath(const QString &path)
+{
+    devicePathValue = path;
+}
+
+void InputQuickerManager::setWheel2Axis(const QString &axis)
+{
+    wheel2AxisValue = axis.isEmpty() ? QStringLiteral("REL_HWHEEL") : axis;
+}
+
+void InputQuickerManager::setGrabDevice(bool grab)
+{
+    grabDeviceValue = grab;
+}
+
+void InputQuickerManager::setBindings(const QList<QuickerBinding> &bindings)
+{
+    bindingsValue = bindings;
+    emit bindingsChanged();
+}
+
+void InputQuickerManager::addBinding(const QuickerBinding &binding)
+{
+    bindingsValue.append(binding);
+    emit bindingsChanged();
+}
+
+bool InputQuickerManager::updateBinding(const QuickerBinding &binding)
+{
+    for (int i = 0; i < bindingsValue.size(); ++i) {
+        if (bindingsValue.at(i).id == binding.id) {
+            bindingsValue[i] = binding;
+            emit bindingsChanged();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool InputQuickerManager::removeBinding(const QString &id)
+{
+    for (int i = 0; i < bindingsValue.size(); ++i) {
+        if (bindingsValue.at(i).id == id) {
+            bindingsValue.removeAt(i);
+            emit bindingsChanged();
+            return true;
+        }
+    }
+    return false;
+}
+
+QuickerBinding InputQuickerManager::bindingById(const QString &id) const
+{
+    for (const QuickerBinding &binding : bindingsValue) {
+        if (binding.id == id) {
+            return binding;
+        }
+    }
+    return {};
+}
+
+bool InputQuickerManager::isTriggerUsed(const QJsonObject &trigger, const QString &excludeId) const
+{
+    const QString type = trigger.value(QStringLiteral("type")).toString();
+    const QString code = trigger.value(QStringLiteral("code")).toString();
+    const QString axis = trigger.value(QStringLiteral("axis")).toString();
+    const QString direction = trigger.value(QStringLiteral("direction")).toString();
+
+    for (const QuickerBinding &binding : bindingsValue) {
+        if (!excludeId.isEmpty() && binding.id == excludeId) {
+            continue;
+        }
+        const QJsonObject existing = binding.trigger;
+        if (existing.value(QStringLiteral("type")).toString() != type) {
+            continue;
+        }
+        if (type == QStringLiteral("mouse_button")
+            && existing.value(QStringLiteral("code")).toString() == code) {
+            return true;
+        }
+        if (type == QStringLiteral("wheel")
+            && existing.value(QStringLiteral("axis")).toString() == axis
+            && existing.value(QStringLiteral("direction")).toString() == direction) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QList<QuickerBinding> InputQuickerManager::defaultWorkspaceBindings() const
+{
+    QList<QuickerBinding> defaults;
+
+    auto makeBinding = [](const QString &id, const QString &name, const QJsonObject &trigger,
+                          const QString &preset) {
+        QuickerBinding binding;
+        binding.id = id;
+        binding.name = name;
+        binding.enabled = true;
+        binding.trigger = trigger;
+        binding.action = QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("preset")},
+            {QStringLiteral("preset"), preset}
+        };
+        return binding;
+    };
+
+    defaults.append(makeBinding(
+        QStringLiteral("default-side-prev"),
+        QStringLiteral("上一工作区"),
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
+                    {QStringLiteral("code"), QStringLiteral("BTN_SIDE")}},
+        QStringLiteral("workspace_prev")));
+
+    defaults.append(makeBinding(
+        QStringLiteral("default-side-next"),
+        QStringLiteral("下一工作区"),
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
+                    {QStringLiteral("code"), QStringLiteral("BTN_EXTRA")}},
+        QStringLiteral("workspace_next")));
+
+    defaults.append(makeBinding(
+        QStringLiteral("default-hwheel-prev"),
+        QStringLiteral("第二滚轮上一工作区"),
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("wheel")},
+                    {QStringLiteral("axis"), wheel2AxisValue},
+                    {QStringLiteral("direction"), QStringLiteral("negative")}},
+        QStringLiteral("workspace_prev")));
+
+    defaults.append(makeBinding(
+        QStringLiteral("default-hwheel-next"),
+        QStringLiteral("第二滚轮下一工作区"),
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("wheel")},
+                    {QStringLiteral("axis"), wheel2AxisValue},
+                    {QStringLiteral("direction"), QStringLiteral("positive")}},
+        QStringLiteral("workspace_next")));
+
+    return defaults;
+}
+
+void InputQuickerManager::importDefaultWorkspaceBindings()
+{
+    const QList<QuickerBinding> defaults = defaultWorkspaceBindings();
+    for (const QuickerBinding &binding : defaults) {
+        if (!isTriggerUsed(binding.trigger)) {
+            bindingsValue.append(binding);
+        }
+    }
+    emit bindingsChanged();
+}
+
+bool InputQuickerManager::captureTrigger(const QString &devicePath, int timeoutMs,
+                                         QJsonObject &triggerOut, QString &errorOut)
+{
+    const QString scriptPath = captureScriptPath();
+    if (!QFileInfo::exists(scriptPath)) {
+        errorOut = QStringLiteral("找不到录制脚本: %1").arg(scriptPath);
+        return false;
+    }
+
+    QProcess process;
+    QStringList args;
+    args << scriptPath;
+    if (!devicePath.isEmpty()) {
+        args << QStringLiteral("--device") << devicePath;
+    }
+    args << QStringLiteral("--timeout") << QString::number(qMax(1000, timeoutMs) / 1000.0, 'f', 1);
+    process.start(QStringLiteral("python3"), args);
+    if (!process.waitForFinished(timeoutMs + 2000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        errorOut = QStringLiteral("录制超时，请在时限内按下鼠标键或滚动滚轮。");
+        return false;
+    }
+
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+    const QString stderrText = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+    if (process.exitCode() != 0) {
+        errorOut = formatCaptureError(stderrText);
+        return false;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(output.toUtf8());
+    if (!doc.isObject()) {
+        errorOut = QStringLiteral("录制结果无效: %1").arg(output);
+        return false;
+    }
+
+    triggerOut = doc.object();
+    return true;
+}
+
+void InputQuickerManager::onDaemonOutput()
+{
+    const QString output = QString::fromLocal8Bit(daemonProcess->readAllStandardOutput()).trimmed();
+    if (output.isEmpty()) {
+        return;
+    }
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        emit logMessage(QStringLiteral("[快捷助手] %1").arg(line.trimmed()));
+    }
+}
+
+void InputQuickerManager::onDaemonError(QProcess::ProcessError error)
+{
+    Q_UNUSED(error)
+    emit logMessage(QStringLiteral("[快捷助手] 进程错误: %1").arg(daemonProcess->errorString()));
+    emitStatus();
+}
+
+void InputQuickerManager::onDaemonFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (exitStatus == QProcess::CrashExit) {
+        emit logMessage(QStringLiteral("[快捷助手] daemon 异常退出"));
+    } else {
+        emit logMessage(QStringLiteral("[快捷助手] daemon 退出，代码: %1").arg(exitCode));
+    }
+    emitStatus();
+}
+
+void InputQuickerManager::onMonitorOutput()
+{
+    monitorLineBuffer += QString::fromLocal8Bit(monitorProcess->readAllStandardOutput());
+    int newlineIndex = monitorLineBuffer.indexOf(QLatin1Char('\n'));
+    while (newlineIndex >= 0) {
+        const QString line = monitorLineBuffer.left(newlineIndex).trimmed();
+        monitorLineBuffer.remove(0, newlineIndex + 1);
+        newlineIndex = monitorLineBuffer.indexOf(QLatin1Char('\n'));
+
+        if (line.isEmpty()) {
+            continue;
+        }
+
+        if (line.startsWith(QStringLiteral("ERROR:"))) {
+            emit logMessage(QStringLiteral("[快捷助手] %1").arg(formatCaptureError(line)));
+            continue;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8());
+        if (!doc.isObject()) {
+            emit logMessage(QStringLiteral("[监听] %1").arg(line));
+            continue;
+        }
+
+        const QJsonObject obj = doc.object();
+        const QString eventType = obj.value(QStringLiteral("event")).toString();
+        if (eventType == QStringLiteral("started")) {
+            emit monitorStarted(obj.value(QStringLiteral("path")).toString(),
+                                obj.value(QStringLiteral("name")).toString());
+            continue;
+        }
+        if (eventType == QStringLiteral("stopped")) {
+            continue;
+        }
+
+        emit monitorEventReceived(obj);
+    }
+}
+
+void InputQuickerManager::onMonitorError(QProcess::ProcessError error)
+{
+    Q_UNUSED(error)
+    emit logMessage(QStringLiteral("[快捷助手] 监听错误: %1").arg(monitorProcess->errorString()));
+}
+
+void InputQuickerManager::onMonitorFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitStatus)
+    if (exitCode != 0) {
+        emit logMessage(QStringLiteral("[快捷助手] 输入监听已停止（退出代码 %1）").arg(exitCode));
+    } else {
+        emit logMessage(QStringLiteral("[快捷助手] 输入监听已停止"));
+    }
+    emit monitorStopped();
+}
+
+void InputQuickerManager::emitStatus()
+{
+    emit statusChanged(statusText());
+}
+
+QuickerBinding InputQuickerManager::bindingFromJson(const QJsonObject &obj) const
+{
+    QuickerBinding binding;
+    binding.id = obj.value(QStringLiteral("id")).toString();
+    binding.name = obj.value(QStringLiteral("name")).toString();
+    binding.enabled = obj.value(QStringLiteral("enabled")).toBool(true);
+    binding.trigger = obj.value(QStringLiteral("trigger")).toObject();
+    binding.action = obj.value(QStringLiteral("action")).toObject();
+    if (binding.id.isEmpty()) {
+        binding.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    return binding;
+}
+
+QJsonObject InputQuickerManager::bindingToJson(const QuickerBinding &binding) const
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("id"), binding.id);
+    obj.insert(QStringLiteral("name"), binding.name);
+    obj.insert(QStringLiteral("enabled"), binding.enabled);
+    obj.insert(QStringLiteral("trigger"), binding.trigger);
+    obj.insert(QStringLiteral("action"), binding.action);
+    return obj;
+}
+
+void InputQuickerManager::writeJsonConfig() const
+{
+    QFileInfo info(configFilePath());
+    QDir().mkpath(info.absolutePath());
+
+    QJsonArray bindingsArray;
+    for (const QuickerBinding &binding : bindingsValue) {
+        bindingsArray.append(bindingToJson(binding));
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("devicePath"), devicePathValue);
+    root.insert(QStringLiteral("wheel2Axis"), wheel2AxisValue);
+    root.insert(QStringLiteral("enabled"), enabledValue);
+    root.insert(QStringLiteral("grabDevice"), grabDeviceValue);
+    root.insert(QStringLiteral("bindings"), bindingsArray);
+
+    QFile file(configFilePath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        emit const_cast<InputQuickerManager *>(this)->logMessage(
+            QStringLiteral("[快捷助手] 写入配置失败: %1").arg(file.errorString()));
+        return;
+    }
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+}
+
+void InputQuickerManager::readJsonConfig()
+{
+    QFile file(configFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        bindingsValue = defaultWorkspaceBindings();
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) {
+        bindingsValue = defaultWorkspaceBindings();
+        return;
+    }
+
+    const QJsonObject root = doc.object();
+    devicePathValue = root.value(QStringLiteral("devicePath")).toString();
+    wheel2AxisValue = root.value(QStringLiteral("wheel2Axis")).toString(QStringLiteral("REL_HWHEEL"));
+    enabledValue = root.value(QStringLiteral("enabled")).toBool(true);
+    grabDeviceValue = root.value(QStringLiteral("grabDevice")).toBool(false);
+
+    bindingsValue.clear();
+    const QJsonArray bindingsArray = root.value(QStringLiteral("bindings")).toArray();
+    for (const QJsonValue &value : bindingsArray) {
+        if (!value.isObject()) {
+            continue;
+        }
+        bindingsValue.append(bindingFromJson(value.toObject()));
+    }
+    if (bindingsValue.isEmpty()) {
+        bindingsValue = defaultWorkspaceBindings();
+    }
+}
+
+void InputQuickerManager::migrateLegacyConfigIfNeeded()
+{
+    const QString newPath = configFilePath();
+    if (QFileInfo::exists(newPath)) {
+        return;
+    }
+
+    const QString legacyPath = QDir::home().filePath(QStringLiteral(".config/LiChenYang/workspace_mouse.json"));
+    if (!QFileInfo::exists(legacyPath)) {
+        return;
+    }
+
+    QFile legacyFile(legacyPath);
+    if (!legacyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return;
+    }
+
+    const QJsonDocument legacyDoc = QJsonDocument::fromJson(legacyFile.readAll());
+    if (!legacyDoc.isObject()) {
+        return;
+    }
+
+    const QJsonObject legacy = legacyDoc.object();
+    devicePathValue = legacy.value(QStringLiteral("devicePath")).toString();
+    wheel2AxisValue = legacy.value(QStringLiteral("wheel2Axis")).toString(QStringLiteral("REL_HWHEEL"));
+    enabledValue = true;
+    bindingsValue.clear();
+
+    const QList<QuickerBinding> defaults = defaultWorkspaceBindings();
+    if (legacy.value(QStringLiteral("sideButtonsEnabled")).toBool(true)) {
+        bindingsValue.append(defaults.at(0));
+        bindingsValue.append(defaults.at(1));
+    }
+    if (legacy.value(QStringLiteral("wheel2Enabled")).toBool(false)) {
+        bindingsValue.append(defaults.at(2));
+        bindingsValue.append(defaults.at(3));
+    }
+    if (bindingsValue.isEmpty()) {
+        bindingsValue = defaultWorkspaceBindings();
+    }
+
+    writeJsonConfig();
+    emit logMessage(QStringLiteral("[快捷助手] 已从旧版 workspace_mouse.json 迁移配置"));
+}

@@ -258,6 +258,7 @@ private:
     QWidget *simulatorPageWidget;
     QWidget *tcpAssistantPageWidget;
     QWidget *performancePageWidget;
+    QWidget *inputQuickerPageWidget;
     QWidget *lifeAssistantPageWidget;
 
     // --- Modbus Widgets ---
@@ -273,6 +274,8 @@ private:
     QCheckBox *chkAutoReadOnMapClick;
     QCheckBox *chkAutoWriteOnMapClick;
     void setupRegisterTable(QTableWidget *table);
+    void applyRegisterMapRowStyle(QTableWidget *table, int row);
+    void applyRegisterMapTableStyles(QTableWidget *table);
     void onRegisterTableCellClicked(int row, int column);
     void onRegisterTabChanged(int index);   // Tab switch handler
     void onRegisterTableChanged(int row, int column); // Auto-save handler

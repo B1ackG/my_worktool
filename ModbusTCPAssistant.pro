@@ -14,16 +14,34 @@ SOURCES += \
     mainwindow.cpp \
     modbusslave.cpp \
     lifeassistantwidget.cpp \
-    ruledialog.cpp
+    ruledialog.cpp \
+    inputquickermanager.cpp \
+    inputquickerwidget.cpp \
+    quickerbindingdialog.cpp \
+    quickerkeyboardutils.cpp \
+    keyboardsteprow.cpp
 
 HEADERS += \
     mainwindow.h \
     modbusslave.h \
     lifeassistantwidget.h \
     capturewindow.h \
-    ruledialog.h
+    ruledialog.h \
+    inputquickermanager.h \
+    inputquickerwidget.h \
+    quickerbindingdialog.h \
+    quickerkeyboardutils.h \
+    keyboardsteprow.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
+
+scripts.files = \
+    scripts/input_device_utils.py \
+    scripts/monitor_input_device.py \
+    scripts/capture_input_trigger.py \
+    scripts/input_quicker_daemon.py
+scripts.path = $${target.path}/scripts
+INSTALLS += scripts
