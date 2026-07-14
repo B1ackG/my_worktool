@@ -5,6 +5,7 @@
 #include <QInputDialog>
 #include <QDateTime>
 #include <QDate>
+#include <QTime>
 #include <QDataStream>
 #include <QDebug>
 #include <QIntValidator>
@@ -557,11 +558,19 @@ MainWindow::MainWindow(QWidget *parent)
     loadConnectionHistory();
     loadGitHistory();
     loadGitDiffReminderSettings();
+    loadGitNetworkSettings();
     QTimer::singleShot(0, this, &MainWindow::deferredGitRepoInit);
     loadModbusFloatOrderSettings();
     loadRegisterTables();
     loadAutoScene(); // 自动加载上次保存的寄存器设置、格式和波形
     syncSimulatorTablesFromMaps();
+
+    dailyReportAutoSaveTimer = new QTimer(this);
+    dailyReportAutoSaveTimer->setInterval(60 * 1000);
+    connect(dailyReportAutoSaveTimer, &QTimer::timeout, this, &MainWindow::onDailyReportAutoSaveTick);
+    dailyReportAutoSaveTimer->start();
+    // 稍晚检查，给节假日助手 API 留出时间更新 isWorkdayToday
+    QTimer::singleShot(8000, this, &MainWindow::onDailyReportAutoSaveTick);
 
     connect(simMainDevice, &ModbusSlave::clientConnected, this, [this](){
         int count = simMainDevice->clientCount();
@@ -862,6 +871,21 @@ void MainWindow::createWidgets()
     btnGitRemoveHistory = new QPushButton("删除记忆");
     btnGitRemoveHistory->setToolTip("从记忆列表中移除当前选中的仓库路径（不删除磁盘目录）");
 
+    tblGitRepoMeta = new QTableWidget();
+    tblGitRepoMeta->setColumnCount(3);
+    tblGitRepoMeta->setHorizontalHeaderLabels(
+        QStringList() << QStringLiteral("路径") << QStringLiteral("中文名") << QStringLiteral("主项目"));
+    tblGitRepoMeta->horizontalHeader()->setStretchLastSection(false);
+    tblGitRepoMeta->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    tblGitRepoMeta->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    tblGitRepoMeta->setColumnWidth(2, 64);
+    tblGitRepoMeta->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblGitRepoMeta->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+    tblGitRepoMeta->verticalHeader()->setVisible(false);
+    tblGitRepoMeta->setMinimumHeight(80);
+    tblGitRepoMeta->setMaximumHeight(160);
+    tblGitRepoMeta->setToolTip(QStringLiteral("为各记忆路径设置日报中文名；勾选「主项目」后复制到日报时填入该仓库的工作目标与完成度"));
+
     tblGitGoals = new QTableWidget();
     tblGitGoals->setColumnCount(10);
     tblGitGoals->setHorizontalHeaderLabels(
@@ -916,6 +940,19 @@ void MainWindow::createWidgets()
     btnGitDiff = new QPushButton("git diff (差异)");
     btnGitDiff->setToolTip("显示工作区与暂存区的差异");
     btnGitFetch = new QPushButton("git fetch --prune (同步远端)");
+    chkGitAutoFetch = new QCheckBox(QStringLiteral("换仓库时自动 fetch"));
+    chkGitAutoFetch->setChecked(false);
+    chkGitAutoFetch->setToolTip(QStringLiteral("开启后，切换记忆路径时会自动执行 git fetch。代理异常时建议关闭。"));
+    lblGitNetworkStatus = new QLabel();
+    lblGitNetworkStatus->setVisible(false);
+    barGitNetworkBusy = new QProgressBar();
+    barGitNetworkBusy->setRange(0, 0);
+    barGitNetworkBusy->setTextVisible(false);
+    barGitNetworkBusy->setFixedHeight(14);
+    barGitNetworkBusy->setVisible(false);
+    btnGitCancelNetwork = new QPushButton(QStringLiteral("取消通讯"));
+    btnGitCancelNetwork->setEnabled(false);
+    btnGitCancelNetwork->setToolTip(QStringLiteral("中断当前进行中的 git 远程通讯（fetch/pull/push）"));
     btnGitStash = new QPushButton("git stash (临时存档)");
     btnGitStashPop = new QPushButton("git stash pop (恢复临存)");
     btnGitSetDiffRule = new QPushButton("设置Diff提醒标准");
@@ -1221,6 +1258,9 @@ QWidget* MainWindow::createGitPage()
     layRepo->addWidget(btnGitSelectDir);
     layRepo->addWidget(btnGitRemoveHistory);
     layRepoVBox->addLayout(layRepo);
+    layRepoVBox->addWidget(chkGitAutoFetch);
+    layRepoVBox->addWidget(new QLabel(QStringLiteral("日报路径配置:")));
+    layRepoVBox->addWidget(tblGitRepoMeta);
     grpRepo->setLayout(layRepoVBox);
     layout->addWidget(grpRepo);
 
@@ -1366,6 +1406,11 @@ QWidget* MainWindow::createGitPage()
     // 3. Log Output
     QGroupBox *grpLog = new QGroupBox("Git 输出");
     QVBoxLayout *layLog = new QVBoxLayout();
+    QHBoxLayout *layNetBusy = new QHBoxLayout();
+    layNetBusy->addWidget(lblGitNetworkStatus, 1);
+    layNetBusy->addWidget(barGitNetworkBusy, 2);
+    layNetBusy->addWidget(btnGitCancelNetwork);
+    layLog->addLayout(layNetBusy);
     layLog->addWidget(txtGitLog);
     grpLog->setLayout(layLog);
     layout->addWidget(grpLog);
@@ -1772,6 +1817,14 @@ void MainWindow::createConnections()
     // Git Connections
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
     connect(btnGitRemoveHistory, &QPushButton::clicked, this, &MainWindow::onGitRemoveHistoryClicked);
+    connect(tblGitRepoMeta, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *item) {
+        if (gitRepoMetaRefreshing || !item || item->column() != 1)
+            return;
+        const QTableWidgetItem *pathItem = tblGitRepoMeta->item(item->row(), 0);
+        if (!pathItem)
+            return;
+        saveGitRepoAlias(pathItem->data(Qt::UserRole).toString(), item->text());
+    });
     connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
     connect(cmbGitBranches, &QComboBox::currentTextChanged, this, &MainWindow::onGitBranchSelectionChanged);
     connect(btnGitGoalAdd, &QPushButton::clicked, this, &MainWindow::onGitGoalAddClicked);
@@ -1779,7 +1832,9 @@ void MainWindow::createConnections()
     connect(btnGitGoalDelete, &QPushButton::clicked, this, &MainWindow::onGitGoalDeleteClicked);
     connect(btnGitGoalStart, &QPushButton::clicked, this, &MainWindow::onGitGoalStartClicked);
     connect(tblGitGoals, &QTableWidget::cellDoubleClicked, this, &MainWindow::onGitGoalRowDoubleClicked);
-    connect(btnGitRefreshBranches, &QPushButton::clicked, this, &MainWindow::onGitRefreshBranchesClicked);
+    connect(btnGitRefreshBranches, &QPushButton::clicked, this, [this]() {
+        onGitRefreshBranchesClicked(false);
+    });
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
     connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
     connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
@@ -1802,6 +1857,8 @@ void MainWindow::createConnections()
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
+    connect(btnGitCancelNetwork, &QPushButton::clicked, this, &MainWindow::onGitCancelNetworkClicked);
+    connect(chkGitAutoFetch, &QCheckBox::toggled, this, &MainWindow::onGitAutoFetchToggled);
     connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
     connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
     connect(btnGitSetDiffRule, &QPushButton::clicked, this, &MainWindow::onGitSetDiffRuleClicked);
@@ -3564,6 +3621,231 @@ bool MainWindow::runGitCommand(const QStringList &args) {
     return process.exitCode() == 0;
 }
 
+bool MainWindow::isGitAutoFetchEnabled() const
+{
+    return chkGitAutoFetch && chkGitAutoFetch->isChecked();
+}
+
+void MainWindow::loadGitNetworkSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("gitNetwork"));
+    gitAutoFetchEnabled = settings.value(QStringLiteral("autoFetch"), false).toBool();
+    settings.endGroup();
+
+    if (chkGitAutoFetch) {
+        chkGitAutoFetch->blockSignals(true);
+        chkGitAutoFetch->setChecked(gitAutoFetchEnabled);
+        chkGitAutoFetch->blockSignals(false);
+    }
+}
+
+void MainWindow::saveGitNetworkSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("gitNetwork"));
+    settings.setValue(QStringLiteral("autoFetch"), gitAutoFetchEnabled);
+    settings.endGroup();
+}
+
+void MainWindow::onGitAutoFetchToggled(bool checked)
+{
+    gitAutoFetchEnabled = checked;
+    saveGitNetworkSettings();
+    txtGitLog->append(checked
+                          ? QStringLiteral("<font color='gray'>[Git] 已开启：换仓库时自动 fetch。</font>")
+                          : QStringLiteral("<font color='gray'>[Git] 已关闭自动 fetch（推荐代理异常时使用）。</font>"));
+}
+
+void MainWindow::setGitNetworkBusy(bool busy, const QString &statusText)
+{
+    gitNetworkBusy = busy;
+
+    if (lblGitNetworkStatus) {
+        lblGitNetworkStatus->setText(statusText);
+        lblGitNetworkStatus->setVisible(busy && !statusText.isEmpty());
+    }
+    if (barGitNetworkBusy) {
+        barGitNetworkBusy->setVisible(busy);
+    }
+    if (btnGitCancelNetwork) {
+        btnGitCancelNetwork->setEnabled(busy);
+    }
+
+    const bool enableNetBtns = !busy;
+    if (btnGitFetch) btnGitFetch->setEnabled(enableNetBtns);
+    if (btnGitPush) btnGitPush->setEnabled(enableNetBtns);
+    if (btnGitPull) btnGitPull->setEnabled(enableNetBtns);
+}
+
+void MainWindow::onGitCancelNetworkClicked()
+{
+    if (!gitNetworkBusy) {
+        return;
+    }
+
+    gitNetworkUserCancelled = true;
+    if (gitNetworkTimeout) {
+        gitNetworkTimeout->stop();
+    }
+    if (gitNetworkProcess && gitNetworkProcess->state() != QProcess::NotRunning) {
+        gitNetworkProcess->kill();
+    }
+    txtGitLog->append(QStringLiteral("<font color='orange'>[Git] 已跳过 git 通讯。</font>"));
+}
+
+void MainWindow::finishGitNetworkCommand(bool ok, const QString &stdoutText, const QString &stderrText)
+{
+    if (!gitNetworkBusy) {
+        return;
+    }
+
+    if (gitNetworkTimeout) {
+        gitNetworkTimeout->stop();
+    }
+
+    if (!stdoutText.isEmpty()) {
+        txtGitLog->append(stdoutText);
+    }
+    if (!stderrText.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>").arg(stderrText));
+    }
+    txtGitLog->moveCursor(QTextCursor::End);
+
+    const bool wasCancelled = gitNetworkUserCancelled;
+    const bool wasTimedOut = gitNetworkTimedOut;
+    auto done = gitNetworkDoneCallback;
+    gitNetworkDoneCallback = {};
+    gitNetworkUserCancelled = false;
+    gitNetworkTimedOut = false;
+
+    if (gitNetworkProcess) {
+        gitNetworkProcess->disconnect(this);
+        gitNetworkProcess->deleteLater();
+        gitNetworkProcess = nullptr;
+    }
+
+    setGitNetworkBusy(false);
+
+    if (done) {
+        done(ok);
+    }
+
+    if (!ok && !wasCancelled) {
+        const QString reason = wasTimedOut
+                                   ? QStringLiteral("git 远程通讯超时（可能受系统代理/虚拟网卡影响）。")
+                                   : QStringLiteral("git 远程通讯失败。");
+        offerGitNetworkRetry(reason);
+    }
+}
+
+void MainWindow::offerGitNetworkRetry(const QString &reason)
+{
+    if (gitNetworkLastArgs.isEmpty()) {
+        return;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("Git 通讯"));
+    box.setText(reason);
+    box.setInformativeText(QStringLiteral("是否重试？也可跳过并继续使用本地仓库。"));
+    QPushButton *retryBtn = box.addButton(QStringLiteral("重试"), QMessageBox::AcceptRole);
+    QPushButton *skipBtn = box.addButton(QStringLiteral("跳过"), QMessageBox::RejectRole);
+    box.setDefaultButton(skipBtn);
+    box.exec();
+
+    if (box.clickedButton() == retryBtn) {
+        const QStringList args = gitNetworkLastArgs;
+        const int timeoutMs = gitNetworkLastTimeoutMs;
+        const auto done = gitNetworkLastDoneCallback;
+        runGitNetworkCommand(args, timeoutMs, done);
+    } else {
+        txtGitLog->append(QStringLiteral("<font color='gray'>[Git] 已跳过此次远程通讯。</font>"));
+    }
+}
+
+void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
+                                      const std::function<void(bool ok)> &done)
+{
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择Git仓库目录!</font>"));
+        if (done) {
+            done(false);
+        }
+        return;
+    }
+
+    if (gitNetworkBusy) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>[Git] 已有远程通讯进行中，请先等待或点「取消通讯」。</font>"));
+        return;
+    }
+
+    gitNetworkLastArgs = args;
+    gitNetworkLastTimeoutMs = timeoutMs;
+    gitNetworkLastDoneCallback = done;
+    gitNetworkDoneCallback = done;
+    gitNetworkUserCancelled = false;
+    gitNetworkTimedOut = false;
+
+    if (!gitNetworkTimeout) {
+        gitNetworkTimeout = new QTimer(this);
+        gitNetworkTimeout->setSingleShot(true);
+        connect(gitNetworkTimeout, &QTimer::timeout, this, [this]() {
+            if (!gitNetworkBusy || !gitNetworkProcess) {
+                return;
+            }
+            gitNetworkTimedOut = true;
+            txtGitLog->append(QStringLiteral("<font color='red'>[Git] 远程通讯超时，正在中断…</font>"));
+            if (gitNetworkProcess->state() != QProcess::NotRunning) {
+                gitNetworkProcess->kill();
+            }
+        });
+    }
+
+    gitNetworkProcess = new QProcess(this);
+    gitNetworkProcess->setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    gitNetworkProcess->setProgram(QStringLiteral("git.exe"));
+#else
+    gitNetworkProcess->setProgram(QStringLiteral("git"));
+#endif
+    gitNetworkProcess->setArguments(args);
+
+    txtGitLog->append(QStringLiteral("<font color='cyan'>$ git %1</font>").arg(args.join(QLatin1Char(' '))));
+    setGitNetworkBusy(true, QStringLiteral("正在 git %1 …").arg(args.join(QLatin1Char(' '))));
+
+    connect(gitNetworkProcess,
+            static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this,
+            [this](int exitCode, QProcess::ExitStatus) {
+#ifdef Q_OS_WIN
+                const QString out = QString::fromUtf8(gitNetworkProcess ? gitNetworkProcess->readAllStandardOutput()
+                                                                       : QByteArray());
+                const QString err = QString::fromUtf8(gitNetworkProcess ? gitNetworkProcess->readAllStandardError()
+                                                                       : QByteArray());
+#else
+                const QString out = QString::fromLocal8Bit(gitNetworkProcess ? gitNetworkProcess->readAllStandardOutput()
+                                                                            : QByteArray());
+                const QString err = QString::fromLocal8Bit(gitNetworkProcess ? gitNetworkProcess->readAllStandardError()
+                                                                            : QByteArray());
+#endif
+                const bool ok = !gitNetworkUserCancelled && !gitNetworkTimedOut && exitCode == 0;
+                finishGitNetworkCommand(ok, out, err);
+            });
+
+    connect(gitNetworkProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            txtGitLog->append(QStringLiteral("<font color='red'>错误: 无法启动git命令，请检查是否安装了git</font>"));
+            finishGitNetworkCommand(false, QString(), QString());
+        }
+    });
+
+    gitNetworkTimeout->start(qMax(1000, timeoutMs));
+    gitNetworkProcess->start();
+}
+
 bool MainWindow::gitHasUncommittedChanges(const QString &workDir) const {
     QProcess process;
     process.setWorkingDirectory(workDir);
@@ -3590,17 +3872,21 @@ bool MainWindow::gitHasUncommittedChanges(const QString &workDir) const {
 void MainWindow::onGitRefreshBranchesClicked(bool fetchRemote) {
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) return;
-    
+
     if (fetchRemote) {
-        QProcess fetchProcess;
-        fetchProcess.setWorkingDirectory(workDir);
-#ifdef Q_OS_WIN
-        fetchProcess.start("git.exe", QStringList() << "fetch" << "--prune");
-#else
-        fetchProcess.start("git", QStringList() << "fetch" << "--prune");
-#endif
-        finishGitProcess(fetchProcess, 60000);
+        runGitNetworkCommand(QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
+                             [this](bool) {
+                                 refreshGitBranchesLocal();
+                             });
+        return;
     }
+
+    refreshGitBranchesLocal();
+}
+
+void MainWindow::refreshGitBranchesLocal() {
+    QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) return;
 
     QProcess process;
     process.setWorkingDirectory(workDir);
@@ -3678,7 +3964,12 @@ void MainWindow::onGitDiffClicked() {
 }
 
 void MainWindow::onGitFetchClicked() {
-    runGitCommand(QStringList() << "fetch" << "--prune");
+    runGitNetworkCommand(QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
+                         [this](bool ok) {
+                             if (ok) {
+                                 refreshGitBranchesLocal();
+                             }
+                         });
 }
 
 void MainWindow::onGitStashClicked() {
@@ -4073,7 +4364,7 @@ void MainWindow::onGitWorktreeAddClicked() {
 #else
     checkProc.start("git", QStringList() << "worktree" << "list" << "--porcelain");
 #endif
-    checkProc.waitForFinished();
+    finishGitProcess(checkProc, 15000);
     QString listOut = QString::fromLocal8Bit(checkProc.readAllStandardOutput());
     
     bool branchUsed = listOut.contains("branch refs/heads/" + currentBranch + "\n") || 
@@ -4146,7 +4437,7 @@ void MainWindow::onGitWorktreeRemoveClicked() {
 #else
     process.start("git", QStringList() << "worktree" << "list" << "--porcelain");
 #endif
-    process.waitForFinished();
+    finishGitProcess(process, 15000);
     
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
     QStringList lines = output.split("\n");
@@ -4199,6 +4490,10 @@ void MainWindow::onGitWorktreeRemoveClicked() {
             }
             
             if (removed) {
+                removeGitRepoAlias(targetPath);
+                if (gitRepoMainProjectPath() == targetPath) {
+                    setGitRepoMainProject(QString());
+                }
                 settings.setValue("GitHistory", history);
                 applyGitHistoryToCombo(history);
                 txtGitLog->append(QString("<font color='gray'>[History] 已从记忆记录中同步移除此 Worktree 路径。</font>"));
@@ -4265,7 +4560,7 @@ void MainWindow::onGitPushClicked() {
     if (remote.isEmpty()) remote = "origin";
 
     // Use -u to set upstream as requested
-    runGitCommand(QStringList() << "push" << "-u" << remote << branch);
+    runGitNetworkCommand(QStringList() << QStringLiteral("push") << QStringLiteral("-u") << remote << branch, 30000);
 }
 
 void MainWindow::onGitPullClicked() {
@@ -4279,7 +4574,12 @@ void MainWindow::onGitPullClicked() {
         return;
     }
     if (remote.isEmpty()) remote = "origin";
-    runGitCommand(QStringList() << "pull" << remote << branch);
+    runGitNetworkCommand(QStringList() << QStringLiteral("pull") << remote << branch, 30000,
+                         [this](bool ok) {
+                             if (ok) {
+                                 refreshGitBranchesLocal();
+                             }
+                         });
 }
 
 void MainWindow::onGitMergeClicked() {
@@ -4619,105 +4919,186 @@ void MainWindow::onGitSoftResetClicked() {
 }
 
 void MainWindow::onGitCopyForDailyReportClicked() {
-    QString workDir = cmbGitDir->currentText().trimmed();
-    if (workDir.isEmpty()) {
-        txtGitLog->append(QStringLiteral("错误: 请先选择有效的 Git 目录"));
+    QString errorMsg;
+    const QString finalContent = buildDailyReportContent(&errorMsg, true);
+    if (finalContent.isEmpty()) {
+        txtGitLog->append(errorMsg.isEmpty()
+                              ? QStringLiteral("错误: 无法生成日报内容")
+                              : errorMsg);
         return;
     }
 
     const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
-    QStringList todayCommits;
+    QGuiApplication::clipboard()->setText(finalContent);
+    txtGitLog->append(QStringLiteral("已拼接今日(%1)日报并复制:").arg(today));
+    txtGitLog->append(finalContent);
+    saveDailyReportToDocs(finalContent);
+}
 
-    QStringList args;
-    args << QStringLiteral("log")
-         << QStringLiteral("--all")
-         << QStringLiteral("--pretty=format:%h - %cd : %s (%an)")
-         << QStringLiteral("--date=short");
+QString MainWindow::buildDailyReportContent(QString *errorOut, bool showUiWarnings) {
+    if (errorOut)
+        errorOut->clear();
 
-    QProcess process;
-    process.setWorkingDirectory(workDir);
-#ifdef Q_OS_WIN
-    process.start(QStringLiteral("git.exe"), args);
-#else
-    process.start(QStringLiteral("git"), args);
-#endif
-    process.waitForFinished();
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    if (history.isEmpty()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("错误: 记忆路径为空，请先添加 Git 仓库");
+        return QString();
+    }
 
-#ifdef Q_OS_WIN
-    const QString output = QString::fromUtf8(process.readAllStandardOutput());
-#else
-    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-#else
-    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-#endif
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    QStringList numberedEntries;
 
-    // git log 按时间倒序；越过今日后即可停止
-    for (const QString &item : lines) {
-        // Format: %h - %cd : %s (%an) -> e.g., "a1b2c3d - 2026-03-05 : Fix bug (Author)"
-        const int dashIdx = item.indexOf(QStringLiteral(" - "));
-        const int colonIdx = item.indexOf(QStringLiteral(" : "));
-        if (dashIdx == -1 || colonIdx == -1)
+    for (const QString &rawPath : history) {
+        const QString absPath = gitGoalsRepoKey(rawPath);
+        if (absPath.isEmpty())
             continue;
 
-        const QString datePart = item.mid(dashIdx + 3, colonIdx - (dashIdx + 3)).trimmed();
-        if (datePart == today) {
-            QString subject = item.mid(colonIdx + 3);
-            const int authorIdx = subject.lastIndexOf(QStringLiteral(" ("));
-            if (authorIdx != -1)
-                subject = subject.left(authorIdx);
-            todayCommits.prepend(subject.trimmed()); // prepend to get chronological order (git log is reverse)
-        } else if (datePart < today) {
-            break;
+        if (!QDir(absPath).exists()) {
+            txtGitLog->append(
+                QStringLiteral("<font color='orange'>[日报] 跳过无效路径: %1</font>").arg(absPath));
+            continue;
+        }
+        if (!isGitRepository(absPath)) {
+            txtGitLog->append(
+                QStringLiteral("<font color='orange'>[日报] 跳过非 Git 仓库: %1</font>").arg(absPath));
+            continue;
+        }
+
+        const QStringList subjects = fetchTodayCommitSubjects(absPath);
+        if (subjects.isEmpty())
+            continue;
+
+        const QString displayName = gitRepoDisplayName(absPath);
+        for (const QString &subject : subjects) {
+            numberedEntries.append(QStringLiteral("【%1】%2").arg(displayName, subject));
         }
     }
 
-    if (todayCommits.isEmpty()) {
-        txtGitLog->append("未找到日期为 " + today + " 的提交记录");
-        return;
+    if (numberedEntries.isEmpty()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("未找到日期为 %1 的提交记录").arg(today);
+        return QString();
     }
 
     QString commitsPart;
-    for (int i = 0; i < todayCommits.size(); ++i) {
-        commitsPart += QString("%1. %2\n").arg(i + 1).arg(todayCommits[i]);
+    for (int i = 0; i < numberedEntries.size(); ++i) {
+        commitsPart += QStringLiteral("%1. %2\n").arg(i + 1).arg(numberedEntries.at(i));
     }
     commitsPart = commitsPart.trimmed();
 
-    QList<GitWorkGoal> goals = loadGitGoals(workDir);
-    if (QDir(workDir).exists()) {
-        syncGoalDifficultyFromDiffLines(workDir, goals);
-    }
-    QList<const GitWorkGoal *> rootGoals;
-    for (const GitWorkGoal &g : goals) {
-        if (g.parentId.isEmpty()) {
-            rootGoals.append(&g);
-        }
-    }
-
     QString finalContent = commitsPart;
-    if (rootGoals.size() > 1) {
-        QStringList titles;
-        for (const GitWorkGoal *g : rootGoals) {
-            titles << g->title;
+    const QString mainPath = gitRepoMainProjectPath();
+    if (!mainPath.isEmpty() && QDir(mainPath).exists() && isGitRepository(mainPath)) {
+        QList<GitWorkGoal> goals = loadGitGoals(mainPath);
+        syncGoalDifficultyFromDiffLines(mainPath, goals);
+
+        QList<const GitWorkGoal *> rootGoals;
+        for (const GitWorkGoal &g : goals) {
+            if (g.parentId.isEmpty()) {
+                rootGoals.append(&g);
+            }
         }
-        const QString warnMsg =
-            QStringLiteral("当前仓库存在 %1 个无父目标（根目标），无法自动填入完成度：\n%2")
-                .arg(rootGoals.size())
-                .arg(titles.join(QStringLiteral("\n")));
-        txtGitLog->append(QStringLiteral("<font color='orange'>[日报] %1</font>").arg(warnMsg));
-        QMessageBox::warning(this, QStringLiteral("复制到日报"), warnMsg);
-    } else if (rootGoals.size() == 1) {
-        const GitWorkGoal *root = rootGoals.first();
-        const GitRootProgressInfo progress = calcRootGoalProgress(workDir, *root, goals);
-        finalContent = root->title + QLatin1Char('\n') + commitsPart
-                       + QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
+
+        if (rootGoals.size() > 1) {
+            QStringList titles;
+            for (const GitWorkGoal *g : rootGoals) {
+                titles << g->title;
+            }
+            const QString warnMsg =
+                QStringLiteral("主项目仓库存在 %1 个无父目标（根目标），无法自动填入完成度：\n%2")
+                    .arg(rootGoals.size())
+                    .arg(titles.join(QStringLiteral("\n")));
+            txtGitLog->append(QStringLiteral("<font color='orange'>[日报] %1</font>").arg(warnMsg));
+            if (showUiWarnings) {
+                QMessageBox::warning(this, QStringLiteral("复制到日报"), warnMsg);
+            }
+        } else if (rootGoals.size() == 1) {
+            const GitWorkGoal *root = rootGoals.first();
+            const GitRootProgressInfo progress = calcRootGoalProgress(mainPath, *root, goals);
+            finalContent = root->title + QLatin1Char('\n') + commitsPart
+                           + QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
+        }
     }
 
-    QGuiApplication::clipboard()->setText(finalContent);
-    txtGitLog->append(QString("已拼接今日(%1)共 %2 条提交并复制:").arg(today).arg(todayCommits.size()));
-    txtGitLog->append(finalContent);
+    return finalContent;
+}
+
+QString MainWindow::dailyReportDocsDir() const {
+    return QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("docs/日报"));
+}
+
+QString MainWindow::dailyReportFilePathForToday() const {
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    return QDir(dailyReportDocsDir()).filePath(today + QStringLiteral(".txt"));
+}
+
+bool MainWindow::saveDailyReportToDocs(const QString &content) {
+    if (content.trimmed().isEmpty())
+        return false;
+
+    const QString dirPath = dailyReportDocsDir();
+    if (!QDir().mkpath(dirPath)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[日报] 无法创建目录: %1</font>").arg(dirPath));
+        return false;
+    }
+
+    const QString filePath = dailyReportFilePathForToday();
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[日报] 无法写入文件: %1</font>").arg(filePath));
+        return false;
+    }
+
+    QByteArray bytes = content.toUtf8();
+    if (!content.endsWith(QLatin1Char('\n')))
+        bytes.append('\n');
+    if (file.write(bytes) != bytes.size()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[日报] 写入不完整: %1</font>").arg(filePath));
+        file.close();
+        return false;
+    }
+    file.close();
+
+    txtGitLog->append(QStringLiteral("<font color='green'>[日报] 已保存到 %1</font>").arg(filePath));
+    return true;
+}
+
+void MainWindow::onDailyReportAutoSaveTick() {
+    tryAutoSaveDailyReport();
+}
+
+void MainWindow::tryAutoSaveDailyReport() {
+    if (!lifeAssistant || !lifeAssistant->isWorkdayToday())
+        return;
+
+    const QTime now = QTime::currentTime();
+    if (now < QTime(17, 30))
+        return;
+
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitDailyReport"));
+    const QString lastAutoSaveDate = settings.value(QStringLiteral("lastAutoSaveDate")).toString();
+    if (lastAutoSaveDate == today) {
+        settings.endGroup();
+        return;
+    }
+
+    QString errorMsg;
+    const QString content = buildDailyReportContent(&errorMsg, false);
+    if (content.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>[日报] 工作日 17:30 自动保存跳过: %1</font>")
+                              .arg(errorMsg.isEmpty() ? QStringLiteral("无内容") : errorMsg));
+    } else {
+        saveDailyReportToDocs(content);
+        txtGitLog->append(QStringLiteral("<font color='green'>[日报] 工作日 17:30 自动保存完成</font>"));
+    }
+
+    settings.setValue(QStringLiteral("lastAutoSaveDate"), today);
+    settings.endGroup();
 }
 
 void MainWindow::onScpTransferClicked() {
@@ -5342,11 +5723,13 @@ void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QStrin
     }
     cmbGitDir->blockSignals(false);
     if (!activateRepo) {
+        refreshGitRepoMetaTable();
         return;
     }
     const QString path = selectPath.isEmpty() && !history.isEmpty() ? history.first() : selectPath;
-    activateGitRepo(path.isEmpty() ? cmbGitDir->currentText().trimmed() : path);
+    activateGitRepo(path.isEmpty() ? cmbGitDir->currentText().trimmed() : path, isGitAutoFetchEnabled());
     refreshGitGoalsTable();
+    refreshGitRepoMetaTable();
 }
 
 void MainWindow::saveGitHistory(const QString &dir) {
@@ -5473,6 +5856,10 @@ void MainWindow::removeGitHistoryPath(const QString &dir) {
 
     history.removeAll(dir);
     history.removeAll(absDir);
+    removeGitRepoAlias(absDir);
+    if (gitRepoMainProjectPath() == absDir) {
+        setGitRepoMainProject(QString());
+    }
     settings.setValue("GitHistory", history);
 
     QString nextSelect;
@@ -5501,7 +5888,7 @@ void MainWindow::onGitRemoveHistoryClicked() {
 }
 
 void MainWindow::onGitDirChanged() {
-    activateGitRepo(cmbGitDir->currentText().trimmed());
+    activateGitRepo(cmbGitDir->currentText().trimmed(), isGitAutoFetchEnabled());
     refreshGitGoalsTable();
     if (gitDiffReminderEnabled && gitDiffReminderTimer && !gitDiffReminderTimer->isActive()) {
         gitDiffReminderTimer->start();
@@ -5528,6 +5915,206 @@ void MainWindow::onGitBranchSelectionChanged() {
     }
     onGitRefreshLogClicked();
     updateGitGoalBranchHighlights();
+}
+
+QString MainWindow::gitRepoAlias(const QString &repoDir) const {
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty())
+        return QString();
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    settings.beginGroup(QStringLiteral("aliases"));
+    const QString alias = settings.value(key).toString().trimmed();
+    settings.endGroup();
+    settings.endGroup();
+    return alias;
+}
+
+void MainWindow::saveGitRepoAlias(const QString &repoDir, const QString &alias) {
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty())
+        return;
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    settings.beginGroup(QStringLiteral("aliases"));
+    if (alias.trimmed().isEmpty()) {
+        settings.remove(key);
+    } else {
+        settings.setValue(key, alias.trimmed());
+    }
+    settings.endGroup();
+    settings.endGroup();
+}
+
+void MainWindow::removeGitRepoAlias(const QString &repoDir) {
+    saveGitRepoAlias(repoDir, QString());
+}
+
+QString MainWindow::gitRepoDisplayName(const QString &repoDir) const {
+    const QString alias = gitRepoAlias(repoDir);
+    if (!alias.isEmpty())
+        return alias;
+
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty())
+        return QString();
+    return QFileInfo(key).fileName();
+}
+
+QString MainWindow::gitRepoMainProjectPath() const {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    const QString path = settings.value(QStringLiteral("mainProject")).toString().trimmed();
+    settings.endGroup();
+    return gitGoalsRepoKey(path);
+}
+
+void MainWindow::setGitRepoMainProject(const QString &repoDir) {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    const QString key = gitGoalsRepoKey(repoDir);
+    if (key.isEmpty()) {
+        settings.remove(QStringLiteral("mainProject"));
+    } else {
+        settings.setValue(QStringLiteral("mainProject"), key);
+    }
+    settings.endGroup();
+}
+
+bool MainWindow::isGitRepository(const QString &workDir) const {
+    if (workDir.trimmed().isEmpty())
+        return false;
+    return QFile::exists(QDir(workDir.trimmed()).absoluteFilePath(QStringLiteral(".git")));
+}
+
+QStringList MainWindow::fetchTodayCommitSubjects(const QString &workDir) const {
+    QStringList todayCommits;
+    if (workDir.trimmed().isEmpty())
+        return todayCommits;
+
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+
+    QStringList args;
+    args << QStringLiteral("log")
+         << QStringLiteral("--all")
+         << QStringLiteral("--pretty=format:%h - %cd : %s (%an)")
+         << QStringLiteral("--date=short");
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+#ifdef Q_OS_WIN
+    process.start(QStringLiteral("git.exe"), args);
+#else
+    process.start(QStringLiteral("git"), args);
+#endif
+    if (!finishGitProcess(process, 15000)) {
+        return todayCommits;
+    }
+
+#ifdef Q_OS_WIN
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+#else
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+#endif
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+
+    for (const QString &item : lines) {
+        const int dashIdx = item.indexOf(QStringLiteral(" - "));
+        const int colonIdx = item.indexOf(QStringLiteral(" : "));
+        if (dashIdx == -1 || colonIdx == -1)
+            continue;
+
+        const QString datePart = item.mid(dashIdx + 3, colonIdx - (dashIdx + 3)).trimmed();
+        if (datePart == today) {
+            QString subject = item.mid(colonIdx + 3);
+            const int authorIdx = subject.lastIndexOf(QStringLiteral(" ("));
+            if (authorIdx != -1)
+                subject = subject.left(authorIdx);
+            todayCommits.prepend(subject.trimmed());
+        } else if (datePart < today) {
+            break;
+        }
+    }
+
+    return todayCommits;
+}
+
+void MainWindow::refreshGitRepoMetaTable() {
+    if (!tblGitRepoMeta)
+        return;
+
+    gitRepoMetaRefreshing = true;
+    tblGitRepoMeta->blockSignals(true);
+    tblGitRepoMeta->setRowCount(0);
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    const QString mainPath = gitRepoMainProjectPath();
+
+    for (const QString &rawPath : history) {
+        const QString absPath = gitGoalsRepoKey(rawPath);
+        if (absPath.isEmpty())
+            continue;
+
+        const int row = tblGitRepoMeta->rowCount();
+        tblGitRepoMeta->insertRow(row);
+
+        QTableWidgetItem *pathItem = new QTableWidgetItem(absPath);
+        pathItem->setFlags(pathItem->flags() & ~Qt::ItemIsEditable);
+        pathItem->setToolTip(absPath);
+        pathItem->setData(Qt::UserRole, absPath);
+        tblGitRepoMeta->setItem(row, 0, pathItem);
+
+        QTableWidgetItem *aliasItem = new QTableWidgetItem(gitRepoAlias(absPath));
+        aliasItem->setData(Qt::UserRole, absPath);
+        tblGitRepoMeta->setItem(row, 1, aliasItem);
+
+        QCheckBox *mainCb = new QCheckBox();
+        mainCb->setChecked(absPath == mainPath);
+        mainCb->setToolTip(QStringLiteral("勾选后，复制到日报时使用此仓库的工作目标标题和完成度"));
+
+        QWidget *centerWidget = new QWidget();
+        QHBoxLayout *lay = new QHBoxLayout(centerWidget);
+        lay->addWidget(mainCb);
+        lay->setAlignment(Qt::AlignCenter);
+        lay->setContentsMargins(0, 0, 0, 0);
+        tblGitRepoMeta->setCellWidget(row, 2, centerWidget);
+
+        connect(mainCb, &QCheckBox::toggled, this, [this, absPath](bool checked) {
+            if (gitRepoMetaRefreshing)
+                return;
+
+            if (checked) {
+                setGitRepoMainProject(absPath);
+                for (int r = 0; r < tblGitRepoMeta->rowCount(); ++r) {
+                    QWidget *widget = tblGitRepoMeta->cellWidget(r, 2);
+                    if (!widget)
+                        continue;
+                    QCheckBox *cb = widget->findChild<QCheckBox *>();
+                    if (!cb)
+                        continue;
+                    const QTableWidgetItem *pathItem = tblGitRepoMeta->item(r, 0);
+                    const QString rowPath = pathItem ? pathItem->data(Qt::UserRole).toString() : QString();
+                    if (rowPath != absPath && cb->isChecked()) {
+                        gitRepoMetaRefreshing = true;
+                        cb->setChecked(false);
+                        gitRepoMetaRefreshing = false;
+                    }
+                }
+            } else if (gitRepoMainProjectPath() == absPath) {
+                setGitRepoMainProject(QString());
+            }
+        });
+    }
+
+    tblGitRepoMeta->blockSignals(false);
+    gitRepoMetaRefreshing = false;
 }
 
 QString MainWindow::gitGoalsRepoKey(const QString &repoDir) const {
@@ -9402,7 +9989,8 @@ QWidget* MainWindow::createPerformancePage()
 
 QWidget *MainWindow::createLifeAssistantPage()
 {
-    return new LifeAssistantWidget(this);
+    lifeAssistant = new LifeAssistantWidget(this);
+    return lifeAssistant;
 }
 
 void MainWindow::onPerformanceMonitorToggled(bool checked)

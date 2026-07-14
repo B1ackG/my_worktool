@@ -30,6 +30,7 @@ class LifeAssistantWidget : public QWidget
 public:
     explicit LifeAssistantWidget(QWidget *parent = nullptr);
     ~LifeAssistantWidget();
+    bool isWorkdayToday() const { return isCurrentDayWorkday; }
 
 private slots:
     void updateFocusWindow();

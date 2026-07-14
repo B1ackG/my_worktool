@@ -18,8 +18,10 @@
 #include <QGroupBox>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QProgressBar>
 #include <QTimer>
 #include <QScrollBar>
+#include <functional>
 #include <QStackedWidget>
 #include <QListWidget>
 #include <QSerialPort>
@@ -39,6 +41,8 @@
 #include <QPainter>
 #include <QPolygonF>
 #include "modbusslave.h"
+
+class LifeAssistantWidget;
 
 // A simple sparkline widget to show recent usage
 class MonitorChart : public QWidget {
@@ -158,7 +162,9 @@ private slots:
 
     // Git Slots
     void onGitSelectDirClicked();
-    void onGitRefreshBranchesClicked(bool fetchRemote = true);
+    void onGitRefreshBranchesClicked(bool fetchRemote = false);
+    void onGitCancelNetworkClicked();
+    void onGitAutoFetchToggled(bool checked);
     void onGitCheckoutClicked();
     void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
@@ -189,6 +195,7 @@ private slots:
     void onGitResetClicked();
     void onGitSoftResetClicked();   // <--- 新增
     void onGitCopyForDailyReportClicked();
+    void onDailyReportAutoSaveTick();
     void onGitRemoveHistoryClicked();
     void onGitDirChanged();
     void onGitBranchSelectionChanged();
@@ -260,6 +267,7 @@ private:
     QWidget *performancePageWidget;
     QWidget *inputQuickerPageWidget;
     QWidget *lifeAssistantPageWidget;
+    LifeAssistantWidget *lifeAssistant = nullptr;
 
     // --- Modbus Widgets ---
     // Register Map Tables
@@ -369,6 +377,7 @@ private:
     QComboBox *cmbGitDir;  // Changed from QLineEdit
     QPushButton *btnGitSelectDir;
     QPushButton *btnGitRemoveHistory;
+    QTableWidget *tblGitRepoMeta;
     QTableWidget *tblGitGoals;
     QPushButton *btnGitGoalAdd;
     QPushButton *btnGitGoalEdit;
@@ -392,6 +401,10 @@ private:
     QPushButton *btnGitStatus;
     QPushButton *btnGitDiff;
     QPushButton *btnGitFetch;
+    QCheckBox *chkGitAutoFetch = nullptr;
+    QLabel *lblGitNetworkStatus = nullptr;
+    QProgressBar *barGitNetworkBusy = nullptr;
+    QPushButton *btnGitCancelNetwork = nullptr;
     QPushButton *btnGitStash;
     QPushButton *btnGitStashPop;
     QPushButton *btnGitSetDiffRule;
@@ -437,9 +450,21 @@ private:
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
+    QTimer *dailyReportAutoSaveTimer = nullptr;
+    QTimer *gitNetworkTimeout = nullptr;
+    QProcess *gitNetworkProcess = nullptr;
+    bool gitNetworkBusy = false;
+    bool gitNetworkUserCancelled = false;
+    bool gitNetworkTimedOut = false;
+    QStringList gitNetworkLastArgs;
+    int gitNetworkLastTimeoutMs = 30000;
+    std::function<void(bool)> gitNetworkDoneCallback;
+    std::function<void(bool)> gitNetworkLastDoneCallback;
     int gitDiffReminderRule = 2;
     bool gitDiffReminderEnabled = true;
+    bool gitAutoFetchEnabled = false;
     QHash<QString, QSet<QString>> gitGoalCollapsedByRepo;
+    bool gitRepoMetaRefreshing = false;
 
     // --- Logic Objects ---
     
@@ -530,12 +555,35 @@ private:
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
     bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
+    void runGitNetworkCommand(const QStringList &args, int timeoutMs = 30000,
+                              const std::function<void(bool ok)> &done = {});
+    void setGitNetworkBusy(bool busy, const QString &statusText = QString());
+    void finishGitNetworkCommand(bool ok, const QString &stdoutText, const QString &stderrText);
+    void offerGitNetworkRetry(const QString &reason);
+    void refreshGitBranchesLocal();
+    bool isGitAutoFetchEnabled() const;
+    void loadGitNetworkSettings();
+    void saveGitNetworkSettings();
     bool gitHasUncommittedChanges(const QString &workDir) const;
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
     void removeGitHistoryPath(const QString &dir);
     void applyGitHistoryToCombo(const QStringList &history, const QString &selectPath = QString(),
                                 bool activateRepo = true);
+    void refreshGitRepoMetaTable();
+    QString gitRepoAlias(const QString &repoDir) const;
+    void saveGitRepoAlias(const QString &repoDir, const QString &alias);
+    void removeGitRepoAlias(const QString &repoDir);
+    QString gitRepoDisplayName(const QString &repoDir) const;
+    QString gitRepoMainProjectPath() const;
+    void setGitRepoMainProject(const QString &repoDir);
+    QStringList fetchTodayCommitSubjects(const QString &workDir) const;
+    bool isGitRepository(const QString &workDir) const;
+    QString buildDailyReportContent(QString *errorOut = nullptr, bool showUiWarnings = true);
+    QString dailyReportDocsDir() const;
+    QString dailyReportFilePathForToday() const;
+    bool saveDailyReportToDocs(const QString &content);
+    void tryAutoSaveDailyReport();
     QString gitGoalsRepoKey(const QString &repoDir) const;
     QList<GitWorkGoal> loadGitGoals(const QString &repoDir) const;
     void saveGitGoals(const QString &repoDir, const QList<GitWorkGoal> &goals);
@@ -557,7 +605,7 @@ private:
                                     const QStringList &branchHints = QStringList()) const;
     QString resolveGitMainBranch(const QString &repoDir) const;
     void syncGitMainBranchSetting(const QString &repoDir);
-    void activateGitRepo(const QString &repoDir, bool fetchRemote = true);
+    void activateGitRepo(const QString &repoDir, bool fetchRemote = false);
     void deferredGitRepoInit();
     void loadGitDiffReminderSettings();
     void saveGitDiffReminderSettings();
