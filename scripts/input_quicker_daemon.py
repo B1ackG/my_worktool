@@ -30,10 +30,23 @@ from input_device_utils import (
     triggers_match,
 )
 
+CONFIG_DIR = Path.home() / ".config" / "LiChenYang"
 CONFIG_PATH = Path(
     os.environ.get(
         "INPUT_QUICKER_CONFIG",
-        str(Path.home() / ".config" / "LiChenYang" / "input_quicker.json"),
+        str(CONFIG_DIR / "input_quicker.json"),
+    )
+)
+PID_PATH = Path(
+    os.environ.get(
+        "INPUT_QUICKER_PID",
+        str(CONFIG_DIR / "input_quicker.pid"),
+    )
+)
+LOG_PATH = Path(
+    os.environ.get(
+        "INPUT_QUICKER_LOG",
+        str(CONFIG_DIR / "input_quicker.log"),
     )
 )
 
@@ -54,6 +67,12 @@ RELOAD_REQUESTED = False
 
 def log(message: str) -> None:
     print(message, flush=True)
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(message + "\n")
+    except OSError:
+        pass
 
 
 def handle_stop(_signum: int, _frame: Any) -> None:
@@ -66,23 +85,60 @@ def handle_reload(_signum: int, _frame: Any) -> None:
     RELOAD_REQUESTED = True
 
 
+def write_pid_file() -> None:
+    PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PID_PATH.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def remove_pid_file() -> None:
+    try:
+        if PID_PATH.exists() and PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            PID_PATH.unlink()
+    except OSError:
+        pass
+
+
+def read_pid() -> int | None:
+    try:
+        text = PID_PATH.read_text(encoding="utf-8").strip()
+        return int(text) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+def pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_single_instance() -> None:
+    existing = read_pid()
+    if existing is not None and existing != os.getpid() and pid_is_alive(existing):
+        log(f"ERROR: another input_quicker_daemon is already running (pid {existing})")
+        sys.exit(4)
+
+
 def default_config() -> dict[str, Any]:
     return {
         "devicePath": "",
         "wheel2Axis": "REL_HWHEEL",
         "enabled": True,
         "grabDevice": False,
+        "daemonAutostart": True,
         "bindings": [
             {
                 "id": "default-side-prev",
-                "name": "上一工作区",
+                "name": "侧键上一工作区",
                 "enabled": True,
                 "trigger": {"type": "mouse_button", "code": "BTN_SIDE"},
                 "action": {"type": "preset", "preset": "workspace_prev"},
             },
             {
                 "id": "default-side-next",
-                "name": "下一工作区",
+                "name": "侧键下一工作区",
                 "enabled": True,
                 "trigger": {"type": "mouse_button", "code": "BTN_EXTRA"},
                 "action": {"type": "preset", "preset": "workspace_next"},
@@ -363,6 +419,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGHUP, handle_reload)
 
+    ensure_single_instance()
+    write_pid_file()
     try:
         return InputQuickerDaemon().run()
     except DeviceSelectionError as exc:
@@ -377,6 +435,8 @@ def main() -> int:
     except Exception as exc:
         log(f"ERROR: {exc}")
         return 1
+    finally:
+        remove_pid_file()
 
 
 if __name__ == "__main__":

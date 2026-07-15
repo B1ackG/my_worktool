@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QTextEdit>
 #include <QJsonObject>
+#include <QTimer>
 
 #include "inputquickermanager.h"
 
@@ -27,6 +28,7 @@ private slots:
     void onStopClicked();
     void onAddBindingClicked();
     void onImportDefaultsClicked();
+    void onMigrateXbindkeysClicked();
     void onEditBindingClicked();
     void onDeleteBindingClicked();
     void onBindingEnabledToggled();
@@ -40,6 +42,7 @@ private slots:
     void onMonitorRowDoubleClicked(int row, int column);
     void updateStatus(const QString &status);
     void appendLog(const QString &message);
+    void pollStatusAndLog();
 
 private:
     QString triggerDisplayText(const QJsonObject &trigger) const;
@@ -48,10 +51,12 @@ private:
     QString selectedDevicePath() const;
     bool openBindingDialogWithTrigger(const QJsonObject &trigger, bool editExisting = false);
     void updateMonitorButtons();
+    void autoStartIfEnabled();
 
     InputQuickerManager *manager;
     QCheckBox *chkGrabDevice;
     QCheckBox *chkEnabled;
+    QCheckBox *chkDaemonAutostart;
     QComboBox *cmbDevice;
     QComboBox *cmbWheelAxis;
     QPushButton *btnRefreshDevices;
@@ -60,12 +65,15 @@ private:
     QPushButton *btnStopMonitor;
     QPushButton *btnApply;
     QPushButton *btnStop;
+    QPushButton *btnMigrateXbindkeys;
     QLabel *lblStatus;
     QTableWidget *tblMonitor;
     QTableWidget *tblBindings;
     QPushButton *btnAddBinding;
     QPushButton *btnImportDefaults;
     QTextEdit *txtLog;
+    QTimer *statusTimer;
+    qint64 logOffset;
 };
 
 #endif // INPUTQUICKERWIDGET_H

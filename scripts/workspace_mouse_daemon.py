@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Map mouse side buttons and a second wheel to workspace shortcuts.
+"""DEPRECATED: use scripts/input_quicker_daemon.py instead.
 
-The Qt application writes ~/.config/LiChenYang/workspace_mouse.json and starts
-this daemon. It reads evdev events from the selected mouse and emits xdotool
-shortcuts that most Linux desktops map to previous/next workspace.
+Legacy mapper for mouse side buttons / second wheel to workspace shortcuts.
+Kept only for reference; the Qt "快捷助手" page drives input_quicker_daemon.py.
+
+Original behavior: The Qt application wrote ~/.config/LiChenYang/workspace_mouse.json
+and started this daemon. It read evdev events and emitted xdotool shortcuts that
+most Linux desktops map to previous/next workspace.
 """
 
 from __future__ import annotations

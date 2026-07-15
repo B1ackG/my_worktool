@@ -1,14 +1,20 @@
 #include "inputquickermanager.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QTextStream>
 #include <QUuid>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QStringConverter>
+#endif
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
@@ -19,9 +25,11 @@ InputQuickerManager::InputQuickerManager(QObject *parent)
     , daemonProcess(new QProcess(this))
     , monitorProcess(new QProcess(this))
     , enabledValue(true)
+    , daemonAutostartValue(true)
     , wheel2AxisValue(QStringLiteral("REL_HWHEEL"))
     , grabDeviceValue(false)
     , lastAppliedGrabDevice(false)
+    , ownDaemonProcess(false)
 {
     daemonProcess->setProcessChannelMode(QProcess::MergedChannels);
     connect(daemonProcess, &QProcess::readyReadStandardOutput, this, &InputQuickerManager::onDaemonOutput);
@@ -45,8 +53,8 @@ InputQuickerManager::InputQuickerManager(QObject *parent)
 
 InputQuickerManager::~InputQuickerManager()
 {
+    // Keep detached daemon alive after UI closes (replacement for xbindkeys).
     stopInputMonitor();
-    stopDaemon();
 }
 
 void InputQuickerManager::loadSettings()
@@ -66,6 +74,12 @@ bool InputQuickerManager::applySettings()
 {
     saveSettings();
     emit logMessage(QStringLiteral("[快捷助手] 已保存 %1 条规则").arg(bindingsValue.size()));
+
+    if (daemonAutostartValue) {
+        setDaemonAutostartInstalled(true);
+    } else if (isDaemonAutostartInstalled()) {
+        setDaemonAutostartInstalled(false);
+    }
 
     if (!enabledValue || bindingsValue.isEmpty()) {
         stopDaemon();
@@ -118,7 +132,7 @@ bool InputQuickerManager::reloadDaemonViaSignal()
         return false;
     }
 
-    const qint64 pid = daemonProcess->processId();
+    const qint64 pid = readDaemonPid();
     if (pid <= 0) {
         return false;
     }
@@ -134,6 +148,7 @@ bool InputQuickerManager::reloadDaemonViaSignal()
 
 bool InputQuickerManager::startDaemon()
 {
+    clearStalePidFile();
     if (isDaemonRunning()) {
         emitStatus();
         return true;
@@ -148,35 +163,60 @@ bool InputQuickerManager::startDaemon()
 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert(QStringLiteral("INPUT_QUICKER_CONFIG"), configFilePath());
-    daemonProcess->setProcessEnvironment(env);
-    daemonProcess->setProgram(QStringLiteral("python3"));
-    daemonProcess->setArguments(QStringList() << scriptPath);
-    daemonProcess->start();
+    env.insert(QStringLiteral("INPUT_QUICKER_PID"), pidFilePath());
+    env.insert(QStringLiteral("INPUT_QUICKER_LOG"), logFilePath());
 
-    if (!daemonProcess->waitForStarted(3000)) {
-        emit logMessage(QStringLiteral("[快捷助手] 启动失败: %1").arg(daemonProcess->errorString()));
+    QProcess launcher;
+    launcher.setProcessEnvironment(env);
+    launcher.setProgram(QStringLiteral("python3"));
+    launcher.setArguments(QStringList() << scriptPath);
+
+    qint64 pid = 0;
+    if (!launcher.startDetached(&pid) || pid <= 0) {
+        emit logMessage(QStringLiteral("[快捷助手] 启动失败（detached）"));
         emitStatus();
         return false;
     }
 
-    emit logMessage(QStringLiteral("[快捷助手] daemon 已启动"));
+    ownDaemonProcess = false;
+    for (int i = 0; i < 40 && !isDaemonRunning(); ++i) {
+        usleep(50000);
+    }
+
+    if (!isDaemonRunning()) {
+        emit logMessage(QStringLiteral("[快捷助手] daemon 未能保持运行，请查看日志: %1").arg(logFilePath()));
+        emitStatus();
+        return false;
+    }
+
+    emit logMessage(QStringLiteral("[快捷助手] daemon 已启动 (pid %1)").arg(readDaemonPid()));
     emitStatus();
     return true;
 }
 
 void InputQuickerManager::stopDaemon()
 {
-    if (!isDaemonRunning()) {
-        emitStatus();
-        return;
+    const qint64 pid = readDaemonPid();
+    if (pid > 0 && isPidAlive(pid)) {
+        ::kill(static_cast<pid_t>(pid), SIGTERM);
+        for (int i = 0; i < 30 && isPidAlive(pid); ++i) {
+            usleep(100000);
+        }
+        if (isPidAlive(pid)) {
+            ::kill(static_cast<pid_t>(pid), SIGKILL);
+        }
+        emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+    } else if (daemonProcess->state() != QProcess::NotRunning) {
+        daemonProcess->terminate();
+        if (!daemonProcess->waitForFinished(3000)) {
+            daemonProcess->kill();
+            daemonProcess->waitForFinished(1000);
+        }
+        emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
     }
 
-    daemonProcess->terminate();
-    if (!daemonProcess->waitForFinished(3000)) {
-        daemonProcess->kill();
-        daemonProcess->waitForFinished(1000);
-    }
-    emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+    clearStalePidFile();
+    ownDaemonProcess = false;
     emitStatus();
 }
 
@@ -460,13 +500,17 @@ QString InputQuickerManager::formatCaptureError(const QString &stderrText) const
 
 bool InputQuickerManager::isDaemonRunning() const
 {
+    const qint64 pid = readDaemonPid();
+    if (pid > 0 && isPidAlive(pid)) {
+        return true;
+    }
     return daemonProcess->state() != QProcess::NotRunning;
 }
 
 QString InputQuickerManager::statusText() const
 {
     if (isDaemonRunning()) {
-        return QStringLiteral("运行中");
+        return QStringLiteral("运行中 (pid %1)").arg(readDaemonPid());
     }
     if (!enabledValue) {
         return QStringLiteral("未启用");
@@ -477,6 +521,16 @@ QString InputQuickerManager::statusText() const
 QString InputQuickerManager::configFilePath() const
 {
     return QDir::home().filePath(QStringLiteral(".config/LiChenYang/input_quicker.json"));
+}
+
+QString InputQuickerManager::pidFilePath() const
+{
+    return QDir::home().filePath(QStringLiteral(".config/LiChenYang/input_quicker.pid"));
+}
+
+QString InputQuickerManager::logFilePath() const
+{
+    return QDir::home().filePath(QStringLiteral(".config/LiChenYang/input_quicker.log"));
 }
 
 QString InputQuickerManager::scriptFallbackPath(const QString &scriptName) const
@@ -524,6 +578,11 @@ bool InputQuickerManager::enabled() const
     return enabledValue;
 }
 
+bool InputQuickerManager::daemonAutostart() const
+{
+    return daemonAutostartValue;
+}
+
 QString InputQuickerManager::devicePath() const
 {
     return devicePathValue;
@@ -547,6 +606,11 @@ QList<QuickerBinding> InputQuickerManager::bindings() const
 void InputQuickerManager::setEnabled(bool enabled)
 {
     enabledValue = enabled;
+}
+
+void InputQuickerManager::setDaemonAutostart(bool enabled)
+{
+    daemonAutostartValue = enabled;
 }
 
 void InputQuickerManager::setDevicePath(const QString &path)
@@ -870,6 +934,7 @@ void InputQuickerManager::writeJsonConfig() const
     root.insert(QStringLiteral("devicePath"), devicePathValue);
     root.insert(QStringLiteral("wheel2Axis"), wheel2AxisValue);
     root.insert(QStringLiteral("enabled"), enabledValue);
+    root.insert(QStringLiteral("daemonAutostart"), daemonAutostartValue);
     root.insert(QStringLiteral("grabDevice"), grabDeviceValue);
     root.insert(QStringLiteral("bindings"), bindingsArray);
 
@@ -900,6 +965,7 @@ void InputQuickerManager::readJsonConfig()
     devicePathValue = root.value(QStringLiteral("devicePath")).toString();
     wheel2AxisValue = root.value(QStringLiteral("wheel2Axis")).toString(QStringLiteral("REL_HWHEEL"));
     enabledValue = root.value(QStringLiteral("enabled")).toBool(true);
+    daemonAutostartValue = root.value(QStringLiteral("daemonAutostart")).toBool(true);
     grabDeviceValue = root.value(QStringLiteral("grabDevice")).toBool(false);
 
     bindingsValue.clear();
@@ -958,4 +1024,204 @@ void InputQuickerManager::migrateLegacyConfigIfNeeded()
 
     writeJsonConfig();
     emit logMessage(QStringLiteral("[快捷助手] 已从旧版 workspace_mouse.json 迁移配置"));
+}
+
+qint64 InputQuickerManager::readDaemonPid() const
+{
+    QFile file(pidFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return -1;
+    }
+    bool ok = false;
+    const qint64 pid = QString::fromUtf8(file.readAll().trimmed()).toLongLong(&ok);
+    return ok ? pid : -1;
+}
+
+bool InputQuickerManager::isPidAlive(qint64 pid) const
+{
+    if (pid <= 0) {
+        return false;
+    }
+    return ::kill(static_cast<pid_t>(pid), 0) == 0;
+}
+
+void InputQuickerManager::clearStalePidFile() const
+{
+    const qint64 pid = readDaemonPid();
+    if (pid > 0 && isPidAlive(pid)) {
+        return;
+    }
+    QFile::remove(pidFilePath());
+}
+
+QString InputQuickerManager::daemonAutostartDesktopPath() const
+{
+    const QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)
+                                 + QStringLiteral("/autostart");
+    return autostartDir + QStringLiteral("/input-quicker-daemon.desktop");
+}
+
+bool InputQuickerManager::isDaemonAutostartInstalled() const
+{
+    const QString desktopPath = daemonAutostartDesktopPath();
+    if (!QFile::exists(desktopPath)) {
+        return false;
+    }
+    QFile file(desktopPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+    const QString content = QString::fromUtf8(file.readAll());
+    return content.contains(QStringLiteral("input_quicker_daemon.py"))
+           && !content.contains(QStringLiteral("Hidden=true"));
+}
+
+bool InputQuickerManager::setDaemonAutostartInstalled(bool enabled)
+{
+    const QString desktopPath = daemonAutostartDesktopPath();
+    const QFileInfo desktopInfo(desktopPath);
+
+    if (!enabled) {
+        if (QFile::exists(desktopPath) && !QFile::remove(desktopPath)) {
+            return false;
+        }
+        daemonAutostartValue = false;
+        writeJsonConfig();
+        emit logMessage(QStringLiteral("[快捷助手] 已关闭 daemon 开机自启动"));
+        return true;
+    }
+
+    QDir autostartDir = desktopInfo.dir();
+    if (!autostartDir.exists() && !autostartDir.mkpath(QStringLiteral("."))) {
+        return false;
+    }
+
+    const QString scriptPath = daemonScriptPath();
+    QFile file(desktopPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+
+    QTextStream out(&file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    out.setEncoding(QStringConverter::Utf8);
+#else
+    out.setCodec("UTF-8");
+#endif
+    out << "[Desktop Entry]\n";
+    out << "Type=Application\n";
+    out << "Version=1.0\n";
+    out << "Name=快捷助手输入守护\n";
+    out << "Comment=Mouse side buttons / bindings via input_quicker_daemon\n";
+    out << "Exec=env INPUT_QUICKER_CONFIG=\"" << configFilePath()
+        << "\" INPUT_QUICKER_PID=\"" << pidFilePath()
+        << "\" INPUT_QUICKER_LOG=\"" << logFilePath()
+        << "\" python3 \"" << scriptPath << "\"\n";
+    out << "Terminal=false\n";
+    out << "Categories=Utility;\n";
+    out << "X-GNOME-Autostart-enabled=true\n";
+    out << "X-GNOME-Autostart-Delay=2\n";
+
+    daemonAutostartValue = true;
+    writeJsonConfig();
+    emit logMessage(QStringLiteral("[快捷助手] 已写入开机自启动: %1").arg(desktopPath));
+    return true;
+}
+
+int InputQuickerManager::migrateXbindkeysSideButtons()
+{
+    // xbindkeys b:9 -> left workspace, b:8 -> right workspace
+    // Map to common Linux evdev codes BTN_SIDE / BTN_EXTRA.
+    const QList<QuickerBinding> sideDefaults = {
+        defaultWorkspaceBindings().value(0),
+        defaultWorkspaceBindings().value(1)
+    };
+
+    int added = 0;
+    for (const QuickerBinding &binding : sideDefaults) {
+        if (!isTriggerUsed(binding.trigger)) {
+            bindingsValue.append(binding);
+            ++added;
+        }
+    }
+
+    // Also cover mice that report BTN_BACK / BTN_FORWARD instead.
+    auto makeAlt = [](const QString &id, const QString &name, const QString &code, const QString &preset) {
+        QuickerBinding binding;
+        binding.id = id;
+        binding.name = name;
+        binding.enabled = true;
+        binding.trigger = QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("mouse_button")},
+            {QStringLiteral("code"), code}
+        };
+        binding.action = QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("preset")},
+            {QStringLiteral("preset"), preset}
+        };
+        return binding;
+    };
+
+    const QList<QuickerBinding> alts = {
+        makeAlt(QStringLiteral("migrated-btn-back"), QStringLiteral("后退键上一工作区"),
+                QStringLiteral("BTN_BACK"), QStringLiteral("workspace_prev")),
+        makeAlt(QStringLiteral("migrated-btn-forward"), QStringLiteral("前进键下一工作区"),
+                QStringLiteral("BTN_FORWARD"), QStringLiteral("workspace_next"))
+    };
+    for (const QuickerBinding &binding : alts) {
+        if (!isTriggerUsed(binding.trigger)) {
+            bindingsValue.append(binding);
+            ++added;
+        }
+    }
+
+    if (added > 0) {
+        emit bindingsChanged();
+        emit logMessage(QStringLiteral("[快捷助手] 已从 xbindkeys 侧键行为迁移 %1 条规则").arg(added));
+    } else {
+        emit logMessage(QStringLiteral("[快捷助手] 侧键规则已存在，无需重复迁移"));
+    }
+    return added;
+}
+
+bool InputQuickerManager::disableSystemXbindkeys()
+{
+    const QString noautoPath = QDir::home().filePath(QStringLiteral(".xbindkeys.noauto"));
+    QFile noauto(noautoPath);
+    if (!noauto.exists()) {
+        if (!noauto.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            emit logMessage(QStringLiteral("[快捷助手] 无法创建 %1").arg(noautoPath));
+            return false;
+        }
+        noauto.write("# Created by Input Quicker to disable xbindkeys autostart\n");
+        noauto.close();
+    }
+
+    QProcess::execute(QStringLiteral("killall"), QStringList() << QStringLiteral("xbindkeys"));
+    emit logMessage(QStringLiteral("[快捷助手] 已禁用系统 xbindkeys（%1）").arg(noautoPath));
+    return true;
+}
+
+QStringList InputQuickerManager::pollDaemonLog(qint64 &offset) const
+{
+    QStringList lines;
+    QFile file(logFilePath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return lines;
+    }
+    if (offset > file.size()) {
+        offset = 0;
+    }
+    if (!file.seek(offset)) {
+        return lines;
+    }
+    while (!file.atEnd()) {
+        const QByteArray raw = file.readLine();
+        const QString line = QString::fromUtf8(raw).trimmed();
+        if (!line.isEmpty()) {
+            lines.append(line);
+        }
+    }
+    offset = file.pos();
+    return lines;
 }

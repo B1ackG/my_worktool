@@ -2,6 +2,8 @@
 #include "quickerbindingdialog.h"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QColor>
@@ -12,6 +14,7 @@
 #include <QMessageBox>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
 
@@ -23,12 +26,21 @@ constexpr int kMonitorMaxRows = 500;
 InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     : QWidget(parent)
     , manager(new InputQuickerManager(this))
+    , statusTimer(new QTimer(this))
+    , logOffset(0)
 {
     QLabel *header = new QLabel(QStringLiteral("快捷助手"), this);
     header->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: bold; color: #333; margin-bottom: 8px;"));
 
     chkEnabled = new QCheckBox(QStringLiteral("启用快捷助手"), this);
     chkEnabled->setChecked(true);
+    chkEnabled->setToolTip(QStringLiteral("总开关：关闭后停止 daemon，所有输入映射不生效。"));
+
+    chkDaemonAutostart = new QCheckBox(QStringLiteral("开机自启动 daemon（独立于主程序，替代 xbindkeys）"), this);
+    chkDaemonAutostart->setChecked(true);
+    chkDaemonAutostart->setToolTip(
+        QStringLiteral("写入 ~/.config/autostart/input-quicker-daemon.desktop\n"
+                       "登录后直接启动映射守护，无需打开本程序窗口。"));
 
     chkGrabDevice = new QCheckBox(QStringLiteral("独占捕获设备（可能影响鼠标正常功能）"), this);
     chkGrabDevice->setToolTip(
@@ -52,17 +64,21 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     btnApply = new QPushButton(QStringLiteral("应用配置"), this);
     btnApply->setStyleSheet(QStringLiteral("font-weight: bold;"));
     btnStop = new QPushButton(QStringLiteral("停止 daemon"), this);
+    btnMigrateXbindkeys = new QPushButton(QStringLiteral("迁移并接管 xbindkeys"), this);
+    btnMigrateXbindkeys->setToolTip(
+        QStringLiteral("导入侧键→切换工作区规则，创建 .xbindkeys.noauto 并结束现有 xbindkeys。"));
     lblStatus = new QLabel(QStringLiteral("状态: 未加载"), this);
     lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #555;"));
 
     QGroupBox *topGroup = new QGroupBox(QStringLiteral("设备与控制"), this);
     QGridLayout *topGrid = new QGridLayout(topGroup);
     topGrid->addWidget(chkEnabled, 0, 0, 1, 2);
-    topGrid->addWidget(chkGrabDevice, 1, 0, 1, 2);
-    topGrid->addWidget(new QLabel(QStringLiteral("输入设备:")), 2, 0);
-    topGrid->addWidget(cmbDevice, 2, 1);
-    topGrid->addWidget(new QLabel(QStringLiteral("默认滚轮轴:")), 3, 0);
-    topGrid->addWidget(cmbWheelAxis, 3, 1);
+    topGrid->addWidget(chkDaemonAutostart, 1, 0, 1, 2);
+    topGrid->addWidget(chkGrabDevice, 2, 0, 1, 2);
+    topGrid->addWidget(new QLabel(QStringLiteral("输入设备:")), 3, 0);
+    topGrid->addWidget(cmbDevice, 3, 1);
+    topGrid->addWidget(new QLabel(QStringLiteral("默认滚轮轴:")), 4, 0);
+    topGrid->addWidget(cmbWheelAxis, 4, 1);
 
     QHBoxLayout *topButtonLayout = new QHBoxLayout();
     topButtonLayout->addWidget(btnRefreshDevices);
@@ -71,9 +87,10 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     topButtonLayout->addWidget(btnStopMonitor);
     topButtonLayout->addWidget(btnApply);
     topButtonLayout->addWidget(btnStop);
+    topButtonLayout->addWidget(btnMigrateXbindkeys);
     topButtonLayout->addStretch();
     topButtonLayout->addWidget(lblStatus);
-    topGrid->addLayout(topButtonLayout, 4, 0, 1, 2);
+    topGrid->addLayout(topButtonLayout, 5, 0, 1, 2);
 
     tblMonitor = new QTableWidget(0, 3, this);
     tblMonitor->setHorizontalHeaderLabels(
@@ -143,6 +160,7 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     connect(btnStop, &QPushButton::clicked, this, &InputQuickerWidget::onStopClicked);
     connect(btnAddBinding, &QPushButton::clicked, this, &InputQuickerWidget::onAddBindingClicked);
     connect(btnImportDefaults, &QPushButton::clicked, this, &InputQuickerWidget::onImportDefaultsClicked);
+    connect(btnMigrateXbindkeys, &QPushButton::clicked, this, &InputQuickerWidget::onMigrateXbindkeysClicked);
     connect(manager, &InputQuickerManager::bindingsChanged, this, &InputQuickerWidget::refreshBindingsTable);
     connect(manager, &InputQuickerManager::statusChanged, this, &InputQuickerWidget::updateStatus);
     connect(manager, &InputQuickerManager::logMessage, this, &InputQuickerWidget::appendLog);
@@ -151,11 +169,13 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     connect(manager, &InputQuickerManager::monitorStopped, this, &InputQuickerWidget::onMonitorStopped);
     connect(tblMonitor, &QTableWidget::cellClicked, this, &InputQuickerWidget::onMonitorRowActivated);
     connect(tblMonitor, &QTableWidget::cellDoubleClicked, this, &InputQuickerWidget::onMonitorRowDoubleClicked);
+    connect(statusTimer, &QTimer::timeout, this, &InputQuickerWidget::pollStatusAndLog);
 
     manager->loadSettings();
     populateDevices();
 
     chkEnabled->setChecked(manager->enabled());
+    chkDaemonAutostart->setChecked(manager->daemonAutostart() || manager->isDaemonAutostartInstalled());
     chkGrabDevice->setChecked(manager->grabDevice());
     const int axisIndex = cmbWheelAxis->findData(manager->wheel2Axis());
     if (axisIndex >= 0) {
@@ -164,6 +184,8 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     refreshBindingsTable();
     updateStatus(manager->statusText());
     updateMonitorButtons();
+    statusTimer->start(1500);
+    autoStartIfEnabled();
 }
 
 InputQuickerWidget::~InputQuickerWidget() = default;
@@ -562,7 +584,62 @@ QString InputQuickerWidget::actionDisplayText(const QJsonObject &action) const
 void InputQuickerWidget::syncManagerFromUi()
 {
     manager->setEnabled(chkEnabled->isChecked());
+    manager->setDaemonAutostart(chkDaemonAutostart->isChecked());
     manager->setGrabDevice(chkGrabDevice->isChecked());
     manager->setDevicePath(selectedDevicePath());
     manager->setWheel2Axis(cmbWheelAxis->currentData().toString());
+}
+
+void InputQuickerWidget::autoStartIfEnabled()
+{
+    const QString xbindPath = QDir::home().filePath(QStringLiteral(".xbindkeysrc"));
+    const QString noautoPath = QDir::home().filePath(QStringLiteral(".xbindkeys.noauto"));
+    if (QFileInfo::exists(xbindPath) && !QFileInfo::exists(noautoPath)) {
+        appendLog(QStringLiteral(
+            "检测到 ~/.xbindkeysrc 仍在开机自启。若要用本页管理鼠标侧键，请点「迁移并接管 xbindkeys」。"));
+    }
+
+    if (!manager->enabled()) {
+        return;
+    }
+    syncManagerFromUi();
+    if (!manager->applySettings()) {
+        appendLog(QStringLiteral("自动启动失败，请检查 python3-evdev、xdotool 和 /dev/input 权限。"));
+    }
+}
+
+void InputQuickerWidget::onMigrateXbindkeysClicked()
+{
+    const auto reply = QMessageBox::question(
+        this,
+        QStringLiteral("迁移 xbindkeys"),
+        QStringLiteral("将导入鼠标侧键→切换工作区规则，禁用系统 xbindkeys 开机启动，"
+                       "并启动快捷助手 daemon。是否继续？"));
+    if (reply != QMessageBox::Yes) {
+        return;
+    }
+
+    syncManagerFromUi();
+    manager->setEnabled(true);
+    chkEnabled->setChecked(true);
+    manager->migrateXbindkeysSideButtons();
+    manager->disableSystemXbindkeys();
+    manager->setDaemonAutostart(true);
+    chkDaemonAutostart->setChecked(true);
+    refreshBindingsTable();
+
+    if (!manager->applySettings()) {
+        appendLog(QStringLiteral("迁移后启动失败，请查看环境检测结果。"));
+        return;
+    }
+    appendLog(QStringLiteral("已接管 xbindkeys：侧键映射改由快捷助手管理。"));
+}
+
+void InputQuickerWidget::pollStatusAndLog()
+{
+    updateStatus(manager->statusText());
+    const QStringList lines = manager->pollDaemonLog(logOffset);
+    for (const QString &line : lines) {
+        txtLog->append(line);
+    }
 }

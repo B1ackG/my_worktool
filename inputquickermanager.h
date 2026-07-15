@@ -55,18 +55,23 @@ public:
     bool isMonitorRunning() const;
     QString statusText() const;
     QString configFilePath() const;
+    QString pidFilePath() const;
+    QString logFilePath() const;
     QString daemonScriptPath() const;
     QString captureScriptPath() const;
     QString monitorScriptPath() const;
     QString deviceUtilsScriptPath() const;
+    QString daemonAutostartDesktopPath() const;
 
     bool enabled() const;
+    bool daemonAutostart() const;
     QString devicePath() const;
     QString wheel2Axis() const;
     bool grabDevice() const;
     QList<QuickerBinding> bindings() const;
 
     void setEnabled(bool enabled);
+    void setDaemonAutostart(bool enabled);
     void setDevicePath(const QString &path);
     void setWheel2Axis(const QString &axis);
     void setGrabDevice(bool grab);
@@ -80,6 +85,12 @@ public:
 
     QList<QuickerBinding> defaultWorkspaceBindings() const;
     void importDefaultWorkspaceBindings();
+
+    bool isDaemonAutostartInstalled() const;
+    bool setDaemonAutostartInstalled(bool enabled);
+    int migrateXbindkeysSideButtons();
+    bool disableSystemXbindkeys();
+    QStringList pollDaemonLog(qint64 &offset) const;
 
     bool captureTrigger(const QString &devicePath, int timeoutMs, QJsonObject &triggerOut, QString &errorOut);
     QString formatCaptureError(const QString &stderrText) const;
@@ -117,10 +128,14 @@ private:
     QList<DeviceInfo> refreshDeviceListFromProc() const;
     bool reloadDaemonViaSignal();
     bool daemonNeedsRestart() const;
+    qint64 readDaemonPid() const;
+    bool isPidAlive(qint64 pid) const;
+    void clearStalePidFile() const;
 
     QProcess *daemonProcess;
     QProcess *monitorProcess;
     bool enabledValue;
+    bool daemonAutostartValue;
     QString devicePathValue;
     QString wheel2AxisValue;
     bool grabDeviceValue;
@@ -128,6 +143,7 @@ private:
     bool lastAppliedGrabDevice;
     QList<QuickerBinding> bindingsValue;
     QString monitorLineBuffer;
+    bool ownDaemonProcess;
 };
 
 #endif // INPUTQUICKERMANAGER_H
