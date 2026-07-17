@@ -60,3 +60,6 @@ patch.txt
 qmlcache_loader.cpp
 res_qmlcache.qrc
 system_check.log
+
+# Git worktrees created by assistant
+.worktrees/

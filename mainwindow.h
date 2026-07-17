@@ -111,6 +111,14 @@ public:
     ~MainWindow();
     void onImportStandardFileClicked();
 
+    /** Worktree 管理对话框用：切换当前 Git 工作目录并写入记忆。 */
+    void enterGitRepoPath(const QString &path);
+    /** 仅写入记忆（不切换当前目录激活逻辑以外的副作用也可触发 activate）。 */
+    void rememberGitRepoPath(const QString &path);
+    void forgetGitRepoPath(const QString &path);
+    void appendGitLogHtml(const QString &html);
+    void refreshAfterWorktreeApply();
+
     enum class Float32WordOrder {
         CDAB = 0,
         ABCD = 1,
@@ -187,14 +195,12 @@ private slots:
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
     void onGitRemoteAddClicked(); // 新增：链接远程仓库
     void onGitCheckIgnoreClicked();
-    void onGitWorktreeListClicked();
-    void onGitWorktreeAddClicked();
-    void onGitWorktreeRemoveClicked();
-    void onGitWorktreePruneClicked();
+    void onGitWorktreeManageClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
     void onGitSoftResetClicked();   // <--- 新增
     void onGitCopyForDailyReportClicked();
+    void onGitOpenDailyReportClicked();
     void onDailyReportAutoSaveTick();
     void onGitRemoveHistoryClicked();
     void onGitDirChanged();
@@ -415,16 +421,14 @@ private:
     QPushButton *btnGitOpenIgnore;
     QPushButton *btnGitGetSshKey; // 新增
     QPushButton *btnGitRemoteAdd; // 新增
-    QPushButton *btnGitWorktreeList;
-    QPushButton *btnGitWorktreeAdd;
-    QPushButton *btnGitWorktreeRemove;
-    QPushButton *btnGitWorktreePrune;
+    QPushButton *btnGitWorktreeManage;
     QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
     QPushButton *btnGitSoftReset; // <--- 新增
     QPushButton *btnGitCopyDaily;
+    QPushButton *btnGitOpenDaily;
     QTextEdit *txtGitLog;
     QLineEdit *txtScpTargetIp;
     QLineEdit *txtScpPassword;

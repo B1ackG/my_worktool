@@ -19,7 +19,12 @@ SOURCES += \
     inputquickerwidget.cpp \
     quickerbindingdialog.cpp \
     quickerkeyboardutils.cpp \
-    keyboardsteprow.cpp
+    keyboardsteprow.cpp \
+    gitworktreerunner.cpp \
+    gitworktreesetup.cpp \
+    gitworktreeapplydialog.cpp \
+    gitworktreewizard.cpp \
+    gitworktreedialog.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -31,7 +36,13 @@ HEADERS += \
     inputquickerwidget.h \
     quickerbindingdialog.h \
     quickerkeyboardutils.h \
-    keyboardsteprow.h
+    keyboardsteprow.h \
+    gitworktreeinfo.h \
+    gitworktreerunner.h \
+    gitworktreesetup.h \
+    gitworktreeapplydialog.h \
+    gitworktreewizard.h \
+    gitworktreedialog.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

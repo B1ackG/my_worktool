@@ -52,6 +52,7 @@ public:
     QList<DeviceInfo> refreshDeviceList() const;
 
     bool isDaemonRunning() const;
+    qint64 daemonPid() const;
     bool isMonitorRunning() const;
     QString statusText() const;
     QString configFilePath() const;
@@ -129,8 +130,11 @@ private:
     bool reloadDaemonViaSignal();
     bool daemonNeedsRestart() const;
     qint64 readDaemonPid() const;
+    qint64 findDaemonPidByProcess() const;
+    qint64 resolveDaemonPid() const;
     bool isPidAlive(qint64 pid) const;
     void clearStalePidFile() const;
+    void writePidFile(qint64 pid) const;
 
     QProcess *daemonProcess;
     QProcess *monitorProcess;

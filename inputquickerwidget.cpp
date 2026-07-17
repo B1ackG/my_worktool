@@ -1,191 +1,101 @@
 #include "inputquickerwidget.h"
 #include "quickerbindingdialog.h"
 
-#include <QDateTime>
-#include <QDir>
-#include <QFileInfo>
-#include <QGridLayout>
-#include <QGroupBox>
-#include <QColor>
-#include <QBrush>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QJsonObject>
+#include <QLabel>
 #include <QMessageBox>
 #include <QSignalBlocker>
-#include <QSplitter>
-#include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
-
-namespace {
-constexpr int kMonitorTriggerRole = Qt::UserRole;
-constexpr int kMonitorMaxRows = 500;
-}
 
 InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     : QWidget(parent)
     , manager(new InputQuickerManager(this))
     , statusTimer(new QTimer(this))
-    , logOffset(0)
 {
     QLabel *header = new QLabel(QStringLiteral("快捷助手"), this);
     header->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: bold; color: #333; margin-bottom: 8px;"));
 
-    chkEnabled = new QCheckBox(QStringLiteral("启用快捷助手"), this);
+    QLabel *hint = new QLabel(
+        QStringLiteral("本页仅管理映射脚本；实际按键由开机自启的守护脚本执行。"), this);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(QStringLiteral("color: #666; margin-bottom: 4px;"));
+
+    chkEnabled = new QCheckBox(QStringLiteral("启用映射守护"), this);
     chkEnabled->setChecked(true);
-    chkEnabled->setToolTip(QStringLiteral("总开关：关闭后停止 daemon，所有输入映射不生效。"));
-
-    chkDaemonAutostart = new QCheckBox(QStringLiteral("开机自启动 daemon（独立于主程序，替代 xbindkeys）"), this);
-    chkDaemonAutostart->setChecked(true);
-    chkDaemonAutostart->setToolTip(
-        QStringLiteral("写入 ~/.config/autostart/input-quicker-daemon.desktop\n"
-                       "登录后直接启动映射守护，无需打开本程序窗口。"));
-
-    chkGrabDevice = new QCheckBox(QStringLiteral("独占捕获设备（可能影响鼠标正常功能）"), this);
-    chkGrabDevice->setToolTip(
-        QStringLiteral("默认不勾选：监听设备但不独占，鼠标/滚轮仍交给系统。\n"
-                       "映射主滚轮时，系统滚动与快捷动作会同时触发。\n"
-                       "仅当不勾选时收不到事件再开启此项。"));
-    chkGrabDevice->setChecked(false);
+    chkEnabled->setToolTip(
+        QStringLiteral("开启：启动守护脚本并写入开机自启。\n"
+                       "关闭：停止脚本并取消开机自启。\n"
+                       "本程序只负责管理配置与脚本，映射不依赖主窗口保持打开。"));
 
     cmbDevice = new QComboBox(this);
     cmbDevice->setMinimumWidth(360);
-    cmbWheelAxis = new QComboBox(this);
-    cmbWheelAxis->addItem(QStringLiteral("REL_HWHEEL (第二滚轮/横向)"), QStringLiteral("REL_HWHEEL"));
-    cmbWheelAxis->addItem(QStringLiteral("REL_WHEEL (普通滚轮)"), QStringLiteral("REL_WHEEL"));
+    cmbDevice->setToolTip(QStringLiteral("选择要映射的输入设备；「自动选择」按能力评分挑选。"));
 
-    btnRefreshDevices = new QPushButton(QStringLiteral("刷新设备"), this);
-    btnEnvCheck = new QPushButton(QStringLiteral("环境检测"), this);
-    btnStartMonitor = new QPushButton(QStringLiteral("开始监听"), this);
-    btnStartMonitor->setStyleSheet(QStringLiteral("background-color: #e3f2fd; font-weight: bold;"));
-    btnStopMonitor = new QPushButton(QStringLiteral("停止监听"), this);
-    btnStopMonitor->setEnabled(false);
-    btnApply = new QPushButton(QStringLiteral("应用配置"), this);
-    btnApply->setStyleSheet(QStringLiteral("font-weight: bold;"));
-    btnStop = new QPushButton(QStringLiteral("停止 daemon"), this);
-    btnMigrateXbindkeys = new QPushButton(QStringLiteral("迁移并接管 xbindkeys"), this);
-    btnMigrateXbindkeys->setToolTip(
-        QStringLiteral("导入侧键→切换工作区规则，创建 .xbindkeys.noauto 并结束现有 xbindkeys。"));
+    btnRefreshDevices = new QPushButton(QStringLiteral("刷新"), this);
+    btnRefreshDevices->setToolTip(QStringLiteral("重新扫描输入设备列表。"));
+
     lblStatus = new QLabel(QStringLiteral("状态: 未加载"), this);
     lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #555;"));
 
-    QGroupBox *topGroup = new QGroupBox(QStringLiteral("设备与控制"), this);
-    QGridLayout *topGrid = new QGridLayout(topGroup);
-    topGrid->addWidget(chkEnabled, 0, 0, 1, 2);
-    topGrid->addWidget(chkDaemonAutostart, 1, 0, 1, 2);
-    topGrid->addWidget(chkGrabDevice, 2, 0, 1, 2);
-    topGrid->addWidget(new QLabel(QStringLiteral("输入设备:")), 3, 0);
-    topGrid->addWidget(cmbDevice, 3, 1);
-    topGrid->addWidget(new QLabel(QStringLiteral("默认滚轮轴:")), 4, 0);
-    topGrid->addWidget(cmbWheelAxis, 4, 1);
-
-    QHBoxLayout *topButtonLayout = new QHBoxLayout();
-    topButtonLayout->addWidget(btnRefreshDevices);
-    topButtonLayout->addWidget(btnEnvCheck);
-    topButtonLayout->addWidget(btnStartMonitor);
-    topButtonLayout->addWidget(btnStopMonitor);
-    topButtonLayout->addWidget(btnApply);
-    topButtonLayout->addWidget(btnStop);
-    topButtonLayout->addWidget(btnMigrateXbindkeys);
-    topButtonLayout->addStretch();
-    topButtonLayout->addWidget(lblStatus);
-    topGrid->addLayout(topButtonLayout, 5, 0, 1, 2);
-
-    tblMonitor = new QTableWidget(0, 3, this);
-    tblMonitor->setHorizontalHeaderLabels(
-        {QStringLiteral("时间"), QStringLiteral("事件"), QStringLiteral("可绑定")});
-    tblMonitor->horizontalHeader()->setStretchLastSection(true);
-    tblMonitor->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    tblMonitor->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    tblMonitor->setSelectionBehavior(QAbstractItemView::SelectRows);
-    tblMonitor->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    tblMonitor->setAlternatingRowColors(true);
-    tblMonitor->setToolTip(QStringLiteral("单击或双击可绑定事件可创建快捷规则"));
-
-    QGroupBox *monitorGroup = new QGroupBox(QStringLiteral("输入检测"), this);
-    QVBoxLayout *monitorLayout = new QVBoxLayout(monitorGroup);
-    QLabel *monitorHint = new QLabel(
-        QStringLiteral("开始监听后，在此查看鼠标按键/滚轮事件。单击或双击带「可绑定」的事件可创建规则。"), this);
-    monitorHint->setWordWrap(true);
-    monitorHint->setStyleSheet(QStringLiteral("color: #666;"));
-    monitorLayout->addWidget(monitorHint);
-    monitorLayout->addWidget(tblMonitor, 1);
+    QHBoxLayout *topRow = new QHBoxLayout();
+    topRow->addWidget(chkEnabled);
+    topRow->addSpacing(16);
+    topRow->addWidget(new QLabel(QStringLiteral("输入设备:"), this));
+    topRow->addWidget(cmbDevice, 1);
+    topRow->addWidget(btnRefreshDevices);
+    topRow->addSpacing(12);
+    topRow->addWidget(lblStatus);
 
     tblBindings = new QTableWidget(0, 5, this);
     tblBindings->setHorizontalHeaderLabels(
-        {QStringLiteral("名称"), QStringLiteral("触发器"), QStringLiteral("动作"), QStringLiteral("启用"), QStringLiteral("操作")});
+        {QStringLiteral("名称"), QStringLiteral("触发器"), QStringLiteral("动作"),
+         QStringLiteral("启用"), QStringLiteral("操作")});
     tblBindings->horizontalHeader()->setStretchLastSection(true);
     tblBindings->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     tblBindings->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     tblBindings->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     tblBindings->setSelectionBehavior(QAbstractItemView::SelectRows);
     tblBindings->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tblBindings->setAlternatingRowColors(true);
 
     btnAddBinding = new QPushButton(QStringLiteral("新增规则"), this);
-    btnImportDefaults = new QPushButton(QStringLiteral("导入默认工作区规则"), this);
 
-    QGroupBox *rulesGroup = new QGroupBox(QStringLiteral("快捷规则"), this);
-    QVBoxLayout *rulesLayout = new QVBoxLayout(rulesGroup);
     QHBoxLayout *bindingButtonLayout = new QHBoxLayout();
     bindingButtonLayout->addWidget(btnAddBinding);
-    bindingButtonLayout->addWidget(btnImportDefaults);
     bindingButtonLayout->addStretch();
-    rulesLayout->addLayout(bindingButtonLayout);
-    rulesLayout->addWidget(tblBindings, 1);
-
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(monitorGroup);
-    splitter->addWidget(rulesGroup);
-    splitter->setStretchFactor(0, 1);
-    splitter->setStretchFactor(1, 1);
-
-    txtLog = new QTextEdit(this);
-    txtLog->setReadOnly(true);
-    txtLog->setMaximumHeight(140);
-    txtLog->setPlaceholderText(QStringLiteral("快捷助手运行日志..."));
 
     QVBoxLayout *layout = new QVBoxLayout(this);
     layout->addWidget(header);
-    layout->addWidget(topGroup);
-    layout->addWidget(splitter, 1);
-    layout->addWidget(new QLabel(QStringLiteral("运行日志:"), this));
-    layout->addWidget(txtLog);
+    layout->addWidget(hint);
+    layout->addLayout(topRow);
+    layout->addLayout(bindingButtonLayout);
+    layout->addWidget(tblBindings, 1);
 
     connect(btnRefreshDevices, &QPushButton::clicked, this, &InputQuickerWidget::populateDevices);
-    connect(btnEnvCheck, &QPushButton::clicked, this, &InputQuickerWidget::onEnvCheckClicked);
-    connect(btnStartMonitor, &QPushButton::clicked, this, &InputQuickerWidget::onStartMonitorClicked);
-    connect(btnStopMonitor, &QPushButton::clicked, this, &InputQuickerWidget::onStopMonitorClicked);
-    connect(btnApply, &QPushButton::clicked, this, &InputQuickerWidget::onApplyClicked);
-    connect(btnStop, &QPushButton::clicked, this, &InputQuickerWidget::onStopClicked);
     connect(btnAddBinding, &QPushButton::clicked, this, &InputQuickerWidget::onAddBindingClicked);
-    connect(btnImportDefaults, &QPushButton::clicked, this, &InputQuickerWidget::onImportDefaultsClicked);
-    connect(btnMigrateXbindkeys, &QPushButton::clicked, this, &InputQuickerWidget::onMigrateXbindkeysClicked);
+    connect(chkEnabled, &QCheckBox::toggled, this, &InputQuickerWidget::onEnabledToggled);
+    connect(cmbDevice, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &InputQuickerWidget::onDeviceChanged);
     connect(manager, &InputQuickerManager::bindingsChanged, this, &InputQuickerWidget::refreshBindingsTable);
     connect(manager, &InputQuickerManager::statusChanged, this, &InputQuickerWidget::updateStatus);
-    connect(manager, &InputQuickerManager::logMessage, this, &InputQuickerWidget::appendLog);
-    connect(manager, &InputQuickerManager::monitorEventReceived, this, &InputQuickerWidget::onMonitorEvent);
-    connect(manager, &InputQuickerManager::monitorStarted, this, &InputQuickerWidget::onMonitorStarted);
-    connect(manager, &InputQuickerManager::monitorStopped, this, &InputQuickerWidget::onMonitorStopped);
-    connect(tblMonitor, &QTableWidget::cellClicked, this, &InputQuickerWidget::onMonitorRowActivated);
-    connect(tblMonitor, &QTableWidget::cellDoubleClicked, this, &InputQuickerWidget::onMonitorRowDoubleClicked);
-    connect(statusTimer, &QTimer::timeout, this, &InputQuickerWidget::pollStatusAndLog);
+    connect(statusTimer, &QTimer::timeout, this, &InputQuickerWidget::pollStatus);
 
     manager->loadSettings();
+
     populateDevices();
 
-    chkEnabled->setChecked(manager->enabled());
-    chkDaemonAutostart->setChecked(manager->daemonAutostart() || manager->isDaemonAutostartInstalled());
-    chkGrabDevice->setChecked(manager->grabDevice());
-    const int axisIndex = cmbWheelAxis->findData(manager->wheel2Axis());
-    if (axisIndex >= 0) {
-        cmbWheelAxis->setCurrentIndex(axisIndex);
+    {
+        const QSignalBlocker blocker(chkEnabled);
+        chkEnabled->setChecked(manager->enabled());
     }
+
+    ensureDefaultsIfEmpty();
     refreshBindingsTable();
     updateStatus(manager->statusText());
-    updateMonitorButtons();
     statusTimer->start(1500);
-    autoStartIfEnabled();
+    applyChanges(false);
 }
 
 InputQuickerWidget::~InputQuickerWidget() = default;
@@ -206,9 +116,9 @@ void InputQuickerWidget::populateDevices()
     for (const InputQuickerManager::DeviceInfo &device : devices) {
         QString label;
         if (device.recommended) {
-            label = QStringLiteral("[推荐] %1  (%2)").arg(device.name, device.path);
+            label = QStringLiteral("[推荐] %1  (%2)").arg(device.name).arg(device.path);
         } else {
-            label = QStringLiteral("%1  (%2)").arg(device.name, device.path);
+            label = QStringLiteral("%1  (%2)").arg(device.name).arg(device.path);
         }
         if (!device.capsSummary.isEmpty()) {
             label += QStringLiteral(" [%1]").arg(device.capsSummary);
@@ -267,166 +177,15 @@ void InputQuickerWidget::refreshBindingsTable()
     }
 }
 
-void InputQuickerWidget::onApplyClicked()
+void InputQuickerWidget::onEnabledToggled(bool checked)
 {
-    syncManagerFromUi();
-    if (!manager->applySettings()) {
-        appendLog(QStringLiteral("快捷助手启动失败，请检查 python3-evdev、xdotool 和 /dev/input 权限。"));
-    }
+    Q_UNUSED(checked)
+    applyChanges();
 }
 
-void InputQuickerWidget::onStopClicked()
+void InputQuickerWidget::onDeviceChanged()
 {
-    manager->stopDaemon();
-}
-
-void InputQuickerWidget::onEnvCheckClicked()
-{
-    const InputQuickerEnvCheck check = manager->runEnvironmentCheck();
-    const QString body = check.messages.join(QStringLiteral("\n"));
-    if (check.allOk()) {
-        QMessageBox::information(this, QStringLiteral("环境检测"), body);
-    } else {
-        QMessageBox::warning(this, QStringLiteral("环境检测"), body);
-    }
-}
-
-void InputQuickerWidget::updateMonitorButtons()
-{
-    const bool running = manager->isMonitorRunning();
-    btnStartMonitor->setEnabled(!running);
-    btnStopMonitor->setEnabled(running);
-}
-
-void InputQuickerWidget::onStartMonitorClicked()
-{
-    if (manager->isDaemonRunning()) {
-        const auto reply = QMessageBox::question(
-            this,
-            QStringLiteral("开始监听"),
-            QStringLiteral("监听前建议停止 daemon，否则可能抢不到设备。是否继续？"));
-        if (reply != QMessageBox::Yes) {
-            return;
-        }
-        manager->stopDaemon();
-    }
-
-    syncManagerFromUi();
-    tblMonitor->setRowCount(0);
-    if (!manager->startInputMonitor(selectedDevicePath())) {
-        const InputQuickerEnvCheck check = manager->runEnvironmentCheck();
-        QString detail = check.messages.join(QStringLiteral("\n"));
-        if (!check.inInputGroup || !check.inputReadable) {
-            if (check.inputGroupConfigured && !check.inInputGroup) {
-                detail += QStringLiteral(
-                    "\n\n你已加入 input 组，但当前桌面会话尚未刷新。"
-                    "请注销并重新登录（或重启）后再试。");
-            } else if (!check.inputGroupConfigured) {
-                detail += QStringLiteral(
-                    "\n\n请将当前用户加入 input 组后重新登录：\n"
-                    "sudo usermod -aG input $USER");
-            }
-        }
-        QMessageBox::warning(this, QStringLiteral("无法开始监听"), detail);
-    }
-    updateMonitorButtons();
-}
-
-void InputQuickerWidget::onStopMonitorClicked()
-{
-    manager->stopInputMonitor();
-    updateMonitorButtons();
-}
-
-void InputQuickerWidget::onMonitorStarted(const QString &devicePath, const QString &deviceName)
-{
-    appendLog(QStringLiteral("输入监听已启动: %1 (%2)").arg(deviceName, devicePath));
-    updateMonitorButtons();
-}
-
-void InputQuickerWidget::onMonitorStopped()
-{
-    updateMonitorButtons();
-}
-
-void InputQuickerWidget::onMonitorEvent(const QJsonObject &event)
-{
-    const QString ts = event.value(QStringLiteral("ts")).toString();
-    const QString label = event.value(QStringLiteral("label")).toString();
-    const QJsonObject trigger = event.value(QStringLiteral("trigger")).toObject();
-    const bool bindable = !trigger.isEmpty();
-
-    if (tblMonitor->rowCount() >= kMonitorMaxRows) {
-        tblMonitor->removeRow(0);
-    }
-
-    const int row = tblMonitor->rowCount();
-    tblMonitor->insertRow(row);
-    tblMonitor->setItem(row, 0, new QTableWidgetItem(ts));
-    tblMonitor->setItem(row, 1, new QTableWidgetItem(label));
-
-    auto *bindItem = new QTableWidgetItem(bindable ? QStringLiteral("是") : QStringLiteral("—"));
-    if (bindable) {
-        bindItem->setData(kMonitorTriggerRole, trigger);
-        bindItem->setForeground(QBrush(QColor(QStringLiteral("#1565c0"))));
-        bindItem->setToolTip(triggerDisplayText(trigger));
-    }
-    tblMonitor->setItem(row, 2, bindItem);
-    tblMonitor->scrollToBottom();
-}
-
-void InputQuickerWidget::onMonitorRowActivated(int row, int column)
-{
-    Q_UNUSED(column)
-    if (row < 0) {
-        return;
-    }
-    QTableWidgetItem *bindItem = tblMonitor->item(row, 2);
-    if (!bindItem || !bindItem->data(kMonitorTriggerRole).isValid()) {
-        return;
-    }
-    const QJsonObject trigger = bindItem->data(kMonitorTriggerRole).toJsonObject();
-    openBindingDialogWithTrigger(trigger, false);
-}
-
-void InputQuickerWidget::onMonitorRowDoubleClicked(int row, int column)
-{
-    onMonitorRowActivated(row, column);
-}
-
-bool InputQuickerWidget::openBindingDialogWithTrigger(const QJsonObject &trigger, bool editExisting)
-{
-    Q_UNUSED(editExisting)
-
-    QuickerBindingDialog dialog(manager, this);
-    QuickerBinding binding;
-    binding.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    binding.enabled = true;
-    binding.trigger = trigger;
-    binding.action = QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("preset")},
-        {QStringLiteral("preset"), QStringLiteral("workspace_prev")}
-    };
-    binding.name = triggerDisplayText(trigger);
-    dialog.setBinding(binding);
-    dialog.setDevicePath(selectedDevicePath());
-
-    if (dialog.exec() != QDialog::Accepted) {
-        return false;
-    }
-
-    const QuickerBinding result = dialog.binding();
-    if (result.name.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("无效规则"), QStringLiteral("请填写规则名称。"));
-        return false;
-    }
-    if (manager->isTriggerUsed(result.trigger)) {
-        QMessageBox::warning(this, QStringLiteral("触发器冲突"), QStringLiteral("该触发器已被其他规则使用。"));
-        return false;
-    }
-
-    manager->addBinding(result);
-    return true;
+    applyChanges();
 }
 
 void InputQuickerWidget::onAddBindingClicked()
@@ -460,13 +219,7 @@ void InputQuickerWidget::onAddBindingClicked()
         return;
     }
     manager->addBinding(result);
-}
-
-void InputQuickerWidget::onImportDefaultsClicked()
-{
-    manager->setWheel2Axis(cmbWheelAxis->currentData().toString());
-    manager->importDefaultWorkspaceBindings();
-    appendLog(QStringLiteral("已导入默认工作区规则（跳过已存在的触发器）。"));
+    applyChanges();
 }
 
 void InputQuickerWidget::onEditBindingClicked()
@@ -498,6 +251,7 @@ void InputQuickerWidget::onEditBindingClicked()
         return;
     }
     manager->updateBinding(result);
+    applyChanges();
 }
 
 void InputQuickerWidget::onDeleteBindingClicked()
@@ -514,6 +268,7 @@ void InputQuickerWidget::onDeleteBindingClicked()
     const auto reply = QMessageBox::question(this, QStringLiteral("删除规则"), QStringLiteral("确定删除这条规则吗？"));
     if (reply == QMessageBox::Yes) {
         manager->removeBinding(bindingId);
+        applyChanges();
     }
 }
 
@@ -530,25 +285,24 @@ void InputQuickerWidget::onBindingEnabledToggled()
     }
     binding.enabled = check->isChecked();
     manager->updateBinding(binding);
+    applyChanges();
 }
 
 void InputQuickerWidget::updateStatus(const QString &status)
 {
     lblStatus->setText(QStringLiteral("状态: %1").arg(status));
-    if (status == QStringLiteral("运行中")) {
+    if (status.startsWith(QStringLiteral("守护脚本运行中"))) {
         lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #008000;"));
-    } else if (status == QStringLiteral("未启用")) {
+    } else if (status.startsWith(QStringLiteral("已关闭"))) {
         lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #777;"));
     } else {
         lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #d84315;"));
     }
 }
 
-void InputQuickerWidget::appendLog(const QString &message)
+void InputQuickerWidget::pollStatus()
 {
-    txtLog->append(QStringLiteral("[%1] %2")
-                       .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
-                       .arg(message));
+    updateStatus(manager->statusText());
 }
 
 QString InputQuickerWidget::triggerDisplayText(const QJsonObject &trigger) const
@@ -583,63 +337,58 @@ QString InputQuickerWidget::actionDisplayText(const QJsonObject &action) const
 
 void InputQuickerWidget::syncManagerFromUi()
 {
-    manager->setEnabled(chkEnabled->isChecked());
-    manager->setDaemonAutostart(chkDaemonAutostart->isChecked());
-    manager->setGrabDevice(chkGrabDevice->isChecked());
+    const bool enabled = chkEnabled->isChecked();
+    manager->setEnabled(enabled);
+    // Enable = install boot autostart; disable = remove it.
+    manager->setDaemonAutostart(enabled);
     manager->setDevicePath(selectedDevicePath());
-    manager->setWheel2Axis(cmbWheelAxis->currentData().toString());
 }
 
-void InputQuickerWidget::autoStartIfEnabled()
+bool InputQuickerWidget::applyChanges(bool showFailureDialog)
 {
-    const QString xbindPath = QDir::home().filePath(QStringLiteral(".xbindkeysrc"));
-    const QString noautoPath = QDir::home().filePath(QStringLiteral(".xbindkeys.noauto"));
-    if (QFileInfo::exists(xbindPath) && !QFileInfo::exists(noautoPath)) {
-        appendLog(QStringLiteral(
-            "检测到 ~/.xbindkeysrc 仍在开机自启。若要用本页管理鼠标侧键，请点「迁移并接管 xbindkeys」。"));
-    }
-
-    if (!manager->enabled()) {
-        return;
-    }
     syncManagerFromUi();
     if (!manager->applySettings()) {
-        appendLog(QStringLiteral("自动启动失败，请检查 python3-evdev、xdotool 和 /dev/input 权限。"));
+        if (showFailureDialog) {
+            reportApplyFailure();
+        } else {
+            const InputQuickerEnvCheck check = manager->runEnvironmentCheck();
+            QString shortStatus = QStringLiteral("启动失败");
+            if (!check.evdevOk || !check.xdotoolOk) {
+                shortStatus = QStringLiteral("启动失败 — 缺少依赖");
+            } else if (!check.inputReadable) {
+                shortStatus = QStringLiteral("启动失败 — 无设备权限");
+            }
+            updateStatus(shortStatus);
+        }
+        return false;
     }
-}
-
-void InputQuickerWidget::onMigrateXbindkeysClicked()
-{
-    const auto reply = QMessageBox::question(
-        this,
-        QStringLiteral("迁移 xbindkeys"),
-        QStringLiteral("将导入鼠标侧键→切换工作区规则，禁用系统 xbindkeys 开机启动，"
-                       "并启动快捷助手 daemon。是否继续？"));
-    if (reply != QMessageBox::Yes) {
-        return;
-    }
-
-    syncManagerFromUi();
-    manager->setEnabled(true);
-    chkEnabled->setChecked(true);
-    manager->migrateXbindkeysSideButtons();
-    manager->disableSystemXbindkeys();
-    manager->setDaemonAutostart(true);
-    chkDaemonAutostart->setChecked(true);
-    refreshBindingsTable();
-
-    if (!manager->applySettings()) {
-        appendLog(QStringLiteral("迁移后启动失败，请查看环境检测结果。"));
-        return;
-    }
-    appendLog(QStringLiteral("已接管 xbindkeys：侧键映射改由快捷助手管理。"));
-}
-
-void InputQuickerWidget::pollStatusAndLog()
-{
     updateStatus(manager->statusText());
-    const QStringList lines = manager->pollDaemonLog(logOffset);
-    for (const QString &line : lines) {
-        txtLog->append(line);
+    return true;
+}
+
+void InputQuickerWidget::ensureDefaultsIfEmpty()
+{
+    if (!manager->bindings().isEmpty()) {
+        return;
     }
+    manager->importDefaultWorkspaceBindings();
+}
+
+void InputQuickerWidget::reportApplyFailure()
+{
+    const InputQuickerEnvCheck check = manager->runEnvironmentCheck();
+    const QString detail = check.messages.join(QStringLiteral("\n"));
+    QString shortStatus = QStringLiteral("启动失败");
+    if (!check.evdevOk || !check.xdotoolOk) {
+        shortStatus = QStringLiteral("启动失败 — 缺少依赖");
+    } else if (!check.inputReadable) {
+        shortStatus = QStringLiteral("启动失败 — 无设备权限");
+    }
+    updateStatus(shortStatus);
+
+    QMessageBox::warning(
+        this,
+        QStringLiteral("无法启动映射"),
+        QStringLiteral("设备映射未能启动。\n\n%1\n\n日志: %2")
+            .arg(detail, manager->logFilePath()));
 }

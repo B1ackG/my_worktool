@@ -132,12 +132,13 @@ bool InputQuickerManager::reloadDaemonViaSignal()
         return false;
     }
 
-    const qint64 pid = readDaemonPid();
+    const qint64 pid = resolveDaemonPid();
     if (pid <= 0) {
         return false;
     }
 
     if (::kill(static_cast<pid_t>(pid), SIGHUP) == 0) {
+        writePidFile(pid);
         emit logMessage(QStringLiteral("[快捷助手] 配置已热加载（daemon 未重启）"));
         return true;
     }
@@ -149,7 +150,10 @@ bool InputQuickerManager::reloadDaemonViaSignal()
 bool InputQuickerManager::startDaemon()
 {
     clearStalePidFile();
-    if (isDaemonRunning()) {
+    const qint64 existing = resolveDaemonPid();
+    if (existing > 0) {
+        writePidFile(existing);
+        emit logMessage(QStringLiteral("[快捷助手] daemon 已在运行 (pid %1)").arg(existing));
         emitStatus();
         return true;
     }
@@ -183,20 +187,23 @@ bool InputQuickerManager::startDaemon()
         usleep(50000);
     }
 
-    if (!isDaemonRunning()) {
+    const qint64 running = resolveDaemonPid();
+    if (running <= 0) {
         emit logMessage(QStringLiteral("[快捷助手] daemon 未能保持运行，请查看日志: %1").arg(logFilePath()));
         emitStatus();
         return false;
     }
 
-    emit logMessage(QStringLiteral("[快捷助手] daemon 已启动 (pid %1)").arg(readDaemonPid()));
+    writePidFile(running);
+    emit logMessage(QStringLiteral("[快捷助手] daemon 已启动 (pid %1)").arg(running));
     emitStatus();
     return true;
 }
 
 void InputQuickerManager::stopDaemon()
 {
-    const qint64 pid = readDaemonPid();
+    const qint64 pid = resolveDaemonPid();
+    bool stopped = false;
     if (pid > 0 && isPidAlive(pid)) {
         ::kill(static_cast<pid_t>(pid), SIGTERM);
         for (int i = 0; i < 30 && isPidAlive(pid); ++i) {
@@ -205,17 +212,27 @@ void InputQuickerManager::stopDaemon()
         if (isPidAlive(pid)) {
             ::kill(static_cast<pid_t>(pid), SIGKILL);
         }
-        emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+        stopped = true;
     } else if (daemonProcess->state() != QProcess::NotRunning) {
         daemonProcess->terminate();
         if (!daemonProcess->waitForFinished(3000)) {
             daemonProcess->kill();
             daemonProcess->waitForFinished(1000);
         }
-        emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+        stopped = true;
     }
 
     clearStalePidFile();
+    // Also clear any leftover processes found by name.
+    const qint64 leftover = findDaemonPidByProcess();
+    if (leftover > 0 && isPidAlive(leftover)) {
+        ::kill(static_cast<pid_t>(leftover), SIGTERM);
+        stopped = true;
+    }
+
+    if (stopped) {
+        emit logMessage(QStringLiteral("[快捷助手] daemon 已停止"));
+    }
     ownDaemonProcess = false;
     emitStatus();
 }
@@ -500,22 +517,31 @@ QString InputQuickerManager::formatCaptureError(const QString &stderrText) const
 
 bool InputQuickerManager::isDaemonRunning() const
 {
-    const qint64 pid = readDaemonPid();
-    if (pid > 0 && isPidAlive(pid)) {
-        return true;
+    return resolveDaemonPid() > 0;
+}
+
+qint64 InputQuickerManager::daemonPid() const
+{
+    const qint64 pid = resolveDaemonPid();
+    if (pid > 0) {
+        const qint64 fromFile = readDaemonPid();
+        if (fromFile != pid) {
+            writePidFile(pid);
+        }
     }
-    return daemonProcess->state() != QProcess::NotRunning;
+    return pid;
 }
 
 QString InputQuickerManager::statusText() const
 {
-    if (isDaemonRunning()) {
-        return QStringLiteral("运行中 (pid %1)").arg(readDaemonPid());
+    const qint64 pid = resolveDaemonPid();
+    if (pid > 0) {
+        return QStringLiteral("守护脚本运行中 (pid %1)").arg(pid);
     }
     if (!enabledValue) {
-        return QStringLiteral("未启用");
+        return QStringLiteral("已关闭（脚本未自启）");
     }
-    return QStringLiteral("已停止");
+    return QStringLiteral("守护脚本未在运行");
 }
 
 QString InputQuickerManager::configFilePath() const
@@ -1037,6 +1063,40 @@ qint64 InputQuickerManager::readDaemonPid() const
     return ok ? pid : -1;
 }
 
+qint64 InputQuickerManager::findDaemonPidByProcess() const
+{
+    QDir proc(QStringLiteral("/proc"));
+    const QStringList entries = proc.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &entry : entries) {
+        bool ok = false;
+        const qint64 pid = entry.toLongLong(&ok);
+        if (!ok || pid <= 0) {
+            continue;
+        }
+        QFile cmdline(QStringLiteral("/proc/%1/cmdline").arg(pid));
+        if (!cmdline.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        if (cmdline.readAll().contains("input_quicker_daemon.py")) {
+            return pid;
+        }
+    }
+    return -1;
+}
+
+qint64 InputQuickerManager::resolveDaemonPid() const
+{
+    const qint64 fromFile = readDaemonPid();
+    if (fromFile > 0 && isPidAlive(fromFile)) {
+        QFile cmdline(QStringLiteral("/proc/%1/cmdline").arg(fromFile));
+        if (cmdline.open(QIODevice::ReadOnly)
+            && cmdline.readAll().contains("input_quicker_daemon.py")) {
+            return fromFile;
+        }
+    }
+    return findDaemonPidByProcess();
+}
+
 bool InputQuickerManager::isPidAlive(qint64 pid) const
 {
     if (pid <= 0) {
@@ -1049,9 +1109,25 @@ void InputQuickerManager::clearStalePidFile() const
 {
     const qint64 pid = readDaemonPid();
     if (pid > 0 && isPidAlive(pid)) {
-        return;
+        QFile cmdline(QStringLiteral("/proc/%1/cmdline").arg(pid));
+        if (cmdline.open(QIODevice::ReadOnly) && cmdline.readAll().contains("input_quicker_daemon.py")) {
+            return;
+        }
     }
     QFile::remove(pidFilePath());
+}
+
+void InputQuickerManager::writePidFile(qint64 pid) const
+{
+    if (pid <= 0) {
+        return;
+    }
+    QDir().mkpath(QFileInfo(pidFilePath()).absolutePath());
+    QFile file(pidFilePath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return;
+    }
+    file.write(QByteArray::number(pid) + '\n');
 }
 
 QString InputQuickerManager::daemonAutostartDesktopPath() const

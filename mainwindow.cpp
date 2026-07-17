@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include "gitworktreedialog.h"
+#include "gitworktreerunner.h"
 #include "lifeassistantwidget.h"
 #include "inputquickerwidget.h"
 #include <QMessageBox>
@@ -981,21 +983,10 @@ void MainWindow::createWidgets()
     btnGitCheckIgnore = new QPushButton("检查 .gitignore");
     btnGitCheckIgnore->setToolTip("按所选 Qt/Keil 模板的完整规则与仓库 .gitignore 逐项对照，补全缺失或回写模板");
 
-    btnGitWorktreeList = new QPushButton("Worktree 列表");
-    btnGitWorktreeList->setToolTip("列出当前仓库的所有 git worktree (git worktree list)");
-    btnGitWorktreeList->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
-
-    btnGitWorktreeAdd = new QPushButton("添加 Worktree");
-    btnGitWorktreeAdd->setToolTip("基于当前分支添加一个新的工作树目录 (git worktree add)");
-    btnGitWorktreeAdd->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
-
-    btnGitWorktreeRemove = new QPushButton("移除 Worktree");
-    btnGitWorktreeRemove->setToolTip("安全移除一个工作树目录并清理引用 (git worktree remove)");
-    btnGitWorktreeRemove->setStyleSheet("background-color: #ffebee; font-weight: bold;");
-
-    btnGitWorktreePrune = new QPushButton("清理 Worktree");
-    btnGitWorktreePrune->setToolTip("清理已失效的工作树引用 (git worktree prune)");
-    btnGitWorktreePrune->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
+    btnGitWorktreeManage = new QPushButton("Worktree 管理");
+    btnGitWorktreeManage->setToolTip(
+        "管理 Git 工作树：列表、创建向导、进入、迁回主目录、清理");
+    btnGitWorktreeManage->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
     
     cmbGitHistory = new QComboBox();
     btnGitRefreshLog = new QPushButton("刷新历史");
@@ -1008,6 +999,9 @@ void MainWindow::createWidgets()
 
     btnGitCopyDaily = new QPushButton("复制到日报");
     btnGitCopyDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
+    btnGitOpenDaily = new QPushButton("打开日报");
+    btnGitOpenDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
+    btnGitOpenDaily->setToolTip("用系统默认程序打开今日日报文件");
 
     txtScpTargetIp = new QLineEdit("192.168.1.245");
     txtScpTargetIp->setPlaceholderText("目标设备地址");
@@ -1322,14 +1316,11 @@ QWidget* MainWindow::createGitPage()
     layBtns->addWidget(btnGitStash, 2, 0);
     layBtns->addWidget(btnGitStashPop, 2, 1);
     layBtns->addWidget(btnGitRemoteAdd, 2, 2);
-    layBtns->addWidget(btnGitWorktreeList, 2, 3);
-    layBtns->addWidget(btnGitWorktreeAdd, 2, 4);
-    layBtns->addWidget(btnGitWorktreeRemove, 2, 5);
+    layBtns->addWidget(btnGitWorktreeManage, 2, 3);
 
-    layBtns->addWidget(btnGitWorktreePrune, 3, 0);
-    layBtns->addWidget(btnGitGetSshKey, 3, 1);
-    layBtns->addWidget(btnGitCheckIgnore, 3, 2);
-    layBtns->addWidget(btnGitOpenIgnore, 3, 3);
+    layBtns->addWidget(btnGitGetSshKey, 3, 0);
+    layBtns->addWidget(btnGitCheckIgnore, 3, 1);
+    layBtns->addWidget(btnGitOpenIgnore, 3, 2);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -1357,6 +1348,7 @@ QWidget* MainWindow::createGitPage()
     layHist->addWidget(btnGitSoftReset); // <--- Add Here
     layHist->addWidget(btnGitReset);
     layHist->addWidget(btnGitCopyDaily);
+    layHist->addWidget(btnGitOpenDaily);
     layOps->addLayout(layHist);
 
     // SCP Transfer Section
@@ -1849,10 +1841,7 @@ void MainWindow::createConnections()
     connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
     connect(btnGitGetSshKey, &QPushButton::clicked, this, &MainWindow::onGitGetSshKeyClicked);
     connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
-    connect(btnGitWorktreeList, &QPushButton::clicked, this, &MainWindow::onGitWorktreeListClicked);
-    connect(btnGitWorktreeAdd, &QPushButton::clicked, this, &MainWindow::onGitWorktreeAddClicked);
-    connect(btnGitWorktreeRemove, &QPushButton::clicked, this, &MainWindow::onGitWorktreeRemoveClicked);
-    connect(btnGitWorktreePrune, &QPushButton::clicked, this, &MainWindow::onGitWorktreePruneClicked);
+    connect(btnGitWorktreeManage, &QPushButton::clicked, this, &MainWindow::onGitWorktreeManageClicked);
     connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
@@ -1881,6 +1870,7 @@ void MainWindow::createConnections()
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
+    connect(btnGitOpenDaily, &QPushButton::clicked, this, &MainWindow::onGitOpenDailyReportClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
     connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
     connect(btnApplyThreshold, &QPushButton::clicked, this, [this](){
@@ -4342,164 +4332,110 @@ void MainWindow::onGitGetSshKeyClicked() {
         "SSH 公钥内容已复制到剪贴板！\n\n文件路径: " + keyFile + "\n\n您可以直接去 GitHub 设置中粘贴了。");
 }
 
-void MainWindow::onGitWorktreeListClicked() {
-    runGitCommand(QStringList() << "worktree" << "list");
-}
-
-void MainWindow::onGitWorktreeAddClicked() {
-    QString workDir = cmbGitDir->currentText().trimmed();
-    if (workDir.isEmpty()) return;
-
-    QString currentBranch = gitCheckedOutBranch(workDir);
-    if (currentBranch.isEmpty()) {
-        txtGitLog->append("<font color='red'>错误: 无法识别当前检出的分支，请先切换到一个有效分支。</font>");
+void MainWindow::onGitWorktreeManageClicked()
+{
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Worktree"),
+                             QStringLiteral("请先选择本地 Git 仓库目录。"));
+        return;
+    }
+    if (!isGitRepository(workDir)) {
+        QMessageBox::warning(this, QStringLiteral("Worktree"),
+                             QStringLiteral("当前路径不是有效的 Git 仓库。"));
         return;
     }
 
-    // 1. 检查该分支是否已被其他 Worktree 占用
-    QProcess checkProc;
-    checkProc.setWorkingDirectory(workDir);
-#ifdef Q_OS_WIN
-    checkProc.start("git.exe", QStringList() << "worktree" << "list" << "--porcelain");
-#else
-    checkProc.start("git", QStringList() << "worktree" << "list" << "--porcelain");
-#endif
-    finishGitProcess(checkProc, 15000);
-    QString listOut = QString::fromLocal8Bit(checkProc.readAllStandardOutput());
-    
-    bool branchUsed = listOut.contains("branch refs/heads/" + currentBranch + "\n") || 
-                      listOut.contains("branch refs/heads/" + currentBranch + "\r\n") ||
-                      listOut.endsWith("branch refs/heads/" + currentBranch);
+    GitWorktreeDialog dlg(this, workDir, this);
+    dlg.exec();
+}
 
-    QString branchToUse = currentBranch;
-    bool createNew = false;
-
-    if (branchUsed) {
-        QMessageBox::StandardButton reply;
-        reply = QMessageBox::question(this, "分支已被占用", 
-                                      QString("分支 [%1] 已在其他工作树中打开。\n\n是否基于此分支创建一个新分支（例如 %1_fix）来创建 Worktree?").arg(currentBranch),
-                                      QMessageBox::Yes|QMessageBox::No);
-        if (reply == QMessageBox::No) return;
-        
-        bool ok;
-        branchToUse = QInputDialog::getText(this, "创建新分支", 
-                                           "请输入新分支名称:", QLineEdit::Normal,
-                                           currentBranch + "_work", &ok);
-        if (!ok || branchToUse.trimmed().isEmpty()) return;
-        branchToUse = branchToUse.trimmed();
-        createNew = true;
+void MainWindow::enterGitRepoPath(const QString &path)
+{
+    if (path.trimmed().isEmpty()) {
+        return;
     }
-
-    // 2. 选择路径
-    QDir repoDir(workDir);
-    QString parentPath = repoDir.absolutePath();
-    if (parentPath.endsWith("/")) parentPath.chop(1);
-    
-    QString branchSeed = branchToUse.contains("/") ? branchToUse.split("/").last() : branchToUse;
-    QString suggestedPath = parentPath + "_worktree_" + branchSeed;
-
-    bool ok;
-    QString path = QInputDialog::getText(this, "添加 Git Worktree", 
-                                         "请输入新工作树的本地路径:", QLineEdit::Normal,
-                                         suggestedPath, &ok);
-    if (!ok || path.isEmpty()) return;
-
-    // 3. 执行命令
-    QStringList args;
-    args << "worktree" << "add";
-    if (createNew) {
-        args << "-b" << branchToUse << path << currentBranch; // 基于 currentBranch 创建新分支 branchToUse
-    } else {
-        args << path << branchToUse;
-    }
-    
-    runGitCommand(args);
-
-    // --- 新增：将新路径添加到记忆列表 ---
     saveGitHistory(path);
-    txtGitLog->append(QString("<font color='gray'>[History] 已将新 Worktree 路径添加到记忆记录。</font>"));
+    txtGitLog->append(QStringLiteral("<font color='gray'>[Worktree] 已进入: %1</font>")
+                          .arg(QDir(path).absolutePath()));
 }
 
-void MainWindow::onGitWorktreePruneClicked() {
-    runGitCommand(QStringList() << "worktree" << "prune");
-    txtGitLog->append("<font color='gray'>[Worktree] 已执行清理。</font>");
-}
-
-void MainWindow::onGitWorktreeRemoveClicked() {
-    QString workDir = cmbGitDir->currentText().trimmed();
-    if (workDir.isEmpty()) return;
-
-    // 获取当前 Worktree 列表以便用户选择
-    QProcess process;
-    process.setWorkingDirectory(workDir);
-#ifdef Q_OS_WIN
-    process.start("git.exe", QStringList() << "worktree" << "list" << "--porcelain");
-#else
-    process.start("git", QStringList() << "worktree" << "list" << "--porcelain");
-#endif
-    finishGitProcess(process, 15000);
-    
-    QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
-    QStringList lines = output.split("\n");
-    QStringList worktrees;
-    QString currentPath;
-    
-    // 解析 porcelain 输出获取路径
-    for (const QString &line : lines) {
-        if (line.startsWith("worktree ")) {
-            QString path = line.mid(9).trimmed();
-            // 排除主工作目录 (通常列表第一个)
-            if (path != workDir && QDir(path).absolutePath() != QDir(workDir).absolutePath()) {
-                worktrees << path;
-            }
-        }
-    }
-
-    if (worktrees.isEmpty()) {
-        QMessageBox::information(this, "移除 Worktree", "当前没有可移除的辅助工作树。");
+void MainWindow::rememberGitRepoPath(const QString &path)
+{
+    if (path.trimmed().isEmpty()) {
         return;
     }
+    const QString absDir = QDir(path).absolutePath();
+    const QString current = cmbGitDir->currentText().trimmed();
 
-    bool ok;
-    QString target = QInputDialog::getItem(this, "移除 Git Worktree", 
-                                           "请选择要永久移除的工作树路径:", worktrees, 0, false, &ok);
-    
-    if (ok && !target.isEmpty()) {
-        QMessageBox::StandardButton reply;
-        reply = QMessageBox::question(this, "确认移除", 
-                                      QString("确定要移除并删除目录 %1 吗?\n这将删除该目录下所有未提交的内容!").arg(target),
-                                      QMessageBox::Yes|QMessageBox::No);
-        
-        if (reply == QMessageBox::Yes) {
-            // --force 以防有未提交改动，慎重起见可以去掉 --force
-            runGitCommand(QStringList() << "worktree" << "remove" << target);
-
-            // --- 新增：从记忆路径中删除 ---
-            QSettings settings("LiChenYang", "LinuxHelper");
-            QStringList history = settings.value("GitHistory").toStringList();
-            QString targetPath = QDir(target).absolutePath();
-            
-            bool removed = false;
-            if (history.contains(targetPath)) {
-                history.removeAll(targetPath);
-                removed = true;
-            }
-            if (history.contains(target)) {
-                history.removeAll(target);
-                removed = true;
-            }
-            
-            if (removed) {
-                removeGitRepoAlias(targetPath);
-                if (gitRepoMainProjectPath() == targetPath) {
-                    setGitRepoMainProject(QString());
-                }
-                settings.setValue("GitHistory", history);
-                applyGitHistoryToCombo(history);
-                txtGitLog->append(QString("<font color='gray'>[History] 已从记忆记录中同步移除此 Worktree 路径。</font>"));
-            }
-        }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    history.removeAll(path);
+    history.removeAll(absDir);
+    history.prepend(absDir);
+    while (history.size() > MAX_HISTORY) {
+        history.removeLast();
     }
+    settings.setValue(QStringLiteral("GitHistory"), history);
+
+    // 保持当前主目录选中，不切换到新 worktree
+    applyGitHistoryToCombo(history, current.isEmpty() ? absDir : current, false);
+    if (!current.isEmpty()) {
+        cmbGitDir->blockSignals(true);
+        cmbGitDir->setCurrentText(current);
+        cmbGitDir->blockSignals(false);
+    }
+    refreshGitRepoMetaTable();
+    txtGitLog->append(QStringLiteral("<font color='gray'>[History] 已记录 Worktree 路径: %1</font>")
+                          .arg(absDir));
+}
+
+void MainWindow::forgetGitRepoPath(const QString &path)
+{
+    if (path.trimmed().isEmpty()) {
+        return;
+    }
+    const QString absDir = QDir(path).absolutePath();
+    const QString current = cmbGitDir->currentText().trimmed();
+    const QString currentAbs = QDir(current).absolutePath();
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    history.removeAll(path);
+    history.removeAll(absDir);
+    removeGitRepoAlias(absDir);
+    if (gitRepoMainProjectPath() == absDir) {
+        setGitRepoMainProject(QString());
+    }
+    settings.setValue(QStringLiteral("GitHistory"), history);
+
+    QString nextSelect = current;
+    if (currentAbs == absDir || current == path) {
+        nextSelect = history.isEmpty() ? QString() : history.first();
+        applyGitHistoryToCombo(history, nextSelect, true);
+    } else {
+        applyGitHistoryToCombo(history, current, false);
+        cmbGitDir->blockSignals(true);
+        cmbGitDir->setCurrentText(current);
+        cmbGitDir->blockSignals(false);
+        refreshGitRepoMetaTable();
+    }
+    txtGitLog->append(QStringLiteral("<font color='gray'>[History] 已从记忆移除: %1</font>")
+                          .arg(absDir));
+}
+
+void MainWindow::appendGitLogHtml(const QString &html)
+{
+    if (!txtGitLog || html.isEmpty()) {
+        return;
+    }
+    txtGitLog->append(html);
+}
+
+void MainWindow::refreshAfterWorktreeApply()
+{
+    refreshGitBranchesLocal();
+    runGitCommand(QStringList() << QStringLiteral("status"));
 }
 
 void MainWindow::onGitRemoteAddClicked() {
@@ -4933,6 +4869,22 @@ void MainWindow::onGitCopyForDailyReportClicked() {
     txtGitLog->append(QStringLiteral("已拼接今日(%1)日报并复制:").arg(today));
     txtGitLog->append(finalContent);
     saveDailyReportToDocs(finalContent);
+}
+
+void MainWindow::onGitOpenDailyReportClicked() {
+    const QString filePath = dailyReportFilePathForToday();
+    if (!QFileInfo::exists(filePath)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 今日日报文件不存在: %1</font>").arg(filePath));
+        txtGitLog->append(QStringLiteral("提示: 可先点击「复制到日报」生成文件。"));
+        return;
+    }
+
+    const bool started = QDesktopServices::openUrl(QUrl::fromLocalFile(filePath));
+    if (started) {
+        txtGitLog->append(QStringLiteral("信息: 已尝试使用系统默认程序打开 %1").arg(filePath));
+    } else {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 无法打开日报文件，请手动打开: %1</font>").arg(filePath));
+    }
 }
 
 QString MainWindow::buildDailyReportContent(QString *errorOut, bool showUiWarnings) {
@@ -7293,70 +7245,9 @@ QString MainWindow::resolveGitMainBranch(const QString &repoDir) const {
     return detectDefaultMainBranch(repoDir, gitBranchHintLinesFromCombo());
 }
 
-QString MainWindow::gitWorktreePathUsingBranch(const QString &repoDir, const QString &branchName) const {
-    const QString target = normalizeLocalBranchRef(branchName);
-    if (target.isEmpty()) {
-        return QString();
-    }
-
-    QProcess process;
-    process.setWorkingDirectory(repoDir);
-#ifdef Q_OS_WIN
-    process.start(QStringLiteral("git.exe"),
-                  QStringList() << QStringLiteral("worktree") << QStringLiteral("list")
-                                << QStringLiteral("--porcelain"));
-#else
-    process.start(QStringLiteral("git"),
-                  QStringList() << QStringLiteral("worktree") << QStringLiteral("list")
-                                << QStringLiteral("--porcelain"));
-#endif
-    if (!process.waitForFinished(10000) || process.exitCode() != 0) {
-        return QString();
-    }
-
-#ifdef Q_OS_WIN
-    const QString output = QString::fromUtf8(process.readAllStandardOutput());
-#else
-    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
-#endif
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-#else
-    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-#endif
-
-    QString currentPath;
-    QString currentBranch;
-    const QString prefix = QStringLiteral("refs/heads/");
-
-    auto checkCurrent = [&]() -> QString {
-        if (!currentPath.isEmpty() && !currentBranch.isEmpty()
-            && currentBranch.compare(target, Qt::CaseInsensitive) == 0) {
-            return currentPath;
-        }
-        return QString();
-    };
-
-    for (const QString &line : lines) {
-        if (line.startsWith(QStringLiteral("worktree "))) {
-            const QString hit = checkCurrent();
-            if (!hit.isEmpty()) {
-                return hit;
-            }
-            currentPath = line.mid(9).trimmed();
-            currentBranch.clear();
-        } else if (line.startsWith(QStringLiteral("branch "))) {
-            const QString ref = line.mid(7).trimmed();
-            if (ref.startsWith(prefix)) {
-                currentBranch = ref.mid(prefix.size());
-            }
-            const QString hit = checkCurrent();
-            if (!hit.isEmpty()) {
-                return hit;
-            }
-        }
-    }
-    return checkCurrent();
+QString MainWindow::gitWorktreePathUsingBranch(const QString &repoDir, const QString &branchName) const
+{
+    return GitWorktreeRunner::pathForBranch(repoDir, branchName);
 }
 
 bool MainWindow::gitBranchExists(const QString &repoDir, const QString &branchName) const {

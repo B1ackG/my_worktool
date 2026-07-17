@@ -114,9 +114,31 @@ def pid_is_alive(pid: int) -> bool:
         return False
 
 
-def ensure_single_instance() -> None:
+def pid_runs_daemon(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"input_quicker_daemon.py" in cmdline
+
+
+def clear_stale_pid_file() -> None:
     existing = read_pid()
-    if existing is not None and existing != os.getpid() and pid_is_alive(existing):
+    if existing is None:
+        return
+    if existing == os.getpid():
+        return
+    if pid_is_alive(existing) and pid_runs_daemon(existing):
+        return
+    remove_pid_file()
+
+
+def ensure_single_instance() -> None:
+    clear_stale_pid_file()
+    existing = read_pid()
+    if existing is not None and existing != os.getpid() and pid_runs_daemon(existing) and pid_is_alive(existing):
         log(f"ERROR: another input_quicker_daemon is already running (pid {existing})")
         sys.exit(4)
 
