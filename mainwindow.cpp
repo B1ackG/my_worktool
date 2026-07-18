@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include "gitstageguard.h"
+#include "gitstagereviewdialog.h"
 #include "gitworktreedialog.h"
 #include "gitworktreerunner.h"
 #include "lifeassistantwidget.h"
@@ -353,6 +355,8 @@ QString gitIgnoreDefaultTemplate(const QString &type)
             "*.o\n*.obj\nMakefile*\nmoc_*\nui_*\nqrc_*\n.qmake.stash\nbuild/\nbuild_*/\n\n"
             ".qtc_clangd/\n"
             "build_log.txt\n\n"
+            "# Logs and local data dumps\n"
+            "*.log\n*.LOG\nmonitor_logs/\n*.csv\n\n"
             "# Project specific\n"
             "ModbusTCPAssistant\n*.user\n*.user.*\n\n"
             "# OS files\n.DS_Store\nThumbs.db\n");
@@ -365,6 +369,8 @@ QString gitIgnoreDefaultTemplate(const QString &type)
             "# Keil IDE files\n"
             "Listings/\nObjects/\n"
             "*.uvgui.*\n*.uvguix.*\n*.bak\n\n"
+            "# Logs and local data dumps\n"
+            "*.log\n*.LOG\nmonitor_logs/\n*.csv\n\n"
             "# OS files\n.DS_Store\nThumbs.db\n");
     }
     return QString();
@@ -3934,6 +3940,181 @@ bool MainWindow::gitHasUncommittedChanges(const QString &workDir) const {
     return !output.isEmpty();
 }
 
+bool MainWindow::gitStageWithReview(const QString &workDir)
+{
+    if (workDir.trimmed().isEmpty() || !QDir(workDir).exists()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: Git 仓库目录无效。</font>"));
+        return false;
+    }
+
+    QString error;
+    const QVector<GitStageEntry> entries = GitStageGuard::collectPending(workDir, &error);
+    if (!error.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[暂存审查] %1</font>").arg(error));
+        return false;
+    }
+    if (entries.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='gray'>[暂存审查] 没有可暂存的改动。</font>"));
+        return true;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='gray'>[暂存审查] 发现 %1 个待处理路径。</font>")
+                          .arg(entries.size()));
+
+    GitStageReviewDialog dlg(workDir, entries, this);
+    if (dlg.exec() != QDialog::Accepted) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>[暂存审查] 已取消。</font>"));
+        return false;
+    }
+
+    bool ignoreFileUpdated = false;
+    if (dlg.appendIgnoreRequested()) {
+        const QStringList patterns = dlg.ignorePatternsToAppend();
+        if (!patterns.isEmpty()) {
+            QString ignoreErr;
+            if (GitStageGuard::appendIgnorePatterns(workDir, patterns, &ignoreErr)) {
+                ignoreFileUpdated = true;
+                txtGitLog->append(QStringLiteral("<font color='green'>[暂存审查] 已追加忽略规则: %1</font>")
+                                      .arg(patterns.join(QLatin1String(", "))));
+            } else if (!ignoreErr.isEmpty()) {
+                txtGitLog->append(QStringLiteral("<font color='red'>[暂存审查] 写入 .gitignore 失败: %1</font>")
+                                      .arg(ignoreErr));
+                return false;
+            } else {
+                txtGitLog->append(QStringLiteral("<font color='gray'>[暂存审查] 忽略规则已存在，无需追加。</font>"));
+            }
+        }
+    }
+
+    if (dlg.uncacheBlockedRequested()) {
+        QSet<QString> toUncache;
+        for (const QString &p : dlg.blockedTrackedPaths())
+            toUncache.insert(p);
+        // After ignore rules update, also drop any other tracked paths that are now ignored.
+        for (const QString &p : GitStageGuard::trackedIgnoredPaths(workDir))
+            toUncache.insert(p);
+
+        if (!toUncache.isEmpty()) {
+            QStringList paths = toUncache.values();
+            paths.sort();
+            QStringList args;
+            args << QStringLiteral("rm") << QStringLiteral("-r") << QStringLiteral("--cached")
+                 << QStringLiteral("--");
+            args << paths;
+            if (!runGitCommand(args)) {
+                txtGitLog->append(QStringLiteral(
+                    "<font color='orange'>[暂存审查] git rm --cached 未完全成功，请检查日志。</font>"));
+            } else {
+                txtGitLog->append(QStringLiteral("<font color='green'>[暂存审查] 已取消跟踪 %1 个路径。</font>")
+                                      .arg(paths.size()));
+            }
+        } else {
+            txtGitLog->append(QStringLiteral(
+                "<font color='gray'>[暂存审查] 没有已跟踪且应忽略的路径需要取消跟踪"
+                "（未跟踪文件只需被 .gitignore 忽略即可）。</font>"));
+        }
+    }
+
+    QStringList selected = dlg.selectedPaths();
+    if (ignoreFileUpdated && !selected.contains(QStringLiteral(".gitignore")))
+        selected.prepend(QStringLiteral(".gitignore"));
+
+    for (const QString &path : selected) {
+        QString reason;
+        if (path != QStringLiteral(".gitignore")
+            && GitStageGuard::isBlockedPath(workDir, path, &reason)) {
+            QMessageBox::warning(this, QStringLiteral("拒绝暂存"),
+                                 QStringLiteral("所选路径匹配 .gitignore，已拒绝：\n%1\n（%2）")
+                                     .arg(path, reason));
+            return false;
+        }
+    }
+
+    if (selected.isEmpty()) {
+        txtGitLog->append(QStringLiteral(
+            "<font color='gray'>[暂存审查] 未选择暂存路径（可能仅更新了索引）。</font>"));
+        return true;
+    }
+
+    QStringList args;
+    args << QStringLiteral("add") << QStringLiteral("--");
+    args << selected;
+    if (!runGitCommand(args)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[暂存审查] git add 失败。</font>"));
+        return false;
+    }
+    txtGitLog->append(QStringLiteral("<font color='green'>[暂存审查] 已暂存 %1 个路径。</font>")
+                          .arg(selected.size()));
+    return true;
+}
+
+bool MainWindow::gitStagedHasBlockedPaths(const QString &workDir, QStringList *blockedOut) const
+{
+    if (blockedOut)
+        blockedOut->clear();
+    if (workDir.trimmed().isEmpty())
+        return false;
+
+    // name-status -z: status\0path\0 (rename/copy: status\0old\0new\0).
+    // Staged deletions (D) of ignored files are intentional untracking — allow them.
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+    process.start(PlatformPrefs::gitBinary(),
+                  {QStringLiteral("diff"), QStringLiteral("--cached"), QStringLiteral("--name-status"),
+                   QStringLiteral("-z")});
+    if (!finishGitProcess(process, 15000) || process.exitCode() != 0)
+        return false;
+
+    const QByteArray raw = process.readAllStandardOutput();
+    QStringList pathsToCheck;
+    int i = 0;
+    auto nextField = [&]() -> QString {
+        if (i >= raw.size())
+            return QString();
+        int next = raw.indexOf('\0', i);
+        if (next < 0)
+            next = raw.size();
+        const QString field = QString::fromUtf8(raw.mid(i, next - i));
+        i = next + 1;
+        return field;
+    };
+
+    while (i < raw.size()) {
+        const QString status = nextField();
+        if (status.isEmpty())
+            break;
+        const QChar code = status.at(0);
+        if (code == QLatin1Char('R') || code == QLatin1Char('C')) {
+            nextField(); // old path
+            const QString newPath = nextField().trimmed();
+            if (!newPath.isEmpty())
+                pathsToCheck << newPath;
+            continue;
+        }
+        const QString path = nextField().trimmed();
+        if (path.isEmpty())
+            continue;
+        if (code == QLatin1Char('D'))
+            continue; // removing ignored paths from the index is OK
+        pathsToCheck << path;
+    }
+
+    if (pathsToCheck.isEmpty())
+        return false;
+
+    QStringList blocked;
+    for (const QString &path : pathsToCheck) {
+        QString reason;
+        if (GitStageGuard::isBlockedPath(workDir, path, &reason))
+            blocked << path;
+    }
+    if (blocked.isEmpty())
+        return false;
+    if (blockedOut)
+        *blockedOut = blocked;
+    return true;
+}
+
 int MainWindow::gitUnpushedCommitCount(const QString &workDir) const
 {
     if (workDir.trimmed().isEmpty() || !isGitRepository(workDir)) {
@@ -4521,7 +4702,12 @@ void MainWindow::onGitDeleteBranchClicked() {
 }
 
 void MainWindow::onGitAddClicked() {
-    runGitCommand(QStringList() << "add" << ".");
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择Git仓库目录!</font>"));
+        return;
+    }
+    gitStageWithReview(workDir);
 }
 
 void MainWindow::onGitGetSshKeyClicked() {
@@ -4718,6 +4904,19 @@ void MainWindow::onGitCommitClicked() {
         QMessageBox::warning(this, "提示", "请输入提交信息");
         return;
     }
+
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    QStringList blocked;
+    if (gitStagedHasBlockedPaths(workDir, &blocked)) {
+        QMessageBox::warning(
+            this, QStringLiteral("拒绝提交"),
+            QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止提交：\n\n%1\n\n"
+                           "请先执行 git reset 取消暂存，或从索引移除后再提交。")
+                .arg(blocked.join(QLatin1Char('\n'))));
+        txtGitLog->append(QStringLiteral("<font color='red'>[提交防护] 暂存区含应忽略路径，已拒绝 commit。</font>"));
+        return;
+    }
+
     runGitCommand(QStringList() << "commit" << "-m" << msg);
     txtGitCommitMsg->clear();
 }
@@ -5301,7 +5500,10 @@ void MainWindow::onScpTransferClicked() {
 
     // 有未提交改动时才执行 add + commit，确保代码状态可追溯。
     if (gitHasUncommittedChanges(dir)) {
-        runGitCommand(QStringList() << "add" << ".");
+        if (!gitStageWithReview(dir)) {
+            txtGitLog->append(QStringLiteral("已取消传输：暂存审查未通过或已取消，未执行 git commit。"));
+            return;
+        }
 
         if (spinGitDiffIntervalMinutes && spinGitDiffIntervalMinutes->value() < 10) {
             if (QMessageBox::question(this,
@@ -5311,6 +5513,16 @@ void MainWindow::onScpTransferClicked() {
                 runGitCommand(QStringList() << "reset" << "--soft" << "HEAD^");
                 onGitRefreshLogClicked();
             }
+        }
+
+        QStringList blocked;
+        if (gitStagedHasBlockedPaths(dir, &blocked)) {
+            QMessageBox::warning(
+                this, QStringLiteral("拒绝提交"),
+                QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止传输前提交：\n\n%1")
+                    .arg(blocked.join(QLatin1Char('\n'))));
+            txtGitLog->append(QStringLiteral("已取消传输：暂存区含应忽略路径。"));
+            return;
         }
 
         bool ok = false;

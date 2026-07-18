@@ -25,6 +25,8 @@ SOURCES += \
     gitworktreeapplydialog.cpp \
     gitworktreewizard.cpp \
     gitworktreedialog.cpp \
+    gitstageguard.cpp \
+    gitstagereviewdialog.cpp \
     platformprefs.cpp
 
 HEADERS += \
@@ -44,6 +46,8 @@ HEADERS += \
     gitworktreeapplydialog.h \
     gitworktreewizard.h \
     gitworktreedialog.h \
+    gitstageguard.h \
+    gitstagereviewdialog.h \
     platformprefs.h
 
 win32: LIBS += -lpsapi -luser32

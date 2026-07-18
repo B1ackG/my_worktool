@@ -583,6 +583,10 @@ private:
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();
     bool gitHasUncommittedChanges(const QString &workDir) const;
+    /** Staging review gate: dialog + selective git add. Returns false if cancelled/refused. */
+    bool gitStageWithReview(const QString &workDir);
+    /** True if index contains blocked paths (e.g. *.log). */
+    bool gitStagedHasBlockedPaths(const QString &workDir, QStringList *blockedOut = nullptr) const;
     int gitUnpushedCommitCount(const QString &workDir) const;
     QStringList collectGitPendingExitWarnings() const;
     bool confirmExitDespiteGitPending();

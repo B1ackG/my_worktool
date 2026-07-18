@@ -63,3 +63,16 @@ system_check.log
 
 # Git worktrees created by assistant
 .worktrees/
+
+# Added by Assistant staging review
+180 (副本)
+
+# Added by Assistant staging review
+test1
+test2
+
+# Re-assert after removing docs/* + !docs/*.* (negation had re-included *.csv under docs/)
+*.csv
+
+# Added by Assistant staging review
+docs/180
