@@ -24,7 +24,8 @@ SOURCES += \
     gitworktreesetup.cpp \
     gitworktreeapplydialog.cpp \
     gitworktreewizard.cpp \
-    gitworktreedialog.cpp
+    gitworktreedialog.cpp \
+    platformprefs.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -42,7 +43,10 @@ HEADERS += \
     gitworktreesetup.h \
     gitworktreeapplydialog.h \
     gitworktreewizard.h \
-    gitworktreedialog.h
+    gitworktreedialog.h \
+    platformprefs.h
+
+win32: LIBS += -lpsapi -luser32
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

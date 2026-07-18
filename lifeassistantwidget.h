@@ -20,6 +20,7 @@
 #include <QTabWidget>
 #include <QListWidget>
 #include <QStackedWidget>
+#include <QProcess>
 #include "capturewindow.h"
 #include "ruledialog.h"
 
@@ -34,6 +35,8 @@ public:
 
 private slots:
     void updateFocusWindow();
+    void onFocusProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onFocusProcessTimeout();
     void checkTasks();
     void addTask();
     void saveSettings();
@@ -51,6 +54,10 @@ private slots:
     void toggleFatigue(bool enabled);
     void onSidebarChanged(int index);
     void checkWorkDay();
+
+protected:
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
 private:
     QListWidget *sidebarList = nullptr;
@@ -76,6 +83,8 @@ private:
     QLabel *workDayLabel = nullptr;
     QTimer *focusTimer = nullptr;
     QTimer *checkTimer = nullptr;
+    QTimer *focusTimeoutTimer = nullptr;
+    QProcess *focusProcess = nullptr;
 
     QPushButton *pickBtn = nullptr;
     bool isPicking = false;
@@ -87,8 +96,13 @@ private:
     QNetworkAccessManager *networkManager = nullptr;
     bool isCurrentDayWorkday = true;
 
+    QString lastFocusTitle;
+    QString lastFocusProc;
+
     QString getActiveWindowTitle();
     QString getActiveWindowProcessName();
+    void requestFocusSnapshot();
+    void applyFocusSnapshot(const QString &title, const QString &proc);
     void shutdownSystem();
     void executeBlockAction(const QString &title, const QString &proc);
     bool checkSingleRule(const ShieldRule &rule, const QString &title, const QString &proc);

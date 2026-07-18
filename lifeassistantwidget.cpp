@@ -32,6 +32,8 @@
 #include <QMenu>
 #include <QAction>
 #include <QFileInfo>
+#include <QShowEvent>
+#include <QHideEvent>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -337,10 +339,20 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
     bottom->addLayout(finalV);
     toolPageLayout->addLayout(bottom);
 
-    // 定时器初始化
+    // 定时器初始化（焦点检测仅在页面可见时运行，避免后台每秒阻塞 UI）
     focusTimer = new QTimer(this);
     connect(focusTimer, &QTimer::timeout, this, &LifeAssistantWidget::updateFocusWindow);
-    focusTimer->start(1000);
+
+    focusTimeoutTimer = new QTimer(this);
+    focusTimeoutTimer->setSingleShot(true);
+    focusTimeoutTimer->setInterval(500);
+    connect(focusTimeoutTimer, &QTimer::timeout, this, &LifeAssistantWidget::onFocusProcessTimeout);
+
+    focusProcess = new QProcess(this);
+    connect(focusProcess,
+            static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this,
+            &LifeAssistantWidget::onFocusProcessFinished);
 
     checkTimer = new QTimer(this);
     connect(checkTimer, &QTimer::timeout, this, &LifeAssistantWidget::checkTasks);
@@ -357,6 +369,28 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
 
 void LifeAssistantWidget::onSidebarChanged(int index) {
     stackedWidget->setCurrentIndex(index);
+}
+
+void LifeAssistantWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (focusTimer && !focusTimer->isActive()) {
+        focusTimer->start(1000);
+    }
+}
+
+void LifeAssistantWidget::hideEvent(QHideEvent *event)
+{
+    if (focusTimer) {
+        focusTimer->stop();
+    }
+    if (focusTimeoutTimer) {
+        focusTimeoutTimer->stop();
+    }
+    if (focusProcess && focusProcess->state() != QProcess::NotRunning) {
+        focusProcess->kill();
+    }
+    QWidget::hideEvent(event);
 }
 
 LifeAssistantWidget::~LifeAssistantWidget() {
@@ -711,12 +745,73 @@ void LifeAssistantWidget::startPickWindow() {
     });
 }
 
-void LifeAssistantWidget::updateFocusWindow() {
-    QString t = getActiveWindowTitle();
-    QString p = getActiveWindowProcessName();
+void LifeAssistantWidget::updateFocusWindow()
+{
+    if (!isVisible()) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    applyFocusSnapshot(getActiveWindowTitle(), getActiveWindowProcessName());
+#else
+    requestFocusSnapshot();
+#endif
+}
 
-    focusInfoLabel->setText("窗口: " + t.left(50));
-    processNameLabel->setText("进程: " + p);
+void LifeAssistantWidget::requestFocusSnapshot()
+{
+#ifndef Q_OS_WIN
+    if (!focusProcess || focusProcess->state() != QProcess::NotRunning) {
+        return;
+    }
+    static const QString script = QStringLiteral(
+        "id=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | cut -d ' ' -f 5); "
+        "title=$(xprop -id \"$id\" WM_NAME 2>/dev/null | cut -d '\"' -f 2); "
+        "pid=$(xprop -id \"$id\" _NET_WM_PID 2>/dev/null | cut -d ' ' -f 3); "
+        "proc=; "
+        "if [ -n \"$pid\" ] && [ -r \"/proc/$pid/comm\" ]; then proc=$(cat \"/proc/$pid/comm\"); fi; "
+        "printf '%s\\n%s\\n' \"$title\" \"$proc\"");
+    focusProcess->start(QStringLiteral("sh"), QStringList() << QStringLiteral("-c") << script);
+    if (focusTimeoutTimer) {
+        focusTimeoutTimer->start();
+    }
+#else
+    Q_UNUSED(this);
+#endif
+}
+
+void LifeAssistantWidget::onFocusProcessTimeout()
+{
+    if (focusProcess && focusProcess->state() != QProcess::NotRunning) {
+        focusProcess->kill();
+    }
+}
+
+void LifeAssistantWidget::onFocusProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitCode);
+    if (focusTimeoutTimer) {
+        focusTimeoutTimer->stop();
+    }
+    if (exitStatus != QProcess::NormalExit || !focusProcess) {
+        return;
+    }
+    const QStringList lines = QString::fromUtf8(focusProcess->readAllStandardOutput())
+                                  .split(QLatin1Char('\n'));
+    const QString title = lines.value(0).trimmed();
+    const QString proc = lines.value(1).trimmed();
+    applyFocusSnapshot(title, proc);
+}
+
+void LifeAssistantWidget::applyFocusSnapshot(const QString &title, const QString &proc)
+{
+    const bool unchanged = (title == lastFocusTitle && proc == lastFocusProc);
+    lastFocusTitle = title;
+    lastFocusProc = proc;
+
+    if (!unchanged) {
+        focusInfoLabel->setText(QStringLiteral("窗口: ") + title.left(50));
+        processNameLabel->setText(QStringLiteral("进程: ") + proc);
+    }
 
     if (fatigueCheck->isChecked()) {
         qint64 elapsed = useTimer.elapsed() / 1000 / 60;
@@ -741,9 +836,9 @@ void LifeAssistantWidget::updateFocusWindow() {
         if (fatigueCheck->isChecked()) {
             if (!isBlockingState)
                 return;
-            executeBlockAction(t, p);
+            executeBlockAction(title, proc);
         } else {
-            executeBlockAction(t, p);
+            executeBlockAction(title, proc);
         }
     }
 }

@@ -320,6 +320,12 @@ void QuickerBindingDialog::onAddKeyboardStepClicked()
 
 void QuickerBindingDialog::onTestKeyboardClicked()
 {
+#ifdef Q_OS_WIN
+    QMessageBox::information(this,
+                             QStringLiteral("试按"),
+                             QStringLiteral("试按依赖 xdotool，仅在 Linux 下可用。"));
+    return;
+#else
     const QString combo = combinedKeyboardCombo();
     if (combo.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("试按"), QStringLiteral("请先设置组合键。"));
@@ -345,6 +351,7 @@ void QuickerBindingDialog::onTestKeyboardClicked()
                 ? QStringLiteral("xdotool 返回错误。请确认已安装: sudo apt install xdotool")
                 : stderrText);
     }
+#endif
 }
 
 void QuickerBindingDialog::onKeyboardStepChanged()

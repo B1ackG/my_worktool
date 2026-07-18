@@ -1,4 +1,5 @@
 #include "gitworktreesetup.h"
+#include "platformprefs.h"
 
 #include <QDir>
 #include <QFile>
@@ -54,19 +55,17 @@ GitWorktreeSetupPlan GitWorktreeSetup::loadPlan(const QString &repoRoot)
     const QJsonObject obj = doc.object();
 
     QJsonValue selected;
-#ifdef Q_OS_WIN
-    if (obj.contains(QStringLiteral("setup-worktree-windows"))) {
-        selected = obj.value(QStringLiteral("setup-worktree-windows"));
-    } else {
-        selected = obj.value(QStringLiteral("setup-worktree"));
-    }
-#else
-    if (obj.contains(QStringLiteral("setup-worktree-unix"))) {
+    if (PlatformPrefs::preferWindows()) {
+        if (obj.contains(QStringLiteral("setup-worktree-windows"))) {
+            selected = obj.value(QStringLiteral("setup-worktree-windows"));
+        } else {
+            selected = obj.value(QStringLiteral("setup-worktree"));
+        }
+    } else if (obj.contains(QStringLiteral("setup-worktree-unix"))) {
         selected = obj.value(QStringLiteral("setup-worktree-unix"));
     } else {
         selected = obj.value(QStringLiteral("setup-worktree"));
     }
-#endif
 
     const QDir configDir = QFileInfo(plan.configPath).absoluteDir();
 
@@ -120,13 +119,13 @@ bool GitWorktreeSetup::runSetup(const GitWorktreeSetupPlan &plan, const QString 
         QProcess process;
         process.setWorkingDirectory(worktreeDir);
         process.setProcessEnvironment(env);
-#ifdef Q_OS_WIN
-        process.start(QStringLiteral("powershell"),
-                      {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"),
-                       QStringLiteral("Bypass"), QStringLiteral("-File"), plan.scriptPath});
-#else
-        process.start(QStringLiteral("/bin/bash"), {plan.scriptPath});
-#endif
+        if (PlatformPrefs::preferWindows()) {
+            process.start(QStringLiteral("powershell"),
+                          {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"),
+                           QStringLiteral("Bypass"), QStringLiteral("-File"), plan.scriptPath});
+        } else {
+            process.start(QStringLiteral("/bin/bash"), {plan.scriptPath});
+        }
         appendLog(QStringLiteral("[setup] run script: %1").arg(plan.scriptPath));
         if (!process.waitForFinished(timeoutMs)) {
             process.kill();
@@ -134,13 +133,8 @@ bool GitWorktreeSetup::runSetup(const GitWorktreeSetupPlan &plan, const QString 
             appendLog(QStringLiteral("[setup] script timed out"));
             return false;
         }
-#ifdef Q_OS_WIN
-        appendLog(QString::fromUtf8(process.readAllStandardOutput()));
-        appendLog(QString::fromUtf8(process.readAllStandardError()));
-#else
-        appendLog(QString::fromLocal8Bit(process.readAllStandardOutput()));
-        appendLog(QString::fromLocal8Bit(process.readAllStandardError()));
-#endif
+        appendLog(PlatformPrefs::decodeProcessOutput(process.readAllStandardOutput()));
+        appendLog(PlatformPrefs::decodeProcessOutput(process.readAllStandardError()));
         if (process.exitCode() != 0) {
             appendLog(QStringLiteral("[setup] script failed, exit %1").arg(process.exitCode()));
             return false;
@@ -156,11 +150,11 @@ bool GitWorktreeSetup::runSetup(const GitWorktreeSetupPlan &plan, const QString 
         QProcess process;
         process.setWorkingDirectory(worktreeDir);
         process.setProcessEnvironment(env);
-#ifdef Q_OS_WIN
-        process.start(QStringLiteral("cmd.exe"), {QStringLiteral("/c"), cmd});
-#else
-        process.start(QStringLiteral("/bin/bash"), {QStringLiteral("-lc"), cmd});
-#endif
+        if (PlatformPrefs::preferWindows()) {
+            process.start(QStringLiteral("cmd.exe"), {QStringLiteral("/c"), cmd});
+        } else {
+            process.start(QStringLiteral("/bin/bash"), {QStringLiteral("-lc"), cmd});
+        }
         if (!process.waitForFinished(timeoutMs)) {
             process.kill();
             process.waitForFinished(3000);
@@ -168,13 +162,8 @@ bool GitWorktreeSetup::runSetup(const GitWorktreeSetupPlan &plan, const QString 
             allOk = false;
             break;
         }
-#ifdef Q_OS_WIN
-        const QString so = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
-        const QString se = QString::fromUtf8(process.readAllStandardError()).trimmed();
-#else
-        const QString so = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
-        const QString se = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
-#endif
+        const QString so = PlatformPrefs::decodeProcessOutput(process.readAllStandardOutput()).trimmed();
+        const QString se = PlatformPrefs::decodeProcessOutput(process.readAllStandardError()).trimmed();
         if (!so.isEmpty()) {
             appendLog(so);
         }

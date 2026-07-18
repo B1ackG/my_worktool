@@ -5,6 +5,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QVector>
+#include <QPair>
 #include <QMutex>
 #include <QMap>
 #include <QTimer>
@@ -26,6 +27,7 @@ public:
 
     // Register access
     bool setRegister(quint16 addr, quint16 value);
+    bool setRegisters(quint16 start, const QVector<quint16> &values);
     quint16 getRegister(quint16 addr) const;
     bool setRegisterBit(quint16 addr, int bitIndex, bool value);
     bool setFloat(quint16 addr, float value);
@@ -49,6 +51,7 @@ signals:
     void clientConnected();
     void clientDisconnected();
     void registerOperation(quint16 addr, quint16 value, const QString &opType);
+    void registersChanged(const QVector<QPair<quint16, quint16>> &ops, const QString &opType);
 
 private slots:
     void onNewConnection();

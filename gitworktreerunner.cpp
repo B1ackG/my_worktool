@@ -1,4 +1,5 @@
 #include "gitworktreerunner.h"
+#include "platformprefs.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -10,11 +11,7 @@ namespace {
 
 QString decodeGitOutput(const QByteArray &raw)
 {
-#ifdef Q_OS_WIN
-    return QString::fromUtf8(raw);
-#else
-    return QString::fromLocal8Bit(raw);
-#endif
+    return PlatformPrefs::decodeProcessOutput(raw);
 }
 
 QString limitLines(const QString &text, int maxLines)
@@ -39,11 +36,7 @@ QString limitLines(const QString &text, int maxLines)
 
 QString GitWorktreeRunner::gitBinary()
 {
-#ifdef Q_OS_WIN
-    return QStringLiteral("git.exe");
-#else
-    return QStringLiteral("git");
-#endif
+    return PlatformPrefs::gitBinary();
 }
 
 bool GitWorktreeRunner::finishProcess(QProcess &process, int timeoutMs)

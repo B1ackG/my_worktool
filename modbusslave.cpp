@@ -97,6 +97,28 @@ bool ModbusSlave::setRegister(quint16 addr, quint16 value)
     return true;
 }
 
+bool ModbusSlave::setRegisters(quint16 start, const QVector<quint16> &values)
+{
+    if (values.isEmpty()) return true;
+    QVector<QPair<quint16, quint16>> ops;
+    ops.reserve(values.size());
+    {
+        QMutexLocker locker(&mutex);
+        for (int i = 0; i < values.size(); ++i) {
+            const quint16 addr = static_cast<quint16>(start + i);
+            if (addr >= static_cast<quint16>(holding.size())) {
+                if (ops.isEmpty()) return false;
+                break;
+            }
+            holding[addr] = values.at(i);
+            ops.append(qMakePair(addr, values.at(i)));
+        }
+    }
+    if (ops.isEmpty()) return false;
+    emit registersChanged(ops, QStringLiteral("write"));
+    return true;
+}
+
 quint16 ModbusSlave::getRegister(quint16 addr) const
 {
     QMutexLocker locker(&mutex);
@@ -126,7 +148,7 @@ bool ModbusSlave::setFloat(quint16 addr, float value)
     // IEEE754 32-bit: Modbus 字序 CDAB（先高字后低字）
     quint16 cd = (u >> 16) & 0xFFFF;
     quint16 ab = u & 0xFFFF;
-    return setRegister(addr, cd) && setRegister(addr + 1, ab);
+    return setRegisters(addr, {cd, ab});
 }
 
 float ModbusSlave::getFloat(quint16 addr) const
@@ -254,8 +276,8 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
                 payload.append(char(val & 0xFF));
             }
         }
-        for (const auto &op : readOps) {
-            emit registerOperation(op.first, op.second, QString("read"));
+        if (!readOps.isEmpty()) {
+            emit registersChanged(readOps, QStringLiteral("read"));
         }
         QByteArray resp = buildResponse(trans, unitId, payload);
         if (shouldDrop()) { emit logMessage("丢弃 Read Registers 响应 (随机丢包)"); return; }
@@ -313,8 +335,8 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
                 }
             }
         }
-        for (const auto &op : writeOps) {
-            emit registerOperation(op.first, op.second, QString("write"));
+        if (!writeOps.isEmpty()) {
+            emit registersChanged(writeOps, QStringLiteral("write"));
         }
         QByteArray payload;
         payload.append(char(func));

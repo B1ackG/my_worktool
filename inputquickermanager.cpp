@@ -12,13 +12,15 @@
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QUuid>
+#include <QThread>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QStringConverter>
 #endif
+#ifndef Q_OS_WIN
 #include <grp.h>
-#include <pwd.h>
 #include <signal.h>
 #include <unistd.h>
+#endif
 
 InputQuickerManager::InputQuickerManager(QObject *parent)
     : QObject(parent)
@@ -72,6 +74,12 @@ void InputQuickerManager::saveSettings() const
 
 bool InputQuickerManager::applySettings()
 {
+#ifdef Q_OS_WIN
+    saveSettings();
+    emit logMessage(QStringLiteral("[快捷助手] Windows 构建不支持 Linux evdev/xdotool 守护进程，已仅保存配置"));
+    emitStatus();
+    return true;
+#else
     saveSettings();
     emit logMessage(QStringLiteral("[快捷助手] 已保存 %1 条规则").arg(bindingsValue.size()));
 
@@ -118,6 +126,7 @@ bool InputQuickerManager::applySettings()
         lastAppliedGrabDevice = grabDeviceValue;
     }
     return started;
+#endif
 }
 
 bool InputQuickerManager::daemonNeedsRestart() const
@@ -128,6 +137,9 @@ bool InputQuickerManager::daemonNeedsRestart() const
 
 bool InputQuickerManager::reloadDaemonViaSignal()
 {
+#ifdef Q_OS_WIN
+    return false;
+#else
     if (!isDaemonRunning()) {
         return false;
     }
@@ -145,10 +157,16 @@ bool InputQuickerManager::reloadDaemonViaSignal()
 
     emit logMessage(QStringLiteral("[快捷助手] 热加载失败，将重启 daemon"));
     return false;
+#endif
 }
 
 bool InputQuickerManager::startDaemon()
 {
+#ifdef Q_OS_WIN
+    emit logMessage(QStringLiteral("[快捷助手] Windows 构建不支持启动 Linux 守护进程"));
+    emitStatus();
+    return false;
+#else
     clearStalePidFile();
     const qint64 existing = resolveDaemonPid();
     if (existing > 0) {
@@ -184,7 +202,7 @@ bool InputQuickerManager::startDaemon()
 
     ownDaemonProcess = false;
     for (int i = 0; i < 40 && !isDaemonRunning(); ++i) {
-        usleep(50000);
+        QThread::msleep(50);
     }
 
     const qint64 running = resolveDaemonPid();
@@ -198,16 +216,21 @@ bool InputQuickerManager::startDaemon()
     emit logMessage(QStringLiteral("[快捷助手] daemon 已启动 (pid %1)").arg(running));
     emitStatus();
     return true;
+#endif
 }
 
 void InputQuickerManager::stopDaemon()
 {
+#ifdef Q_OS_WIN
+    ownDaemonProcess = false;
+    emitStatus();
+#else
     const qint64 pid = resolveDaemonPid();
     bool stopped = false;
     if (pid > 0 && isPidAlive(pid)) {
         ::kill(static_cast<pid_t>(pid), SIGTERM);
         for (int i = 0; i < 30 && isPidAlive(pid); ++i) {
-            usleep(100000);
+            QThread::msleep(100);
         }
         if (isPidAlive(pid)) {
             ::kill(static_cast<pid_t>(pid), SIGKILL);
@@ -235,6 +258,7 @@ void InputQuickerManager::stopDaemon()
     }
     ownDaemonProcess = false;
     emitStatus();
+#endif
 }
 
 bool InputQuickerManager::startInputMonitor(const QString &devicePath)
@@ -413,6 +437,11 @@ InputQuickerEnvCheck InputQuickerManager::runEnvironmentCheck() const
 {
     InputQuickerEnvCheck result;
 
+#ifdef Q_OS_WIN
+    result.messages.append(
+        QStringLiteral("快捷助手依赖 Linux evdev/xdotool，当前 Windows 构建不可用"));
+    return result;
+#else
     {
         QProcess process;
         process.start(QStringLiteral("python3"),
@@ -485,6 +514,7 @@ InputQuickerEnvCheck InputQuickerManager::runEnvironmentCheck() const
     }
 
     return result;
+#endif
 }
 
 QString InputQuickerManager::formatCaptureError(const QString &stderrText) const
@@ -1102,7 +1132,12 @@ bool InputQuickerManager::isPidAlive(qint64 pid) const
     if (pid <= 0) {
         return false;
     }
+#ifdef Q_OS_WIN
+    Q_UNUSED(pid);
+    return false;
+#else
     return ::kill(static_cast<pid_t>(pid), 0) == 0;
+#endif
 }
 
 void InputQuickerManager::clearStalePidFile() const

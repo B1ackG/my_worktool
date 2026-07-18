@@ -43,6 +43,7 @@
 #include "modbusslave.h"
 
 class LifeAssistantWidget;
+class QCloseEvent;
 
 // A simple sparkline widget to show recent usage
 class MonitorChart : public QWidget {
@@ -132,6 +133,9 @@ public:
         DCBA_HGFE = 3
     };
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private slots:
     // Pages Navigation
     void onNavSelectionChanged(QListWidgetItem *current, QListWidgetItem *previous);
@@ -191,6 +195,7 @@ private slots:
     void onGitSetDiffRuleClicked();
     void onGitAutoDiffReminderToggled(bool checked);
     void onGitAutoDiffReminderTick();
+    void onGitDiffReminderFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onGitOpenIgnoreClicked();
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
     void onGitRemoteAddClicked(); // 新增：链接远程仓库
@@ -225,6 +230,7 @@ private slots:
 
     // Settings
     void onAutostartToggled(bool checked);
+    void showPlatformModeDialog();
 
     // Simulator Slots
     void onStartSimulatorClicked();
@@ -236,6 +242,7 @@ private slots:
     void onApplyFaultSettingsClicked();
     void onExportHistoryClicked();
     void onRegisterOperation(quint16 addr, quint16 value, const QString &opType);
+    void onRegistersChanged(const QVector<QPair<quint16, quint16>> &ops, const QString &opType);
     void onSimShowContextMenu(const QPoint &pos);
     void onSimSetFormat(const QString &format);
     void onSimShowWaveformEditor(int row);
@@ -249,6 +256,7 @@ private:
     bool isAutostartEnabled() const;
     bool setAutostartEnabled(bool enabled);
     QString autostartDesktopFilePath() const;
+    QString autostartRegistryKey() const;
     
     // Helpers to init pages
     QWidget* createModbusPage();
@@ -454,6 +462,8 @@ private:
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
+    QProcess *gitDiffReminderProcess = nullptr;
+    bool gitDiffReminderBusy = false;
     QTimer *dailyReportAutoSaveTimer = nullptr;
     QTimer *gitNetworkTimeout = nullptr;
     QProcess *gitNetworkProcess = nullptr;
@@ -538,6 +548,10 @@ private:
     QMap<QString, QMap<quint16, quint16>> simLastReadValues;
     QTimer *simWriteRefreshTimer = nullptr;
     QHash<QTableWidget *, QSet<quint16>> simPendingWriteAddrs;
+    // address -> primary row (Address column match)
+    QHash<QTableWidget *, QHash<quint16, int>> simAddrToRow;
+    // address -> rows whose multi-word span covers this address
+    QHash<QTableWidget *, QHash<quint16, QVector<int>>> simAddrTouchRows;
     // Fault injection controls
     QSpinBox *spinSimDelayMs;
     QDoubleSpinBox *spinSimDropProb;
@@ -569,6 +583,9 @@ private:
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();
     bool gitHasUncommittedChanges(const QString &workDir) const;
+    int gitUnpushedCommitCount(const QString &workDir) const;
+    QStringList collectGitPendingExitWarnings() const;
+    bool confirmExitDespiteGitPending();
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
     void removeGitHistoryPath(const QString &dir);
@@ -664,7 +681,10 @@ private:
     void setupSimulatorRegisterTable(QTableWidget *table);
     void syncSimulatorTablesFromMaps();
     int findSimRowByAddress(QTableWidget *table, quint16 addr) const;
+    void rebuildSimAddrIndex(QTableWidget *table);
     void rebuildSimRowStates(QTableWidget *table);
+    void handleRegisterOps(ModbusSlave *senderDevice, const QVector<QPair<quint16, quint16>> &ops,
+                           const QString &opType);
     void onSimRandomAndWriteClicked();
     void onSimSaveSceneClicked();
     void onSimLoadSceneClicked();
@@ -724,6 +744,9 @@ private:
         double dutyCycle; // for square wave (0-1)
         int currentTicks;
         bool active;
+        int cachedRow = -1;
+        QString cachedFmt;
+        bool cacheValid = false;
     };
     QList<CyclicTimer> simCyclicTimers;
     QTimer *simTickTimer;

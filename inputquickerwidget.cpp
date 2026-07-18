@@ -17,8 +17,15 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     QLabel *header = new QLabel(QStringLiteral("快捷助手"), this);
     header->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: bold; color: #333; margin-bottom: 8px;"));
 
+#ifdef Q_OS_WIN
+    QLabel *hint = new QLabel(
+        QStringLiteral("快捷助手依赖 Linux evdev/xdotool，当前 Windows 构建不可用。"
+                       "可在 Linux 下使用本功能。"),
+        this);
+#else
     QLabel *hint = new QLabel(
         QStringLiteral("本页仅管理映射脚本；实际按键由开机自启的守护脚本执行。"), this);
+#endif
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color: #666; margin-bottom: 4px;"));
 
@@ -84,6 +91,23 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
 
     manager->loadSettings();
 
+#ifdef Q_OS_WIN
+    chkEnabled->setEnabled(false);
+    cmbDevice->setEnabled(false);
+    btnRefreshDevices->setEnabled(false);
+    btnAddBinding->setEnabled(false);
+    tblBindings->setEnabled(false);
+    {
+        const QSignalBlocker blocker(chkEnabled);
+        chkEnabled->setChecked(false);
+    }
+    updateStatus(QStringLiteral("Windows 构建不可用"));
+    const InputQuickerEnvCheck env = manager->runEnvironmentCheck();
+    if (!env.messages.isEmpty()) {
+        hint->setText(env.messages.join(QLatin1Char('\n')));
+        hint->setStyleSheet(QStringLiteral("color: #b71c1c; margin-bottom: 4px;"));
+    }
+#else
     populateDevices();
 
     {
@@ -96,6 +120,7 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     updateStatus(manager->statusText());
     statusTimer->start(1500);
     applyChanges(false);
+#endif
 }
 
 InputQuickerWidget::~InputQuickerWidget() = default;
