@@ -588,7 +588,9 @@ private:
     /** True if index contains blocked paths (e.g. *.log). */
     bool gitStagedHasBlockedPaths(const QString &workDir, QStringList *blockedOut = nullptr) const;
     int gitUnpushedCommitCount(const QString &workDir) const;
-    QStringList collectGitPendingExitWarnings() const;
+    /** 返回 (仓库绝对路径, 提示行) 列表，按记忆路径顺序。 */
+    QList<QPair<QString, QString>> collectGitPendingExitItems() const;
+    void focusGitPendingRepo(const QString &repoDir);
     bool confirmExitDespiteGitPending();
     void saveGitHistory(const QString &dir);
     void loadGitHistory();

@@ -4146,9 +4146,9 @@ int MainWindow::gitUnpushedCommitCount(const QString &workDir) const
     return (ok && count > 0) ? count : 0;
 }
 
-QStringList MainWindow::collectGitPendingExitWarnings() const
+QList<QPair<QString, QString>> MainWindow::collectGitPendingExitItems() const
 {
-    QStringList warnings;
+    QList<QPair<QString, QString>> items;
 
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
     const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
@@ -4183,21 +4183,44 @@ QStringList MainWindow::collectGitPendingExitWarnings() const
         if (name.isEmpty()) {
             name = QFileInfo(absPath).fileName();
         }
-        warnings << QStringLiteral("• %1：%2").arg(name, parts.join(QStringLiteral("；")));
+        items.append({absPath, QStringLiteral("• %1：%2").arg(name, parts.join(QStringLiteral("；")))});
     }
 
-    return warnings;
+    return items;
+}
+
+void MainWindow::focusGitPendingRepo(const QString &repoDir)
+{
+    const QString absPath = QDir(repoDir).absolutePath();
+    if (absPath.isEmpty() || !QDir(absPath).exists()) {
+        return;
+    }
+
+    // Git 工作流助手在导航列表中的固定下标
+    constexpr int kGitPageIndex = 2;
+    if (navWidget && navWidget->currentRow() != kGitPageIndex) {
+        navWidget->setCurrentRow(kGitPageIndex);
+    }
+
+    enterGitRepoPath(absPath);
 }
 
 bool MainWindow::confirmExitDespiteGitPending()
 {
-    const QStringList warnings = collectGitPendingExitWarnings();
-    if (warnings.isEmpty()) {
+    const QList<QPair<QString, QString>> items = collectGitPendingExitItems();
+    if (items.isEmpty()) {
         return true;
     }
 
+    QStringList warnings;
+    warnings.reserve(items.size());
+    for (const auto &item : items) {
+        warnings << item.second;
+    }
+
     const QString message =
-        QStringLiteral("以下仓库仍有未提交或未推送的内容：\n\n%1\n\n仍要退出程序吗？")
+        QStringLiteral("以下仓库仍有未提交或未推送的内容：\n\n%1\n\n仍要退出程序吗？\n"
+                       "（选择「去处理」将切换到第一个待处理仓库）")
             .arg(warnings.join(QLatin1Char('\n')));
 
     QMessageBox box(this);
@@ -4205,10 +4228,16 @@ bool MainWindow::confirmExitDespiteGitPending()
     box.setWindowTitle(QStringLiteral("关闭前提醒"));
     box.setText(message);
     QPushButton *quitBtn = box.addButton(QStringLiteral("仍要退出"), QMessageBox::AcceptRole);
-    QPushButton *cancelBtn = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-    box.setDefaultButton(cancelBtn);
+    QPushButton *handleBtn = box.addButton(QStringLiteral("去处理"), QMessageBox::RejectRole);
+    box.setDefaultButton(handleBtn);
     box.exec();
-    return box.clickedButton() == quitBtn;
+
+    if (box.clickedButton() == quitBtn) {
+        return true;
+    }
+
+    focusGitPendingRepo(items.first().first);
+    return false;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
