@@ -28,12 +28,9 @@
             "9": "Signed"
         },
         "values": {
-            "102": 19,
             "103": 19,
-            "104": 161,
             "151": 20,
-            "152": 10,
-            "50": 98
+            "152": 10
         }
     },
     "main": {
@@ -96,7 +93,6 @@
             "9": "64-bit Float"
         },
         "values": {
-            "0": 39129,
             "134": 40,
             "2000": 12288,
             "8000": 12288,
@@ -106,7 +102,7 @@
     },
     "waveforms": [
         {
-            "active": true,
+            "active": false,
             "addr": 201,
             "amplitude": 90,
             "device": "Main",
@@ -117,7 +113,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 0,
             "amplitude": 1000,
             "device": "Main",
@@ -128,7 +124,7 @@
             "type": "正弦波"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 203,
             "amplitude": 1150,
             "device": "Main",
@@ -139,7 +135,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 205,
             "amplitude": 840,
             "device": "Main",
@@ -150,7 +146,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 207,
             "amplitude": 180,
             "device": "Main",
@@ -161,7 +157,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 104,
             "amplitude": 834,
             "device": "AGV",
@@ -172,7 +168,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 50,
             "amplitude": 511,
             "device": "AGV",
@@ -183,7 +179,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 612,
             "amplitude": 100,
             "device": "Main",
@@ -194,7 +190,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 614,
             "amplitude": 100,
             "device": "Main",
@@ -205,7 +201,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 616,
             "amplitude": 100,
             "device": "Main",
@@ -216,7 +212,7 @@
             "type": "正弦波"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 618,
             "amplitude": 100,
             "device": "Main",
@@ -227,7 +223,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 620,
             "amplitude": 100,
             "device": "Main",
@@ -238,7 +234,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 622,
             "amplitude": 100,
             "device": "Main",
@@ -249,7 +245,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 624,
             "amplitude": 100,
             "device": "Main",
@@ -260,7 +256,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 626,
             "amplitude": 100,
             "device": "Main",
@@ -271,7 +267,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 628,
             "amplitude": 100,
             "device": "Main",
@@ -282,7 +278,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 630,
             "amplitude": 100,
             "device": "Main",
@@ -293,7 +289,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 632,
             "amplitude": 100,
             "device": "Main",
@@ -304,7 +300,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 634,
             "amplitude": 100,
             "device": "Main",
@@ -315,7 +311,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 102,
             "amplitude": 100,
             "device": "AGV",
@@ -326,7 +322,7 @@
             "type": "来回增减"
         },
         {
-            "active": true,
+            "active": false,
             "addr": 103,
             "amplitude": 100,
             "device": "AGV",

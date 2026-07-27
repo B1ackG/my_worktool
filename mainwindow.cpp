@@ -3811,10 +3811,12 @@ void MainWindow::finishGitNetworkCommand(bool ok, const QString &stdoutText, con
 
     const bool wasCancelled = gitNetworkUserCancelled;
     const bool wasTimedOut = gitNetworkTimedOut;
+    const bool suppressRetry = gitNetworkSuppressRetry;
     auto done = gitNetworkDoneCallback;
     gitNetworkDoneCallback = {};
     gitNetworkUserCancelled = false;
     gitNetworkTimedOut = false;
+    gitNetworkSuppressRetry = false;
 
     if (gitNetworkProcess) {
         gitNetworkProcess->disconnect(this);
@@ -3828,7 +3830,7 @@ void MainWindow::finishGitNetworkCommand(bool ok, const QString &stdoutText, con
         done(ok);
     }
 
-    if (!ok && !wasCancelled) {
+    if (!ok && !wasCancelled && !suppressRetry) {
         const QString reason = wasTimedOut
                                    ? QStringLiteral("git 远程通讯超时（可能受系统代理/虚拟网卡影响）。")
                                    : QStringLiteral("git 远程通讯失败。");
@@ -3868,6 +3870,7 @@ void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
     QString workDir = cmbGitDir->currentText().trimmed();
     if (workDir.isEmpty()) {
         txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择Git仓库目录!</font>"));
+        gitNetworkSuppressRetry = false;
         if (done) {
             done(false);
         }
@@ -3876,6 +3879,10 @@ void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
 
     if (gitNetworkBusy) {
         txtGitLog->append(QStringLiteral("<font color='orange'>[Git] 已有远程通讯进行中，请先等待或点「取消通讯」。</font>"));
+        gitNetworkSuppressRetry = false;
+        if (done) {
+            done(false);
+        }
         return;
     }
 
@@ -4153,6 +4160,37 @@ int MainWindow::gitUnpushedCommitCount(const QString &workDir) const
     return (ok && count > 0) ? count : 0;
 }
 
+int MainWindow::gitBehindCommitCount(const QString &workDir) const
+{
+    if (workDir.trimmed().isEmpty() || !isGitRepository(workDir)) {
+        return 0;
+    }
+
+    // 无上游跟踪分支时不算“远程领先”
+    QString upstream;
+    if (!GitWorktreeRunner::runInRepo(
+            workDir,
+            {QStringLiteral("rev-parse"), QStringLiteral("--abbrev-ref"), QStringLiteral("@{u}")},
+            &upstream, nullptr, 8000)) {
+        return 0;
+    }
+    if (upstream.trimmed().isEmpty()) {
+        return 0;
+    }
+
+    QString out;
+    if (!GitWorktreeRunner::runInRepo(
+            workDir,
+            {QStringLiteral("rev-list"), QStringLiteral("--count"), QStringLiteral("HEAD..@{u}")},
+            &out, nullptr, 8000)) {
+        return 0;
+    }
+
+    bool ok = false;
+    const int count = out.trimmed().toInt(&ok);
+    return (ok && count > 0) ? count : 0;
+}
+
 QList<QPair<QString, QString>> MainWindow::collectGitPendingExitItems() const
 {
     QList<QPair<QString, QString>> items;
@@ -4245,6 +4283,80 @@ bool MainWindow::confirmExitDespiteGitPending()
 
     focusGitPendingRepo(items.first().first);
     return false;
+}
+
+QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
+{
+    QList<QPair<QString, QString>> items;
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    QSet<QString> seen;
+
+    for (const QString &rawPath : history) {
+        const QString absPath = QDir(rawPath).absolutePath();
+        if (absPath.isEmpty() || seen.contains(absPath)) {
+            continue;
+        }
+        seen.insert(absPath);
+
+        if (!QDir(absPath).exists() || !isGitRepository(absPath)) {
+            continue;
+        }
+
+        const int behind = gitBehindCommitCount(absPath);
+        if (behind <= 0) {
+            continue;
+        }
+
+        QString name = gitRepoDisplayName(absPath);
+        if (name.isEmpty()) {
+            name = QFileInfo(absPath).fileName();
+        }
+        items.append({absPath,
+                      QStringLiteral("• %1：远程领先 %2 个提交").arg(name).arg(behind)});
+    }
+
+    return items;
+}
+
+void MainWindow::promptRemoteAheadOnOpen()
+{
+    const QList<QPair<QString, QString>> items = collectRemoteAheadItems();
+    if (items.isEmpty()) {
+        return;
+    }
+
+    QStringList warnings;
+    warnings.reserve(items.size());
+    for (const auto &item : items) {
+        warnings << item.second;
+    }
+
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>[启动检查] 发现远程领先本地的仓库：\n%1</font>")
+                              .arg(warnings.join(QLatin1Char('\n'))));
+    }
+
+    const QString message =
+        QStringLiteral("以下仓库的远程分支领先于本地：\n\n%1\n\n建议先拉取同步后再继续工作。\n"
+                       "（选择「去处理」将切换到第一个待处理仓库）")
+            .arg(warnings.join(QLatin1Char('\n')));
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("启动前提醒"));
+    box.setText(message);
+    QPushButton *laterBtn = box.addButton(QStringLiteral("稍后"), QMessageBox::AcceptRole);
+    QPushButton *handleBtn = box.addButton(QStringLiteral("去处理"), QMessageBox::RejectRole);
+    box.setDefaultButton(handleBtn);
+    box.exec();
+
+    if (box.clickedButton() == laterBtn) {
+        return;
+    }
+
+    focusGitPendingRepo(items.first().first);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -6291,6 +6403,16 @@ void MainWindow::deferredGitRepoInit() {
     if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
         activateGitRepo(repoDir, false);
         refreshGitGoalsTable();
+        // 启动后静默 fetch，再检查远程是否领先本地；失败不弹重试框以免干扰启动
+        gitNetworkSuppressRetry = true;
+        runGitNetworkCommand(
+            QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
+            [this](bool) {
+                refreshGitBranchesLocal();
+                promptRemoteAheadOnOpen();
+            });
+    } else {
+        promptRemoteAheadOnOpen();
     }
 
     if (gitDiffReminderEnabled) {

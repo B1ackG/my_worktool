@@ -79,3 +79,6 @@ docs/180
 
 # Added by Assistant staging review
 *.txt
+
+# Added by Assistant staging review
+*.pyc

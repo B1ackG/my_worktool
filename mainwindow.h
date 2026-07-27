@@ -472,6 +472,7 @@ private:
     bool gitNetworkBusy = false;
     bool gitNetworkUserCancelled = false;
     bool gitNetworkTimedOut = false;
+    bool gitNetworkSuppressRetry = false;
     QStringList gitNetworkLastArgs;
     int gitNetworkLastTimeoutMs = 30000;
     std::function<void(bool)> gitNetworkDoneCallback;
@@ -590,10 +591,16 @@ private:
     /** True if index contains blocked paths (e.g. *.log). */
     bool gitStagedHasBlockedPaths(const QString &workDir, QStringList *blockedOut = nullptr) const;
     int gitUnpushedCommitCount(const QString &workDir) const;
+    /** 本地相对上游落后的提交数（远程领先）；无上游则返回 0。 */
+    int gitBehindCommitCount(const QString &workDir) const;
     /** 返回 (仓库绝对路径, 提示行) 列表，按记忆路径顺序。 */
     QList<QPair<QString, QString>> collectGitPendingExitItems() const;
+    /** 返回远程领先本地的仓库列表，按记忆路径顺序。 */
+    QList<QPair<QString, QString>> collectRemoteAheadItems() const;
     void focusGitPendingRepo(const QString &repoDir);
     bool confirmExitDespiteGitPending();
+    /** 启动后若远程领先本地则弹窗提示处理。 */
+    void promptRemoteAheadOnOpen();
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
     void removeGitHistoryPath(const QString &dir);
