@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "cursorskillsdialog.h"
+#include "deepseekclient.h"
 #include "gitstageguard.h"
 #include "gitstagereviewdialog.h"
 #include "gitworktreedialog.h"
@@ -553,6 +554,9 @@ MainWindow::MainWindow(QWidget *parent)
     serialPort = new QSerialPort(this);
     simMainDevice = new ModbusSlave(this);
     simAGVDevice = new ModbusSlave(this);
+    deepSeekClient = new DeepSeekClient(this);
+    connect(deepSeekClient, &DeepSeekClient::chatFinished, this, &MainWindow::onDeepSeekCommitMsgReady);
+    connect(deepSeekClient, &DeepSeekClient::chatFailed, this, &MainWindow::onDeepSeekCommitMsgFailed);
     simWriteRefreshTimer = new QTimer(this);
     simWriteRefreshTimer->setSingleShot(true);
     simWriteRefreshTimer->setInterval(33);
@@ -938,6 +942,12 @@ void MainWindow::createWidgets()
     
     txtGitCommitMsg = new QLineEdit();
     txtGitCommitMsg->setPlaceholderText("Git Commit Message...");
+    btnGitAiCommitMsg = new QPushButton(QStringLiteral("AI 整理提交说明"));
+    btnGitAiCommitMsg->setToolTip(
+        QStringLiteral("用 DeepSeek 根据未提交改动生成提交说明，填入输入框；可选择是否立即暂存并提交"));
+    btnGitAiCommitMsg->setStyleSheet(QStringLiteral("background-color: #e8f5e9; font-weight: bold;"));
+    btnGitDeepSeekSettings = new QPushButton(QStringLiteral("DeepSeek 设置"));
+    btnGitDeepSeekSettings->setToolTip(QStringLiteral("配置 API Key / Base URL / 模型名（保存在本机，不进仓库）"));
     
     cmbGitRemote = new QComboBox();
     cmbGitRemote->addItem("GitHub");
@@ -1314,6 +1324,8 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layCommit = new QHBoxLayout();
     layCommit->addWidget(new QLabel("提交信息:"));
     layCommit->addWidget(txtGitCommitMsg, 1);
+    layCommit->addWidget(btnGitAiCommitMsg);
+    layCommit->addWidget(btnGitDeepSeekSettings);
     layOps->addLayout(layCommit);
     
     // Common actions grouped by scenario
@@ -1930,6 +1942,8 @@ void MainWindow::createConnections()
     connect(btnGitDeleteBranch, &QPushButton::clicked, this, &MainWindow::onGitDeleteBranchClicked);
     connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
     connect(btnGitCommit, &QPushButton::clicked, this, &MainWindow::onGitCommitClicked);
+    connect(btnGitAiCommitMsg, &QPushButton::clicked, this, &MainWindow::onGitAiCommitMsgClicked);
+    connect(btnGitDeepSeekSettings, &QPushButton::clicked, this, &MainWindow::onGitDeepSeekSettingsClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
     connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
@@ -5164,6 +5178,285 @@ void MainWindow::onGitCommitClicked() {
 
     runGitCommand(QStringList() << "commit" << "-m" << msg);
     txtGitCommitMsg->clear();
+}
+
+bool MainWindow::captureGitOutput(const QString &workDir, const QStringList &args, QString *stdoutOut,
+                                  QString *stderrOut, int timeoutMs) const
+{
+    if (stdoutOut)
+        stdoutOut->clear();
+    if (stderrOut)
+        stderrOut->clear();
+    if (workDir.trimmed().isEmpty())
+        return false;
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+    process.setProgram(PlatformPrefs::gitBinary());
+    process.setArguments(args);
+    process.start();
+    if (!process.waitForStarted(5000))
+        return false;
+    if (!finishGitProcess(process, timeoutMs))
+        return false;
+
+    if (stdoutOut)
+        *stdoutOut = PlatformPrefs::decodeProcessOutput(process.readAllStandardOutput());
+    if (stderrOut)
+        *stderrOut = PlatformPrefs::decodeProcessOutput(process.readAllStandardError());
+    return process.exitCode() == 0;
+}
+
+QString MainWindow::collectUncommittedContextForAi(const QString &workDir, QString *errorOut) const
+{
+    if (errorOut)
+        errorOut->clear();
+    if (workDir.trimmed().isEmpty()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("未选择 Git 仓库目录");
+        return {};
+    }
+
+    QString statusOut;
+    QString statusErr;
+    if (!captureGitOutput(workDir,
+                          QStringList{QStringLiteral("status"), QStringLiteral("--porcelain")},
+                          &statusOut, &statusErr, 15000)) {
+        if (errorOut)
+            *errorOut = QStringLiteral("git status 失败: %1").arg(statusErr.trimmed());
+        return {};
+    }
+    if (statusOut.trimmed().isEmpty()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("没有未提交的改动");
+        return {};
+    }
+
+    QString logOut;
+    captureGitOutput(workDir,
+                     QStringList{QStringLiteral("log"), QStringLiteral("-5"), QStringLiteral("--oneline")},
+                     &logOut, nullptr, 10000);
+
+    QString unstaged;
+    QString staged;
+    captureGitOutput(workDir, QStringList{QStringLiteral("diff")}, &unstaged, nullptr, 30000);
+    captureGitOutput(workDir,
+                     QStringList{QStringLiteral("diff"), QStringLiteral("--cached")},
+                     &staged, nullptr, 30000);
+
+    QString statOut;
+    captureGitOutput(workDir,
+                     QStringList{QStringLiteral("diff"), QStringLiteral("HEAD"), QStringLiteral("--stat")},
+                     &statOut, nullptr, 15000);
+
+    constexpr int kMaxDiffChars = 80000;
+    auto truncate = [](QString text, int maxChars) -> QString {
+        text.replace(QLatin1Char('\0'), QLatin1Char(' '));
+        if (text.size() <= maxChars)
+            return text;
+        return text.left(maxChars) + QStringLiteral("\n…(diff 已截断)…");
+    };
+
+    QString combinedDiff = unstaged;
+    if (!staged.trimmed().isEmpty()) {
+        if (!combinedDiff.isEmpty())
+            combinedDiff += QLatin1Char('\n');
+        combinedDiff += QStringLiteral("===== STAGED (cached) =====\n") + staged;
+    }
+
+    QString context;
+    context += QStringLiteral("【最近提交】\n");
+    context += logOut.trimmed().isEmpty() ? QStringLiteral("(无)\n") : logOut.trimmed() + QLatin1Char('\n');
+    context += QStringLiteral("\n【status --porcelain】\n");
+    context += statusOut.trimmed() + QLatin1Char('\n');
+    context += QStringLiteral("\n【diff --stat】\n");
+    context += (statOut.trimmed().isEmpty() ? QStringLiteral("(无)") : statOut.trimmed()) + QLatin1Char('\n');
+    context += QStringLiteral("\n【diff】\n");
+    if (combinedDiff.trimmed().isEmpty())
+        context += QStringLiteral("(仅有未跟踪文件或无可文本 diff；请结合 status 概括)\n");
+    else
+        context += truncate(combinedDiff, kMaxDiffChars);
+
+    return context;
+}
+
+void MainWindow::setGitAiCommitBusy(bool busy)
+{
+    if (btnGitAiCommitMsg)
+        btnGitAiCommitMsg->setEnabled(!busy);
+    if (btnGitDeepSeekSettings)
+        btnGitDeepSeekSettings->setEnabled(!busy);
+    if (btnGitAiCommitMsg) {
+        btnGitAiCommitMsg->setText(busy ? QStringLiteral("AI 生成中…")
+                                        : QStringLiteral("AI 整理提交说明"));
+    }
+}
+
+void MainWindow::onGitDeepSeekSettingsClicked()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("DeepSeek 设置"));
+    dlg.resize(520, 180);
+
+    auto *form = new QFormLayout();
+    auto *editKey = new QLineEdit(DeepSeekClient::apiKey(), &dlg);
+    editKey->setEchoMode(QLineEdit::Password);
+    editKey->setPlaceholderText(QStringLiteral("sk-…"));
+    auto *chkShow = new QCheckBox(QStringLiteral("显示 Key"), &dlg);
+    connect(chkShow, &QCheckBox::toggled, editKey, [editKey](bool on) {
+        editKey->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
+    });
+    auto *editBase = new QLineEdit(DeepSeekClient::baseUrl(), &dlg);
+    auto *editModel = new QLineEdit(DeepSeekClient::model(), &dlg);
+
+    form->addRow(QStringLiteral("API Key"), editKey);
+    form->addRow(QString(), chkShow);
+    form->addRow(QStringLiteral("Base URL"), editBase);
+    form->addRow(QStringLiteral("模型"), editModel);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto *root = new QVBoxLayout(&dlg);
+    root->addLayout(form);
+    root->addWidget(new QLabel(
+        QStringLiteral("配置保存在本机 QSettings（LiChenYang/LinuxHelper），不会写入仓库。"), &dlg));
+    root->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    DeepSeekClient::setApiKey(editKey->text());
+    DeepSeekClient::setBaseUrl(editBase->text());
+    DeepSeekClient::setModel(editModel->text());
+    txtGitLog->append(QStringLiteral("<font color='green'>[DeepSeek] 设置已保存。</font>"));
+}
+
+void MainWindow::onGitAiCommitMsgClicked()
+{
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先选择 Git 仓库目录"));
+        return;
+    }
+    if (DeepSeekClient::apiKey().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("未配置 DeepSeek API Key，请先打开「DeepSeek 设置」。"));
+        onGitDeepSeekSettingsClicked();
+        if (DeepSeekClient::apiKey().isEmpty())
+            return;
+    }
+    if (deepSeekClient && deepSeekClient->isBusy()) {
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("已有请求进行中，请稍候。"));
+        return;
+    }
+
+    QString err;
+    const QString context = collectUncommittedContextForAi(workDir, &err);
+    if (context.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("AI 提交说明"),
+                                 err.isEmpty() ? QStringLiteral("无法收集改动上下文") : err);
+        if (!err.isEmpty())
+            txtGitLog->append(QStringLiteral("<font color='orange'>[DeepSeek] %1</font>").arg(err));
+        return;
+    }
+
+    const QString systemPrompt = QStringLiteral(
+        "你是 Git 提交信息助手。根据用户给出的 status/diff/最近提交风格，写一条中文 commit message。"
+        "要求：1) 只输出提交信息本身，不要解释、不要 Markdown、不要引号包裹；"
+        "2) 1～2 句，说明做了什么或为什么，不要流水账列文件名；"
+        "3) 风格贴近最近提交；4) 改动杂乱时概括主线，次要改动可一句带过。");
+
+    gitAiCommitPendingConfirm = true;
+    setGitAiCommitBusy(true);
+    txtGitLog->append(QStringLiteral("<font color='gray'>[DeepSeek] 正在根据未提交改动生成提交说明…</font>"));
+    deepSeekClient->chat(systemPrompt, context);
+}
+
+void MainWindow::onDeepSeekCommitMsgReady(const QString &content)
+{
+    setGitAiCommitBusy(false);
+
+    QString msg = content.trimmed();
+    // Keep first paragraph / first two non-empty lines as the commit subject(+body)
+    const QStringList lines = msg.split(QRegularExpression(QStringLiteral("[\r\n]+")),
+                                        Qt::SkipEmptyParts);
+    if (!lines.isEmpty()) {
+        if (lines.size() == 1) {
+            msg = lines.first().trimmed();
+        } else {
+            msg = lines.first().trimmed();
+            const QString second = lines.at(1).trimmed();
+            if (!second.isEmpty() && msg.size() + second.size() < 200)
+                msg += QLatin1Char('\n') + second;
+        }
+    }
+    // Strip surrounding quotes the model sometimes adds
+    if ((msg.startsWith(QLatin1Char('"')) && msg.endsWith(QLatin1Char('"')))
+        || (msg.startsWith(QStringLiteral("「")) && msg.endsWith(QStringLiteral("」")))) {
+        msg = msg.mid(1, msg.size() - 2).trimmed();
+    }
+
+    if (txtGitCommitMsg)
+        txtGitCommitMsg->setText(msg.contains(QLatin1Char('\n')) ? msg.split(QLatin1Char('\n')).first()
+                                                                  : msg);
+    // Prefer single-line in QLineEdit; if model returned two lines, keep first in the box
+    // and show full text in log / confirm dialog.
+    txtGitLog->append(QStringLiteral("<font color='green'>[DeepSeek] 生成提交说明：</font>%1")
+                          .arg(msg.toHtmlEscaped()));
+
+    if (!gitAiCommitPendingConfirm)
+        return;
+    gitAiCommitPendingConfirm = false;
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QStringLiteral("AI 提交说明"));
+    box.setText(QStringLiteral("已生成提交说明，是否继续暂存并提交？"));
+    box.setInformativeText(msg);
+    auto *btnCommit = box.addButton(QStringLiteral("暂存并提交"), QMessageBox::AcceptRole);
+    box.addButton(QStringLiteral("仅填入，稍后手动提交"), QMessageBox::RejectRole);
+    box.exec();
+
+    if (box.clickedButton() != btnCommit)
+        return;
+
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    if (!gitStageWithReview(workDir))
+        return;
+
+    QStringList blocked;
+    if (gitStagedHasBlockedPaths(workDir, &blocked)) {
+        QMessageBox::warning(
+            this, QStringLiteral("拒绝提交"),
+            QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止提交：\n\n%1")
+                .arg(blocked.join(QLatin1Char('\n'))));
+        return;
+    }
+
+    // Use the (possibly edited) line edit text if user changed it; else full generated msg
+    QString commitMsg = txtGitCommitMsg ? txtGitCommitMsg->text().trimmed() : QString();
+    if (commitMsg.isEmpty())
+        commitMsg = msg;
+    if (commitMsg.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("提交信息为空"));
+        return;
+    }
+
+    runGitCommand(QStringList() << QStringLiteral("commit") << QStringLiteral("-m") << commitMsg);
+    if (txtGitCommitMsg)
+        txtGitCommitMsg->clear();
+}
+
+void MainWindow::onDeepSeekCommitMsgFailed(const QString &error)
+{
+    setGitAiCommitBusy(false);
+    gitAiCommitPendingConfirm = false;
+    txtGitLog->append(QStringLiteral("<font color='red'>[DeepSeek] 失败：%1</font>")
+                          .arg(error.toHtmlEscaped()));
+    QMessageBox::warning(this, QStringLiteral("DeepSeek"),
+                         QStringLiteral("生成提交说明失败：\n%1").arg(error));
 }
 
 void MainWindow::onGitPushClicked() {

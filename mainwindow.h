@@ -43,6 +43,7 @@
 #include "modbusslave.h"
 
 class LifeAssistantWidget;
+class DeepSeekClient;
 class QCloseEvent;
 
 // A simple sparkline widget to show recent usage
@@ -183,6 +184,8 @@ private slots:
     void onGitDeleteBranchClicked(); // 新增：删除分支
     void onGitAddClicked();
     void onGitCommitClicked();
+    void onGitAiCommitMsgClicked();
+    void onGitDeepSeekSettingsClicked();
     void onGitPushClicked();
     void onGitPullClicked();
     void onGitMergeClicked();
@@ -208,6 +211,8 @@ private slots:
     void onGitOpenDailyReportClicked();
     void onGitOpenSkillsClicked();
     void onDailyReportAutoSaveTick();
+    void onDeepSeekCommitMsgReady(const QString &content);
+    void onDeepSeekCommitMsgFailed(const QString &error);
     void onGitRemoveHistoryClicked();
     void onGitDirChanged();
     void onGitBranchSelectionChanged();
@@ -406,6 +411,10 @@ private:
     QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
+    QPushButton *btnGitAiCommitMsg = nullptr;
+    QPushButton *btnGitDeepSeekSettings = nullptr;
+    DeepSeekClient *deepSeekClient = nullptr;
+    bool gitAiCommitPendingConfirm = false;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
     QPushButton *btnGitPush;
@@ -576,6 +585,12 @@ private:
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
     bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
+    /** Capture git stdout (decoded). Returns false on start/timeout/non-zero exit. */
+    bool captureGitOutput(const QString &workDir, const QStringList &args, QString *stdoutOut,
+                          QString *stderrOut = nullptr, int timeoutMs = 30000) const;
+    /** Build status + diffs + recent log for DeepSeek commit-message prompt. */
+    QString collectUncommittedContextForAi(const QString &workDir, QString *errorOut = nullptr) const;
+    void setGitAiCommitBusy(bool busy);
     void runGitNetworkCommand(const QStringList &args, int timeoutMs = 30000,
                               const std::function<void(bool ok)> &done = {});
     void setGitNetworkBusy(bool busy, const QString &statusText = QString());

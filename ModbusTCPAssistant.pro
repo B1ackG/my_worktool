@@ -28,7 +28,8 @@ SOURCES += \
     gitstageguard.cpp \
     gitstagereviewdialog.cpp \
     cursorskillsdialog.cpp \
-    platformprefs.cpp
+    platformprefs.cpp \
+    deepseekclient.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -50,7 +51,8 @@ HEADERS += \
     gitstageguard.h \
     gitstagereviewdialog.h \
     cursorskillsdialog.h \
-    platformprefs.h
+    platformprefs.h \
+    deepseekclient.h
 
 win32: LIBS += -lpsapi -luser32
 
