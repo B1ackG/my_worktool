@@ -13,6 +13,9 @@
 #endif
 #include <QMessageBox>
 #include <QCloseEvent>
+#include <QKeyEvent>
+#include <QEvent>
+#include <QFrame>
 #include <QInputDialog>
 #include <QDateTime>
 #include <QDate>
@@ -1064,7 +1067,16 @@ void MainWindow::createWidgets()
 
     txtGitLog = new QTextEdit();
     txtGitLog->setReadOnly(true);
-    txtGitLog->setStyleSheet("background: #1e1e1e; color: #d4d4d4; font-family: Monospace; font-size: 12px;");
+    txtGitLog->setStyleSheet("background: #1e1e1e; color: #d4d4d4; font-family: Monospace; font-size: 12px; border: none;");
+    txtGitLog->setPlaceholderText(QStringLiteral("Git 命令输出…"));
+
+    txtGitCmdInput = new QLineEdit();
+    txtGitCmdInput->setPlaceholderText(
+        QStringLiteral("在当前 Git 仓库目录下执行，例如 status 或 git log -5（↑↓ 翻历史）"));
+    txtGitCmdInput->setStyleSheet(
+        QStringLiteral("QLineEdit { background: #1e1e1e; color: #d4d4d4; font-family: Monospace; "
+                       "font-size: 12px; border: none; padding: 6px 4px; selection-background-color: #264f78; }"));
+    txtGitCmdInput->installEventFilter(this);
 }
 
 QWidget* MainWindow::createModbusPage()
@@ -1417,7 +1429,7 @@ QWidget* MainWindow::createGitPage()
     grpOps->setLayout(layOps);
     layout->addWidget(grpOps);
     
-    // 3. Log Output
+    // 3. Log Output + interactive command line (same console surface)
     QGroupBox *grpLog = new QGroupBox("Git 输出");
     QVBoxLayout *layLog = new QVBoxLayout();
     QHBoxLayout *layNetBusy = new QHBoxLayout();
@@ -1425,7 +1437,45 @@ QWidget* MainWindow::createGitPage()
     layNetBusy->addWidget(barGitNetworkBusy, 2);
     layNetBusy->addWidget(btnGitCancelNetwork);
     layLog->addLayout(layNetBusy);
-    layLog->addWidget(txtGitLog);
+
+    QFrame *consoleFrame = new QFrame();
+    consoleFrame->setObjectName(QStringLiteral("gitConsoleFrame"));
+    consoleFrame->setStyleSheet(
+        QStringLiteral("#gitConsoleFrame { background: #1e1e1e; border: 1px solid #3c3c3c; }"
+                       "#gitConsoleFrame QTextEdit { background: #1e1e1e; color: #d4d4d4; "
+                       "font-family: Monospace; font-size: 12px; border: none; }"
+                       "#gitConsoleFrame QLineEdit { background: #1e1e1e; color: #d4d4d4; "
+                       "font-family: Monospace; font-size: 12px; border: none; }"
+                       "#gitConsoleFrame QLabel { background: #1e1e1e; color: #4ec9b0; "
+                       "font-family: Monospace; font-size: 12px; }"));
+    QVBoxLayout *layConsole = new QVBoxLayout(consoleFrame);
+    layConsole->setContentsMargins(4, 4, 4, 4);
+    layConsole->setSpacing(0);
+    layConsole->addWidget(txtGitLog, 1);
+
+    QFrame *cmdSep = new QFrame();
+    cmdSep->setFixedHeight(1);
+    cmdSep->setStyleSheet(QStringLiteral("background: #3c3c3c; border: none;"));
+    layConsole->addWidget(cmdSep);
+
+    QHBoxLayout *layCmd = new QHBoxLayout();
+    layCmd->setContentsMargins(2, 2, 2, 2);
+    layCmd->setSpacing(4);
+    QLabel *lblGitPrompt = new QLabel(QStringLiteral("$"));
+    lblGitPrompt->setFixedWidth(14);
+    layCmd->addWidget(lblGitPrompt);
+    layCmd->addWidget(txtGitCmdInput, 1);
+    layConsole->addLayout(layCmd);
+
+    lblGitConsoleCwd = new QLabel();
+    lblGitConsoleCwd->setWordWrap(true);
+    lblGitConsoleCwd->setStyleSheet(
+        QStringLiteral("color: #858585; font-family: Monospace; font-size: 11px; background: #1e1e1e; "
+                       "padding: 2px 4px;"));
+    layConsole->addWidget(lblGitConsoleCwd);
+    updateGitConsoleCwdLabel();
+
+    layLog->addWidget(consoleFrame, 1);
     grpLog->setLayout(layLog);
     layout->addWidget(grpLog);
     
@@ -1950,6 +2000,7 @@ void MainWindow::createConnections()
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
     connect(btnGitCancelNetwork, &QPushButton::clicked, this, &MainWindow::onGitCancelNetworkClicked);
     connect(chkGitAutoFetch, &QCheckBox::toggled, this, &MainWindow::onGitAutoFetchToggled);
+    connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
     connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
     connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
@@ -3677,9 +3728,11 @@ void MainWindow::onGitSelectDirClicked() {
 }
 
 bool MainWindow::runGitCommand(const QStringList &args) {
-    QString workDir = cmbGitDir->currentText().trimmed();
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
     if (workDir.isEmpty()) {
-        txtGitLog->append("<font color='red'>错误: 请先选择Git仓库目录!</font>");
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: %1</font>")
+                              .arg(pathError.isEmpty() ? QStringLiteral("请先选择Git仓库目录!") : pathError));
         return false;
     }
 
@@ -3714,6 +3767,183 @@ bool MainWindow::runGitCommand(const QStringList &args) {
     
     txtGitLog->moveCursor(QTextCursor::End);
     return process.exitCode() == 0;
+}
+
+QString MainWindow::currentGitWorkDir(QString *errorOut) const
+{
+    const QString raw = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    if (raw.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("请先选择Git仓库目录!");
+        }
+        return {};
+    }
+
+    const QFileInfo fi(raw);
+    const QString absPath = QDir::cleanPath(fi.absoluteFilePath());
+    if (!QDir(absPath).exists()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Git仓库目录不存在: %1").arg(absPath);
+        }
+        return {};
+    }
+    return absPath;
+}
+
+void MainWindow::updateGitConsoleCwdLabel()
+{
+    if (!lblGitConsoleCwd) {
+        return;
+    }
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        lblGitConsoleCwd->setText(QStringLiteral("cwd: （未选择仓库，命令将无法执行）"));
+        lblGitConsoleCwd->setStyleSheet(
+            QStringLiteral("color: #ce9178; font-family: Monospace; font-size: 11px; background: #1e1e1e; "
+                           "padding: 2px 4px;"));
+        return;
+    }
+    lblGitConsoleCwd->setText(QStringLiteral("cwd: %1").arg(QDir::toNativeSeparators(workDir)));
+    lblGitConsoleCwd->setStyleSheet(
+        QStringLiteral("color: #858585; font-family: Monospace; font-size: 11px; background: #1e1e1e; "
+                       "padding: 2px 4px;"));
+}
+
+QStringList MainWindow::parseGitConsoleCommand(const QString &rawLine, QString *errorOut) const
+{
+    QString line = rawLine.trimmed();
+    if (line.isEmpty()) {
+        return {};
+    }
+
+    if (line.startsWith(QLatin1String("git "), Qt::CaseInsensitive)) {
+        line = line.mid(4).trimmed();
+    } else if (line.compare(QLatin1String("git"), Qt::CaseInsensitive) == 0) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("请补全子命令，例如: status / git log -5");
+        }
+        return {};
+    }
+
+    if (line.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("空命令");
+        }
+        return {};
+    }
+
+    const QStringList args = QProcess::splitCommand(line);
+    if (args.isEmpty() && errorOut) {
+        *errorOut = QStringLiteral("无法解析命令");
+    }
+    return args;
+}
+
+void MainWindow::onGitConsoleCommandSubmitted()
+{
+    if (!txtGitCmdInput || !txtGitLog) {
+        return;
+    }
+
+    const QString raw = txtGitCmdInput->text().trimmed();
+    if (raw.isEmpty()) {
+        return;
+    }
+
+    if (gitConsoleHistory.isEmpty() || gitConsoleHistory.constLast() != raw) {
+        gitConsoleHistory.append(raw);
+    }
+    gitConsoleHistoryIndex = gitConsoleHistory.size();
+    txtGitCmdInput->clear();
+
+    if (raw.compare(QLatin1String("clear"), Qt::CaseInsensitive) == 0
+        || raw.compare(QLatin1String("cls"), Qt::CaseInsensitive) == 0) {
+        txtGitLog->clear();
+        return;
+    }
+
+    // Console commands always run under the currently selected Git repo path.
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: %1</font>")
+                              .arg(pathError.isEmpty() ? QStringLiteral("请先选择Git仓库目录!") : pathError));
+        txtGitLog->moveCursor(QTextCursor::End);
+        return;
+    }
+
+    QString parseError;
+    const QStringList args = parseGitConsoleCommand(raw, &parseError);
+    if (args.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>")
+                              .arg(parseError.isEmpty() ? QStringLiteral("无效命令") : parseError));
+        txtGitLog->moveCursor(QTextCursor::End);
+        return;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='gray'>cwd: %1</font>")
+                          .arg(QDir::toNativeSeparators(workDir).toHtmlEscaped()));
+
+    const QString sub = args.first().toLower();
+    const bool isNetwork = (sub == QLatin1String("push") || sub == QLatin1String("pull")
+                            || sub == QLatin1String("fetch") || sub == QLatin1String("clone")
+                            || sub == QLatin1String("ls-remote"));
+
+    if (isNetwork) {
+        const int timeoutMs = (sub == QLatin1String("clone")) ? 120000 : 60000;
+        runGitNetworkCommand(args, timeoutMs, [this, sub](bool) {
+            if (sub == QLatin1String("fetch") || sub == QLatin1String("pull")
+                || sub == QLatin1String("push")) {
+                refreshGitBranchesLocal();
+            }
+        });
+        return;
+    }
+
+    runGitCommand(args);
+
+    if (sub == QLatin1String("checkout") || sub == QLatin1String("switch")
+        || sub == QLatin1String("branch") || sub == QLatin1String("commit")
+        || sub == QLatin1String("merge") || sub == QLatin1String("rebase")
+        || sub == QLatin1String("stash") || sub == QLatin1String("reset")) {
+        refreshGitBranchesLocal();
+        onGitRefreshLogClicked();
+    }
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == txtGitCmdInput && event && event->type() == QEvent::KeyPress) {
+        auto *ke = static_cast<QKeyEvent *>(event);
+        if (ke->key() == Qt::Key_Up) {
+            if (!gitConsoleHistory.isEmpty()) {
+                if (gitConsoleHistoryIndex < 0 || gitConsoleHistoryIndex > gitConsoleHistory.size()) {
+                    gitConsoleHistoryIndex = gitConsoleHistory.size();
+                }
+                if (gitConsoleHistoryIndex > 0) {
+                    --gitConsoleHistoryIndex;
+                }
+                txtGitCmdInput->setText(gitConsoleHistory.value(gitConsoleHistoryIndex));
+                txtGitCmdInput->setCursorPosition(txtGitCmdInput->text().size());
+            }
+            return true;
+        }
+        if (ke->key() == Qt::Key_Down) {
+            if (!gitConsoleHistory.isEmpty()) {
+                if (gitConsoleHistoryIndex < gitConsoleHistory.size() - 1) {
+                    ++gitConsoleHistoryIndex;
+                    txtGitCmdInput->setText(gitConsoleHistory.value(gitConsoleHistoryIndex));
+                    txtGitCmdInput->setCursorPosition(txtGitCmdInput->text().size());
+                } else {
+                    gitConsoleHistoryIndex = gitConsoleHistory.size();
+                    txtGitCmdInput->clear();
+                }
+            }
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 bool MainWindow::isGitAutoFetchEnabled() const
@@ -3865,9 +4095,11 @@ void MainWindow::offerGitNetworkRetry(const QString &reason)
 void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
                                       const std::function<void(bool ok)> &done)
 {
-    QString workDir = cmbGitDir->currentText().trimmed();
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
     if (workDir.isEmpty()) {
-        txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择Git仓库目录!</font>"));
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: %1</font>")
+                              .arg(pathError.isEmpty() ? QStringLiteral("请先选择Git仓库目录!") : pathError));
         gitNetworkSuppressRetry = false;
         if (done) {
             done(false);
@@ -4031,28 +4263,33 @@ bool MainWindow::gitStageWithReview(const QString &workDir)
     if (ignoreFileUpdated && !selected.contains(QStringLiteral(".gitignore")))
         selected.prepend(QStringLiteral(".gitignore"));
 
-    for (const QString &path : selected) {
-        QString reason;
-        if (path != QStringLiteral(".gitignore")
-            && GitStageGuard::isBlockedPath(workDir, path, &reason)) {
-            QMessageBox::warning(this, QStringLiteral("拒绝暂存"),
-                                 QStringLiteral("所选路径匹配 .gitignore，已拒绝：\n%1\n（%2）")
-                                     .arg(path, reason));
-            return false;
-        }
-    }
-
     if (selected.isEmpty()) {
         txtGitLog->append(QStringLiteral(
             "<font color='gray'>[暂存审查] 未选择暂存路径（可能仅更新了索引）。</font>"));
         return true;
     }
 
+    // 审查对话框已确认（含用户/AI 覆盖危险项）；用 -f 以便加入 .gitignore 匹配路径。
+    QStringList forceNoted;
+    for (const QString &path : selected) {
+        if (path == QStringLiteral(".gitignore"))
+            continue;
+        QString reason;
+        if (GitStageGuard::isBlockedPath(workDir, path, &reason)
+            || GitStageGuard::isExtensionLessDangerous(path, nullptr))
+            forceNoted << (reason.isEmpty() ? path : QStringLiteral("%1 (%2)").arg(path, reason));
+    }
+    if (!forceNoted.isEmpty()) {
+        txtGitLog->append(QStringLiteral(
+            "<font color='orange'>[暂存审查] 强制暂存危险/忽略路径：%1</font>")
+                              .arg(forceNoted.join(QLatin1String(", "))));
+    }
+
     QStringList args;
-    args << QStringLiteral("add") << QStringLiteral("--");
+    args << QStringLiteral("add") << QStringLiteral("-f") << QStringLiteral("--");
     args << selected;
     if (!runGitCommand(args)) {
-        txtGitLog->append(QStringLiteral("<font color='red'>[暂存审查] git add 失败。</font>"));
+        txtGitLog->append(QStringLiteral("<font color='red'>[暂存审查] git add -f 失败。</font>"));
         return false;
     }
     txtGitLog->append(QStringLiteral("<font color='green'>[暂存审查] 已暂存 %1 个路径。</font>")
@@ -5197,6 +5434,7 @@ void MainWindow::appendGitLogHtml(const QString &html)
         return;
     }
     txtGitLog->append(html);
+    txtGitLog->moveCursor(QTextCursor::End);
 }
 
 void MainWindow::refreshAfterWorktreeApply()
@@ -5250,13 +5488,19 @@ void MainWindow::onGitCommitClicked() {
     const QString workDir = cmbGitDir->currentText().trimmed();
     QStringList blocked;
     if (gitStagedHasBlockedPaths(workDir, &blocked)) {
-        QMessageBox::warning(
-            this, QStringLiteral("拒绝提交"),
-            QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止提交：\n\n%1\n\n"
-                           "请先执行 git reset 取消暂存，或从索引移除后再提交。")
-                .arg(blocked.join(QLatin1Char('\n'))));
-        txtGitLog->append(QStringLiteral("<font color='red'>[提交防护] 暂存区含应忽略路径，已拒绝 commit。</font>"));
-        return;
+        const auto reply = QMessageBox::question(
+            this, QStringLiteral("确认提交危险路径"),
+            QStringLiteral("暂存区包含匹配 .gitignore / 规则危险的路径：\n\n%1\n\n"
+                           "若这是暂存审查中用户/AI 的有意选择，可继续提交。是否仍要 commit？")
+                .arg(blocked.join(QLatin1Char('\n'))),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            txtGitLog->append(QStringLiteral(
+                "<font color='orange'>[提交防护] 暂存区含应忽略路径，已取消 commit。</font>"));
+            return;
+        }
+        txtGitLog->append(QStringLiteral(
+            "<font color='orange'>[提交防护] 用户确认提交含危险路径的暂存区。</font>"));
     }
 
     runGitCommand(QStringList() << "commit" << "-m" << msg);
@@ -5511,11 +5755,13 @@ void MainWindow::onDeepSeekCommitMsgReady(const QString &content)
 
     QStringList blocked;
     if (gitStagedHasBlockedPaths(workDir, &blocked)) {
-        QMessageBox::warning(
-            this, QStringLiteral("拒绝提交"),
-            QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止提交：\n\n%1")
-                .arg(blocked.join(QLatin1Char('\n'))));
-        return;
+        const auto reply = QMessageBox::question(
+            this, QStringLiteral("确认提交危险路径"),
+            QStringLiteral("暂存区包含匹配 .gitignore / 规则危险的路径：\n\n%1\n\n是否仍要 commit？")
+                .arg(blocked.join(QLatin1Char('\n'))),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (reply != QMessageBox::Yes)
+            return;
     }
 
     // Use the (possibly edited) line edit text if user changed it; else full generated msg
@@ -6162,12 +6408,16 @@ void MainWindow::onScpTransferClicked() {
 
         QStringList blocked;
         if (gitStagedHasBlockedPaths(dir, &blocked)) {
-            QMessageBox::warning(
-                this, QStringLiteral("拒绝提交"),
-                QStringLiteral("暂存区包含匹配 .gitignore 的路径，已阻止传输前提交：\n\n%1")
-                    .arg(blocked.join(QLatin1Char('\n'))));
-            txtGitLog->append(QStringLiteral("已取消传输：暂存区含应忽略路径。"));
-            return;
+            const auto reply = QMessageBox::question(
+                this, QStringLiteral("确认提交危险路径"),
+                QStringLiteral("暂存区包含匹配 .gitignore / 规则危险的路径：\n\n%1\n\n"
+                               "是否仍要提交并继续传输？")
+                    .arg(blocked.join(QLatin1Char('\n'))),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply != QMessageBox::Yes) {
+                txtGitLog->append(QStringLiteral("已取消传输：用户未确认含危险路径的提交。"));
+                return;
+            }
         }
 
         bool ok = false;
@@ -6739,6 +6989,7 @@ void MainWindow::applyGitHistoryToCombo(const QStringList &history, const QStrin
         cmbGitDir->setCurrentIndex(0);
     }
     cmbGitDir->blockSignals(false);
+    updateGitConsoleCwdLabel();
     if (!activateRepo) {
         refreshGitRepoMetaTable();
         return;
@@ -6907,6 +7158,7 @@ void MainWindow::onGitRemoveHistoryClicked() {
 void MainWindow::onGitDirChanged() {
     activateGitRepo(cmbGitDir->currentText().trimmed(), isGitAutoFetchEnabled());
     refreshGitGoalsTable();
+    updateGitConsoleCwdLabel();
     if (gitDiffReminderEnabled && gitDiffReminderTimer && !gitDiffReminderTimer->isActive()) {
         gitDiffReminderTimer->start();
     }

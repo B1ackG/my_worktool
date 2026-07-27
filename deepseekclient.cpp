@@ -7,6 +7,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSettings>
+#include <QSslSocket>
 #include <QUrl>
 
 namespace {
@@ -81,6 +82,15 @@ void DeepSeekClient::chat(const QString &systemPrompt, const QString &userPrompt
         return;
     }
 
+    if (!QSslSocket::supportsSsl()) {
+        emit chatFailed(
+            QStringLiteral("TLS/SSL 不可用。Windows 下请将 libssl-1_1-x64.dll 与 "
+                           "libcrypto-1_1-x64.dll 放到程序同目录后重启。"
+                           "（Qt SSL 构建版本：%1）")
+                .arg(QSslSocket::sslLibraryBuildVersionString()));
+        return;
+    }
+
     QString endpoint = baseUrl();
     while (endpoint.endsWith(QLatin1Char('/')))
         endpoint.chop(1);
@@ -133,11 +143,18 @@ void DeepSeekClient::onReplyFinished()
 
     const QByteArray raw = reply->readAll();
     if (reply->error() != QNetworkReply::NoError) {
+        QString err = reply->errorString();
+        if (err.contains(QStringLiteral("TLS"), Qt::CaseInsensitive)
+            || err.contains(QStringLiteral("SSL"), Qt::CaseInsensitive)) {
+            err += QStringLiteral(" —— Windows 下通常缺少 OpenSSL 1.1 DLL"
+                                  "（libssl-1_1-x64.dll / libcrypto-1_1-x64.dll），"
+                                  "请放到程序同目录后重启。");
+        }
         QString detail = QString::fromUtf8(raw).trimmed();
         if (detail.size() > 400)
             detail = detail.left(400) + QStringLiteral("…");
         emit chatFailed(QStringLiteral("%1%2")
-                            .arg(reply->errorString(),
+                            .arg(err,
                                  detail.isEmpty() ? QString()
                                                   : QStringLiteral(" | ") + detail));
         return;

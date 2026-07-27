@@ -56,6 +56,16 @@ HEADERS += \
 
 win32: LIBS += -lpsapi -luser32
 
+# Qt 5 MinGW needs OpenSSL 1.1 DLLs beside the exe for HTTPS (DeepSeek, etc.).
+win32 {
+    OPENSSL_WIN64 = $$PWD/third_party/openssl/win64
+    CONFIG(debug, debug|release): OPENSSL_OUT = $$OUT_PWD/debug
+    else: OPENSSL_OUT = $$OUT_PWD/release
+    QMAKE_POST_LINK += \
+        $$quote(cmd /c copy /y $$shell_path($$OPENSSL_WIN64/libssl-1_1-x64.dll) $$shell_path($$OPENSSL_OUT)) $$escape_expand(\\n\\t) \
+        $$quote(cmd /c copy /y $$shell_path($$OPENSSL_WIN64/libcrypto-1_1-x64.dll) $$shell_path($$OPENSSL_OUT))
+}
+
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin

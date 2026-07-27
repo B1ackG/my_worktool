@@ -47,6 +47,7 @@
 class LifeAssistantWidget;
 class DeepSeekClient;
 class QCloseEvent;
+class QEvent;
 
 // A simple sparkline widget to show recent usage
 class MonitorChart : public QWidget {
@@ -138,6 +139,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     // Pages Navigation
@@ -214,6 +216,7 @@ private slots:
     void onDeepSeekCommitMsgReady(const QString &content);
     void onDeepSeekCommitMsgFailed(const QString &error);
     void onGitRemoveHistoryClicked();
+    void onGitConsoleCommandSubmitted();
     void onGitDirChanged();
     void onGitBranchSelectionChanged();
     void onGitGoalAddClicked();
@@ -446,6 +449,10 @@ private:
     QPushButton *btnGitOpenDaily;
     QPushButton *btnGitOpenSkills;
     QTextEdit *txtGitLog;
+    QLineEdit *txtGitCmdInput = nullptr;
+    QLabel *lblGitConsoleCwd = nullptr;
+    QStringList gitConsoleHistory;
+    int gitConsoleHistoryIndex = -1;
     QLineEdit *txtScpTargetIp;
     QLineEdit *txtScpPassword;
     QPushButton *btnScpTransfer;
@@ -579,6 +586,10 @@ private:
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
     bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
+    /** Absolute path of the currently selected Git repo, or empty on error. */
+    QString currentGitWorkDir(QString *errorOut = nullptr) const;
+    /** Parse free-form console line into git args; strips optional leading "git". */
+    QStringList parseGitConsoleCommand(const QString &rawLine, QString *errorOut = nullptr) const;
     /** Capture git stdout (decoded). Returns false on start/timeout/non-zero exit. */
     bool captureGitOutput(const QString &workDir, const QStringList &args, QString *stdoutOut,
                           QString *stderrOut = nullptr, int timeoutMs = 30000) const;
@@ -591,6 +602,7 @@ private:
     void finishGitNetworkCommand(bool ok, const QString &stdoutText, const QString &stderrText);
     void offerGitNetworkRetry(const QString &reason);
     void refreshGitBranchesLocal();
+    void updateGitConsoleCwdLabel();
     bool isGitAutoFetchEnabled() const;
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();

@@ -7,8 +7,10 @@
 #include <QStringList>
 #include <QVector>
 
+class DeepSeekClient;
 class QCheckBox;
 class QLabel;
+class QPushButton;
 class QTableWidget;
 
 class GitStageReviewDialog : public QDialog
@@ -29,23 +31,36 @@ private slots:
     void onSelectNormalOnly();
     void onSelectAllSafe();
     void onSelectNone();
+    void onDeepSeekClassifyClicked();
+    void onDeepSeekClassifyFinished(const QString &content);
+    void onDeepSeekClassifyFailed(const QString &error);
 
 private:
     void rebuildSummary();
     QStringList pathsForIgnoreSuggestion() const;
+    void setDeepSeekBusy(bool busy);
+    void startDeepSeekClassify(bool interactive);
+    QString buildClassifyUserPrompt() const;
+    bool applyDeepSeekClassification(const QString &content, QString *errorOut);
 
     QString m_repoDir;
     QVector<GitStageEntry> m_entries;
     QTableWidget *m_table = nullptr;
     QLabel *m_lblSummary = nullptr;
     QLabel *m_lblAutoIgnore = nullptr;
+    QLabel *m_lblAiStatus = nullptr;
     QCheckBox *m_chkUncacheBlocked = nullptr;
+    QPushButton *m_btnDeepSeek = nullptr;
+    QPushButton *m_btnOk = nullptr;
+    DeepSeekClient *m_deepSeek = nullptr;
 
     QStringList m_selectedPaths;
     QStringList m_blockedTrackedPaths;
     QStringList m_ignorePatterns;
     bool m_appendIgnore = false;
     bool m_uncacheBlocked = false;
+    bool m_aiApplied = false;
+    bool m_classifyInteractive = false;
 };
 
 #endif // GITSTAGEREVIEWDIALOG_H
