@@ -119,7 +119,8 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     refreshBindingsTable();
     updateStatus(manager->statusText());
     statusTimer->start(1500);
-    applyChanges(false);
+    // Do not stop/restart a boot-started daemon just because the UI opened.
+    ensureDaemonManaged();
 #endif
 }
 
@@ -130,14 +131,21 @@ QString InputQuickerWidget::selectedDevicePath() const
     return cmbDevice->currentData().toString();
 }
 
+QString InputQuickerWidget::selectedDeviceName() const
+{
+    return cmbDevice->currentData(Qt::UserRole + 1).toString();
+}
+
 void InputQuickerWidget::populateDevices()
 {
     const QString selectedPath = selectedDevicePath().isEmpty() ? manager->devicePath() : selectedDevicePath();
+    const QString selectedName = manager->deviceName();
     const QSignalBlocker blocker(cmbDevice);
     cmbDevice->clear();
     cmbDevice->addItem(QStringLiteral("自动选择（按能力评分）"), QString());
 
     const QList<InputQuickerManager::DeviceInfo> devices = manager->refreshDeviceList();
+    int matchByNameIndex = -1;
     for (const InputQuickerManager::DeviceInfo &device : devices) {
         QString label;
         if (device.recommended) {
@@ -152,13 +160,26 @@ void InputQuickerWidget::populateDevices()
             label += QStringLiteral(" (无权限)");
         }
         cmbDevice->addItem(label, device.path);
+        cmbDevice->setItemData(cmbDevice->count() - 1, device.name, Qt::UserRole + 1);
+        if (matchByNameIndex < 0 && !selectedName.isEmpty()
+            && device.name.compare(selectedName, Qt::CaseInsensitive) == 0) {
+            matchByNameIndex = cmbDevice->count() - 1;
+        }
     }
 
     const int index = cmbDevice->findData(selectedPath);
     if (index >= 0) {
         cmbDevice->setCurrentIndex(index);
+    } else if (matchByNameIndex >= 0) {
+        // eventN renumbered after reboot — keep the same mouse by name.
+        cmbDevice->setCurrentIndex(matchByNameIndex);
     } else if (!selectedPath.isEmpty()) {
         cmbDevice->addItem(QStringLiteral("手动设备: %1").arg(selectedPath), selectedPath);
+        cmbDevice->setItemData(cmbDevice->count() - 1, selectedName, Qt::UserRole + 1);
+        cmbDevice->setCurrentIndex(cmbDevice->count() - 1);
+    } else if (!selectedName.isEmpty()) {
+        cmbDevice->addItem(QStringLiteral("按名称: %1（当前未连接）").arg(selectedName), QString());
+        cmbDevice->setItemData(cmbDevice->count() - 1, selectedName, Qt::UserRole + 1);
         cmbDevice->setCurrentIndex(cmbDevice->count() - 1);
     }
 }
@@ -367,6 +388,27 @@ void InputQuickerWidget::syncManagerFromUi()
     // Enable = install boot autostart; disable = remove it.
     manager->setDaemonAutostart(enabled);
     manager->setDevicePath(selectedDevicePath());
+    manager->setDeviceName(selectedDeviceName());
+}
+
+void InputQuickerWidget::ensureDaemonManaged()
+{
+    syncManagerFromUi();
+    manager->saveSettings();
+    if (!manager->enabled()) {
+        manager->setDaemonAutostartInstalled(false);
+        updateStatus(manager->statusText());
+        return;
+    }
+
+    manager->setDaemonAutostartInstalled(true);
+    if (!manager->isDaemonRunning()) {
+        if (!manager->startDaemon()) {
+            updateStatus(QStringLiteral("启动失败 — 请查看日志"));
+            return;
+        }
+    }
+    updateStatus(manager->statusText());
 }
 
 bool InputQuickerWidget::applyChanges(bool showFailureDialog)

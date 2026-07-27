@@ -36,7 +36,9 @@ private:
     QString actionDisplayText(const QJsonObject &action) const;
     void syncManagerFromUi();
     QString selectedDevicePath() const;
+    QString selectedDeviceName() const;
     bool applyChanges(bool showFailureDialog = true);
+    void ensureDaemonManaged();
     void ensureDefaultsIfEmpty();
     void reportApplyFailure();
 

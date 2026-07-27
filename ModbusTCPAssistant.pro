@@ -27,6 +27,7 @@ SOURCES += \
     gitworktreedialog.cpp \
     gitstageguard.cpp \
     gitstagereviewdialog.cpp \
+    cursorskillsdialog.cpp \
     platformprefs.cpp
 
 HEADERS += \
@@ -48,6 +49,7 @@ HEADERS += \
     gitworktreedialog.h \
     gitstageguard.h \
     gitstagereviewdialog.h \
+    cursorskillsdialog.h \
     platformprefs.h
 
 win32: LIBS += -lpsapi -luser32

@@ -67,6 +67,7 @@ QuickerBindingDialog::QuickerBindingDialog(InputQuickerManager *manager, QWidget
     presetCombo->addItem(QStringLiteral("静音"), QStringLiteral("mute"));
     presetCombo->addItem(QStringLiteral("下一曲"), QStringLiteral("media_next"));
     presetCombo->addItem(QStringLiteral("上一曲"), QStringLiteral("media_prev"));
+    presetCombo->addItem(QStringLiteral("Super 键 (系统键)"), QStringLiteral("super"));
 
     keyboardWidget = new QWidget(this);
     auto *keyboardLayout = new QVBoxLayout(keyboardWidget);

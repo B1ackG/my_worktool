@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "cursorskillsdialog.h"
 #include "gitstageguard.h"
 #include "gitstagereviewdialog.h"
 #include "gitworktreedialog.h"
@@ -1015,6 +1016,10 @@ void MainWindow::createWidgets()
     btnGitOpenDaily = new QPushButton("打开日报");
     btnGitOpenDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
     btnGitOpenDaily->setToolTip("用系统默认程序打开今日日报文件");
+    btnGitOpenSkills = new QPushButton("打开 Skills");
+    btnGitOpenSkills->setStyleSheet("background-color: #e8eaf6; font-weight: bold;");
+    btnGitOpenSkills->setToolTip(
+        "查看并打开总 Skill（~/.cursor/skills）以及各记忆仓库的 .cursor/skills");
 
     txtScpTargetIp = new QLineEdit("192.168.1.245");
     txtScpTargetIp->setPlaceholderText("目标设备地址");
@@ -1362,6 +1367,7 @@ QWidget* MainWindow::createGitPage()
     layHist->addWidget(btnGitReset);
     layHist->addWidget(btnGitCopyDaily);
     layHist->addWidget(btnGitOpenDaily);
+    layHist->addWidget(btnGitOpenSkills);
     layOps->addLayout(layHist);
 
     // SCP Transfer Section
@@ -1962,6 +1968,7 @@ void MainWindow::createConnections()
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
     connect(btnGitOpenDaily, &QPushButton::clicked, this, &MainWindow::onGitOpenDailyReportClicked);
+    connect(btnGitOpenSkills, &QPushButton::clicked, this, &MainWindow::onGitOpenSkillsClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
     connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
     connect(btnApplyThreshold, &QPushButton::clicked, this, [this](){
@@ -5344,6 +5351,30 @@ void MainWindow::onGitOpenDailyReportClicked() {
     } else {
         txtGitLog->append(QStringLiteral("<font color='red'>错误: 无法打开日报文件，请手动打开: %1</font>").arg(filePath));
     }
+}
+
+void MainWindow::onGitOpenSkillsClicked() {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+
+    QVector<CursorSkillRepoRef> repos;
+    repos.reserve(history.size());
+    QSet<QString> seen;
+    for (const QString &rawPath : history) {
+        const QString absPath = gitGoalsRepoKey(rawPath);
+        if (absPath.isEmpty() || seen.contains(absPath))
+            continue;
+        seen.insert(absPath);
+        CursorSkillRepoRef ref;
+        ref.repoPath = absPath;
+        ref.displayName = gitRepoDisplayName(absPath);
+        repos.append(ref);
+    }
+
+    CursorSkillsDialog dlg(repos, this);
+    dlg.exec();
+    txtGitLog->append(QStringLiteral("信息: 已打开 Cursor Skills 列表（总 Skill: %1）")
+                          .arg(CursorSkillsDialog::globalSkillsRoot()));
 }
 
 QString MainWindow::buildDailyReportContent(QString *errorOut, bool showUiWarnings) {

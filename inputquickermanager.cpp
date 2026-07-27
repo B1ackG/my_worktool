@@ -63,6 +63,11 @@ void InputQuickerManager::loadSettings()
 {
     migrateLegacyConfigIfNeeded();
     readJsonConfig();
+    // Treat loaded config as already applied so opening the UI does not
+    // unnecessarily stop/restart a boot-started daemon.
+    lastAppliedDevicePath = devicePathValue;
+    lastAppliedDeviceName = deviceNameValue;
+    lastAppliedGrabDevice = grabDeviceValue;
     emit bindingsChanged();
     emitStatus();
 }
@@ -111,10 +116,15 @@ bool InputQuickerManager::applySettings()
     if (isDaemonRunning() && !daemonNeedsRestart()) {
         if (reloadDaemonViaSignal()) {
             lastAppliedDevicePath = devicePathValue;
+            lastAppliedDeviceName = deviceNameValue;
             lastAppliedGrabDevice = grabDeviceValue;
             emitStatus();
             return true;
         }
+        // Hot-reload failed, but daemon is still the right process — keep it.
+        emit logMessage(QStringLiteral("[快捷助手] 热加载失败，保留现有 daemon"));
+        emitStatus();
+        return true;
     }
 
     if (isDaemonRunning()) {
@@ -123,6 +133,7 @@ bool InputQuickerManager::applySettings()
     const bool started = startDaemon();
     if (started) {
         lastAppliedDevicePath = devicePathValue;
+        lastAppliedDeviceName = deviceNameValue;
         lastAppliedGrabDevice = grabDeviceValue;
     }
     return started;
@@ -132,6 +143,7 @@ bool InputQuickerManager::applySettings()
 bool InputQuickerManager::daemonNeedsRestart() const
 {
     return devicePathValue != lastAppliedDevicePath
+           || deviceNameValue != lastAppliedDeviceName
            || grabDeviceValue != lastAppliedGrabDevice;
 }
 
@@ -644,6 +656,11 @@ QString InputQuickerManager::devicePath() const
     return devicePathValue;
 }
 
+QString InputQuickerManager::deviceName() const
+{
+    return deviceNameValue;
+}
+
 QString InputQuickerManager::wheel2Axis() const
 {
     return wheel2AxisValue;
@@ -672,6 +689,11 @@ void InputQuickerManager::setDaemonAutostart(bool enabled)
 void InputQuickerManager::setDevicePath(const QString &path)
 {
     devicePathValue = path;
+}
+
+void InputQuickerManager::setDeviceName(const QString &name)
+{
+    deviceNameValue = name.trimmed();
 }
 
 void InputQuickerManager::setWheel2Axis(const QString &axis)
@@ -988,6 +1010,7 @@ void InputQuickerManager::writeJsonConfig() const
 
     QJsonObject root;
     root.insert(QStringLiteral("devicePath"), devicePathValue);
+    root.insert(QStringLiteral("deviceName"), deviceNameValue);
     root.insert(QStringLiteral("wheel2Axis"), wheel2AxisValue);
     root.insert(QStringLiteral("enabled"), enabledValue);
     root.insert(QStringLiteral("daemonAutostart"), daemonAutostartValue);
@@ -1019,6 +1042,7 @@ void InputQuickerManager::readJsonConfig()
 
     const QJsonObject root = doc.object();
     devicePathValue = root.value(QStringLiteral("devicePath")).toString();
+    deviceNameValue = root.value(QStringLiteral("deviceName")).toString();
     wheel2AxisValue = root.value(QStringLiteral("wheel2Axis")).toString(QStringLiteral("REL_HWHEEL"));
     enabledValue = root.value(QStringLiteral("enabled")).toBool(true);
     daemonAutostartValue = root.value(QStringLiteral("daemonAutostart")).toBool(true);
@@ -1231,7 +1255,10 @@ bool InputQuickerManager::setDaemonAutostartInstalled(bool enabled)
     out << "Terminal=false\n";
     out << "Categories=Utility;\n";
     out << "X-GNOME-Autostart-enabled=true\n";
-    out << "X-GNOME-Autostart-Delay=2\n";
+    out << "X-GNOME-Autostart-Delay=5\n";
+    // Start after the session is ready; daemon itself also retries if the mouse
+    // is not present yet (Bluetooth / late USB).
+    out << "X-KDE-autostart-after=panel\n";
 
     daemonAutostartValue = true;
     writeJsonConfig();

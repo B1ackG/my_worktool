@@ -15,12 +15,18 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
-    from evdev import InputDevice
+    from evdev import InputDevice, ecodes
 except ImportError:
     print("ERROR: missing python3-evdev", file=sys.stderr, flush=True)
     sys.exit(2)
 
-from input_device_utils import DeviceSelectionError, choose_device, event_to_trigger
+from input_device_utils import (
+    DeviceSelectionError,
+    WheelDetentNormalizer,
+    choose_device,
+    device_hi_res_wheel_axes,
+    event_to_trigger,
+)
 
 
 def main() -> int:
@@ -41,6 +47,7 @@ def main() -> int:
 
     deadline = time.monotonic() + max(1.0, args.timeout)
     grabbed = False
+    wheel_normalizer = WheelDetentNormalizer(device_hi_res_wheel_axes(device))
     try:
         device.grab()
         grabbed = True
@@ -56,6 +63,13 @@ def main() -> int:
             if not readable:
                 continue
             for event in device.read():
+                # Buttons fire immediately; wheels wait for one full detent.
+                if event.type == ecodes.EV_REL:
+                    triggers = wheel_normalizer.process_event(event)
+                    if triggers:
+                        print(json.dumps(triggers[0], ensure_ascii=False), flush=True)
+                        return 0
+                    continue
                 trigger = event_to_trigger(event)
                 if trigger:
                     print(json.dumps(trigger, ensure_ascii=False), flush=True)

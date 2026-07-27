@@ -206,6 +206,7 @@ private slots:
     void onGitSoftResetClicked();   // <--- 新增
     void onGitCopyForDailyReportClicked();
     void onGitOpenDailyReportClicked();
+    void onGitOpenSkillsClicked();
     void onDailyReportAutoSaveTick();
     void onGitRemoveHistoryClicked();
     void onGitDirChanged();
@@ -437,6 +438,7 @@ private:
     QPushButton *btnGitSoftReset; // <--- 新增
     QPushButton *btnGitCopyDaily;
     QPushButton *btnGitOpenDaily;
+    QPushButton *btnGitOpenSkills;
     QTextEdit *txtGitLog;
     QLineEdit *txtScpTargetIp;
     QLineEdit *txtScpPassword;

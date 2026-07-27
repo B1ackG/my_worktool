@@ -25,7 +25,9 @@ except ImportError:
 
 from input_device_utils import (
     DeviceSelectionError,
+    WheelDetentNormalizer,
     choose_device,
+    device_hi_res_wheel_axes,
     event_to_trigger,
     triggers_match,
 )
@@ -58,9 +60,9 @@ PRESETS: dict[str, str] = {
     "mute": "XF86AudioMute",
     "media_next": "XF86AudioNext",
     "media_prev": "XF86AudioPrev",
+    "super": "super",
 }
 
-WHEEL_DEBOUNCE_SECONDS = 0.20
 RUNNING = True
 RELOAD_REQUESTED = False
 
@@ -146,6 +148,7 @@ def ensure_single_instance() -> None:
 def default_config() -> dict[str, Any]:
     return {
         "devicePath": "",
+        "deviceName": "",
         "wheel2Axis": "REL_HWHEEL",
         "enabled": True,
         "grabDevice": False,
@@ -290,15 +293,24 @@ def execute_action(action: dict[str, Any], binding_name: str) -> None:
 
 def resolve_device_path(config: dict[str, Any]) -> str:
     configured = str(config.get("devicePath", "")).strip()
-    path = choose_device(configured)
-    if not configured:
-        try:
-            device = InputDevice(path)
-            name = device.name or path
-            device.close()
-            log(f"INFO: auto-selected device {path} ({name})")
-        except OSError:
-            log(f"INFO: auto-selected device {path}")
+    configured_name = str(config.get("deviceName", "")).strip()
+    path = choose_device(configured, configured_name)
+    try:
+        device = InputDevice(path)
+        name = device.name or path
+        device.close()
+    except OSError:
+        name = configured_name or path
+
+    if configured and configured != path:
+        log(
+            f"INFO: device path changed {configured} -> {path}"
+            + (f" ({name})" if name else "")
+        )
+    elif configured_name and not configured:
+        log(f"INFO: resolved device by name '{configured_name}' -> {path}")
+    elif not configured and not configured_name:
+        log(f"INFO: auto-selected device {path} ({name})")
     return path
 
 
@@ -307,9 +319,9 @@ class InputQuickerDaemon:
         self.config = load_config()
         self.device: InputDevice | None = None
         self.grabbed = False
-        self.last_wheel_time = 0.0
         self.active_bindings: list[dict[str, Any]] = []
         self.listening_path = ""
+        self.wheel_normalizer = WheelDetentNormalizer()
 
     def reload_bindings(self) -> None:
         self.config = load_config()
@@ -324,7 +336,33 @@ class InputQuickerDaemon:
         path = resolve_device_path(self.config)
         self.device = InputDevice(path)
         self.listening_path = path
+        # Remember stable identity so reboot / reconnect can find the mouse again.
+        # Persist stable identity + current event node so reconnects stay on
+        # the same mouse (e.g. Logitech MX Master 3S) instead of auto-picking
+        # a laptop pointer after Bluetooth renumbers /dev/input/eventN.
+        live_name = (self.device.name or "").strip()
+        changed = False
+        if live_name and str(self.config.get("deviceName", "")).strip() != live_name:
+            self.config["deviceName"] = live_name
+            changed = True
+        if path and str(self.config.get("devicePath", "")).strip() != path:
+            self.config["devicePath"] = path
+            changed = True
+        if changed:
+            try:
+                save_config(self.config)
+                log(f"INFO: persisted device {path} ({live_name})")
+            except OSError as exc:
+                log(f"WARN: could not persist device identity: {exc}")
+
+        prefer_hi_res = device_hi_res_wheel_axes(self.device)
+        self.wheel_normalizer.set_prefer_hi_res(prefer_hi_res)
         log(f"INFO: listening on {path} ({self.device.name})")
+        if prefer_hi_res:
+            log(
+                "INFO: preferring high-res wheel axes "
+                f"({', '.join(sorted(prefer_hi_res))}); legacy companions ignored"
+            )
 
         want_grab = bool(self.config.get("grabDevice", False))
         if want_grab:
@@ -354,33 +392,46 @@ class InputQuickerDaemon:
         self.device = None
         self.grabbed = False
         self.listening_path = ""
+        self.wheel_normalizer.reset()
+
+    def open_device_with_retry(self, reason: str = "device unavailable") -> bool:
+        """Keep daemon alive while mouse is missing (boot / sleep / reconnect)."""
+        delay = 1.0
+        while RUNNING:
+            try:
+                self.open_device()
+                return True
+            except DeviceSelectionError as exc:
+                log(f"WARN: {reason}: {exc}; retrying in {delay:.0f}s")
+            except OSError as exc:
+                log(f"WARN: {reason}: {exc}; retrying in {delay:.0f}s")
+            self.close_device()
+            time.sleep(delay)
+            delay = min(delay * 1.5, 10.0)
+            # Config may change (SIGHUP) while we wait.
+            if RELOAD_REQUESTED:
+                return False
+        return False
 
     def reload(self) -> None:
         log("INFO: reloading config")
         old_path = self.listening_path
         old_grab = bool(self.config.get("grabDevice", False))
         self.reload_bindings()
-        new_path = resolve_device_path(self.config)
+        try:
+            new_path = resolve_device_path(self.config)
+        except DeviceSelectionError as exc:
+            log(f"WARN: reload deferred, device not ready: {exc}")
+            self.close_device()
+            return
         new_grab = bool(self.config.get("grabDevice", False))
         if old_path == new_path and old_grab == new_grab and self.device is not None:
             log("INFO: bindings hot-reloaded (device unchanged)")
             return
-        self.open_device()
-
-    def handle_event(self, event: Any) -> None:
-        if not self.config.get("enabled", True):
+        if not self.open_device_with_retry("reload open failed"):
             return
 
-        event_trigger = event_to_trigger(event)
-        if not event_trigger:
-            return
-
-        if event_trigger.get("type") == "wheel":
-            now = time.monotonic()
-            if now - self.last_wheel_time < WHEEL_DEBOUNCE_SECONDS:
-                return
-            self.last_wheel_time = now
-
+    def dispatch_trigger(self, event_trigger: dict[str, str]) -> None:
         for binding in self.active_bindings:
             trigger = binding.get("trigger", {})
             if not isinstance(trigger, dict):
@@ -396,6 +447,19 @@ class InputQuickerDaemon:
                     execute_action(action, binding_name)
                 return
 
+    def handle_event(self, event: Any) -> None:
+        if not self.config.get("enabled", True):
+            return
+
+        if event.type == ecodes.EV_REL:
+            for event_trigger in self.wheel_normalizer.process_event(event):
+                self.dispatch_trigger(event_trigger)
+            return
+
+        event_trigger = event_to_trigger(event)
+        if event_trigger:
+            self.dispatch_trigger(event_trigger)
+
     def run(self) -> int:
         global RELOAD_REQUESTED
 
@@ -407,7 +471,12 @@ class InputQuickerDaemon:
             log("INFO: input quicker disabled in config")
             return 0
 
-        self.open_device()
+        # Wait through early autostart / Bluetooth reconnect instead of exiting.
+        if not self.open_device_with_retry("waiting for input device at startup"):
+            if not RUNNING:
+                self.close_device()
+                log("INFO: input quicker daemon stopped")
+                return 0
         log("INFO: input quicker daemon started")
 
         while RUNNING:
@@ -416,7 +485,8 @@ class InputQuickerDaemon:
                 self.reload()
 
             if self.device is None:
-                time.sleep(1.0)
+                if not self.open_device_with_retry("device lost"):
+                    continue
                 continue
 
             readable, _, _ = select.select([self.device.fd], [], [], 0.5)
@@ -427,9 +497,9 @@ class InputQuickerDaemon:
                 for event in self.device.read():
                     self.handle_event(event)
             except OSError as exc:
-                log(f"WARN: read failed: {exc}; retrying")
-                time.sleep(1.0)
-                self.open_device()
+                log(f"WARN: read failed: {exc}; reopening device")
+                self.close_device()
+                self.open_device_with_retry("device reconnect")
 
         self.close_device()
         log("INFO: input quicker daemon stopped")
@@ -445,11 +515,6 @@ def main() -> int:
     write_pid_file()
     try:
         return InputQuickerDaemon().run()
-    except DeviceSelectionError as exc:
-        log(f"ERROR: {exc}")
-        if exc.code == "permission_denied":
-            log("ERROR: add user to input group: sudo usermod -aG input $USER")
-        return 3
     except PermissionError as exc:
         log(f"ERROR: permission denied: {exc}")
         log("ERROR: add user to input group: sudo usermod -aG input $USER")

@@ -67,6 +67,7 @@ public:
     bool enabled() const;
     bool daemonAutostart() const;
     QString devicePath() const;
+    QString deviceName() const;
     QString wheel2Axis() const;
     bool grabDevice() const;
     QList<QuickerBinding> bindings() const;
@@ -74,6 +75,7 @@ public:
     void setEnabled(bool enabled);
     void setDaemonAutostart(bool enabled);
     void setDevicePath(const QString &path);
+    void setDeviceName(const QString &name);
     void setWheel2Axis(const QString &axis);
     void setGrabDevice(bool grab);
     void setBindings(const QList<QuickerBinding> &bindings);
@@ -141,9 +143,11 @@ private:
     bool enabledValue;
     bool daemonAutostartValue;
     QString devicePathValue;
+    QString deviceNameValue;
     QString wheel2AxisValue;
     bool grabDeviceValue;
     QString lastAppliedDevicePath;
+    QString lastAppliedDeviceName;
     bool lastAppliedGrabDevice;
     QList<QuickerBinding> bindingsValue;
     QString monitorLineBuffer;

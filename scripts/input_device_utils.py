@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -362,15 +363,44 @@ def scan_devices() -> list[DeviceInfo]:
     return devices
 
 
-def choose_device(preferred_path: str = "") -> str:
+def find_device_path_by_name(device_name: str) -> str | None:
+    """Resolve a stable device name to the current /dev/input/eventN path."""
+    wanted = device_name.strip().casefold()
+    if not wanted:
+        return None
+
+    devices = scan_devices()
+    accessible = [d for d in devices if d.accessible and d.name.strip().casefold() == wanted]
+    if accessible:
+        accessible.sort(key=lambda d: d.score, reverse=True)
+        return accessible[0].path
+
+    # Soft match: configured name is a unique substring of the live device name.
+    soft = [
+        d for d in devices
+        if d.accessible and wanted in d.name.casefold()
+    ]
+    if len(soft) == 1:
+        return soft[0].path
+    if len(soft) > 1:
+        soft.sort(key=lambda d: d.score, reverse=True)
+        return soft[0].path
+    return None
+
+
+def choose_device(preferred_path: str = "", preferred_name: str = "") -> str:
+    """Pick an input device.
+
+    Preferred path is used when it still exists. If the event node was renumbered
+    (common after reboot / Bluetooth reconnect), fall back to preferred_name,
+    then to automatic scoring. Never treat a stale event path as fatal when a
+    name or auto fallback is available.
+    """
     _require_evdev()
     preferred = preferred_path.strip()
-    if preferred:
-        if not os.path.exists(preferred):
-            raise DeviceSelectionError(
-                "invalid_path",
-                f"设备路径不存在: {preferred}",
-            )
+    preferred_name = preferred_name.strip()
+
+    if preferred and os.path.exists(preferred):
         if not os.access(preferred, os.R_OK):
             raise DeviceSelectionError(
                 "permission_denied",
@@ -390,6 +420,26 @@ def choose_device(preferred_path: str = "") -> str:
                     f"所选设备不像鼠标/指针设备: {preferred}",
                 )
         return preferred
+
+    if preferred and not os.path.exists(preferred):
+        by_name = find_device_path_by_name(preferred_name)
+        if by_name:
+            return by_name
+
+    if preferred_name:
+        by_name = find_device_path_by_name(preferred_name)
+        if by_name:
+            return by_name
+        # Name configured but device not present yet (boot / sleep).
+        if not preferred:
+            raise DeviceSelectionError(
+                "device_missing",
+                f"尚未找到输入设备: {preferred_name}",
+            )
+
+    if preferred and not os.path.exists(preferred):
+        # Stale event path and no usable name — try auto rather than dying forever.
+        pass
 
     devices = scan_devices()
     if not devices:
@@ -419,6 +469,144 @@ WHEEL_AXIS_GROUPS: tuple[frozenset[str], ...] = (
     frozenset({"REL_WHEEL", "REL_WHEEL_HI_RES"}),
     frozenset({"REL_HWHEEL", "REL_HWHEEL_HI_RES"}),
 )
+
+# Linux high-res wheel: 120 units == one physical detent.
+# See Documentation/input/event-codes.rst (REL_WHEEL_HI_RES).
+WHEEL_HI_RES_DETENT = 120
+# After the first detent of a continuous scroll, suppress further triggers until
+# the axis is idle for this long (or the direction reverses).
+WHEEL_GESTURE_IDLE_SECONDS = 0.30
+HI_RES_WHEEL_AXES = frozenset({"REL_WHEEL_HI_RES", "REL_HWHEEL_HI_RES"})
+LEGACY_WHEEL_AXES = frozenset({"REL_WHEEL", "REL_HWHEEL"})
+HI_RES_TO_LEGACY = {
+    "REL_WHEEL_HI_RES": "REL_WHEEL",
+    "REL_HWHEEL_HI_RES": "REL_HWHEEL",
+}
+LEGACY_TO_HI_RES = {legacy: hi for hi, legacy in HI_RES_TO_LEGACY.items()}
+
+
+def device_hi_res_wheel_axes(device: Any) -> set[str]:
+    """Return HI_RES wheel axis names advertised by the device capabilities."""
+    if ecodes is None or device is None:
+        return set()
+    try:
+        rels = set(device.capabilities().get(ecodes.EV_REL, []))
+    except Exception:
+        return set()
+    found: set[str] = set()
+    for axis_name in HI_RES_WHEEL_AXES:
+        code = getattr(ecodes, axis_name, None)
+        if code is not None and code in rels:
+            found.add(axis_name)
+    return found
+
+
+def wheel_gesture_key(axis: str) -> str:
+    """Collapse legacy/HI_RES companions into one gesture bucket per physical wheel."""
+    for group in WHEEL_AXIS_GROUPS:
+        if axis in group:
+            return next(iter(sorted(group)))
+    return axis
+
+
+class WheelDetentNormalizer:
+    """Normalize raw wheel REL events into one trigger per scroll gesture.
+
+    Modern mice emit REL_*_HI_RES in fractions of 120 and often also emit a
+    legacy REL_WHEEL/REL_HWHEEL companion. Treating every non-zero sample as a
+    trigger makes forward/reverse bindings fire on micro-steps and duplicates,
+    which feels unstable. This class:
+
+    1. Accumulates HI_RES values and recognizes ±WHEEL_HI_RES_DETENT (120).
+    2. Emits at most one trigger per continuous scroll gesture (same axis /
+       direction). Further detents in the same gesture are consumed silently.
+    3. Starts a new gesture after WHEEL_GESTURE_IDLE_SECONDS of quiet, or when
+       the direction reverses.
+    4. Ignores legacy companion events when HI_RES is available/preferred
+       (legacy often arrives *before* HI_RES in the same frame).
+    """
+
+    def __init__(self, prefer_hi_res: set[str] | None = None) -> None:
+        self._accum = {"REL_WHEEL_HI_RES": 0, "REL_HWHEEL_HI_RES": 0}
+        self._hi_res_seen: set[str] = set()
+        self._prefer_hi_res = set(prefer_hi_res or ())
+        # gesture_key -> direction that already fired in the current gesture
+        self._gesture_fired: dict[str, str] = {}
+        self._gesture_last_activity: dict[str, float] = {}
+
+    def reset(self) -> None:
+        for key in self._accum:
+            self._accum[key] = 0
+        self._hi_res_seen.clear()
+        self._gesture_fired.clear()
+        self._gesture_last_activity.clear()
+
+    def set_prefer_hi_res(self, axes: set[str]) -> None:
+        self._prefer_hi_res = set(axes)
+        self.reset()
+
+    def process_event(self, event: Any) -> list[dict[str, str]]:
+        if ecodes is None or event.type != ecodes.EV_REL or event.value == 0:
+            return []
+        return self.process_axis_value(rel_axis_name(event.code), int(event.value))
+
+    def process_axis_value(self, axis: str, value: int) -> list[dict[str, str]]:
+        if value == 0:
+            return []
+
+        if axis in HI_RES_WHEEL_AXES:
+            self._hi_res_seen.add(axis)
+            self._accum[axis] = self._accum.get(axis, 0) + value
+            return self._drain_detents(axis)
+
+        if axis in LEGACY_WHEEL_AXES:
+            hi_res = LEGACY_TO_HI_RES[axis]
+            if hi_res in self._prefer_hi_res or hi_res in self._hi_res_seen:
+                return []
+            direction = "positive" if value > 0 else "negative"
+            if self._accept_gesture_trigger(axis, direction):
+                return [{"type": "wheel", "axis": axis, "direction": direction}]
+            return []
+
+        if "WHEEL" in axis:
+            direction = "positive" if value > 0 else "negative"
+            if self._accept_gesture_trigger(axis, direction):
+                return [{"type": "wheel", "axis": axis, "direction": direction}]
+            return []
+        return []
+
+    def _expire_gesture_if_idle(self, gesture_key: str, now: float) -> None:
+        last = self._gesture_last_activity.get(gesture_key, 0.0)
+        if last > 0.0 and (now - last) >= WHEEL_GESTURE_IDLE_SECONDS:
+            self._gesture_fired.pop(gesture_key, None)
+
+    def _accept_gesture_trigger(self, axis: str, direction: str) -> bool:
+        """Return True once for a continuous scroll; False for later detents."""
+        gesture_key = wheel_gesture_key(axis)
+        now = time.monotonic()
+        self._expire_gesture_if_idle(gesture_key, now)
+        self._gesture_last_activity[gesture_key] = now
+
+        fired = self._gesture_fired.get(gesture_key)
+        if fired is None or fired != direction:
+            self._gesture_fired[gesture_key] = direction
+            return True
+        return False
+
+    def _drain_detents(self, hi_res_axis: str) -> list[dict[str, str]]:
+        triggers: list[dict[str, str]] = []
+        acc = self._accum[hi_res_axis]
+        while abs(acc) >= WHEEL_HI_RES_DETENT:
+            direction = "positive" if acc > 0 else "negative"
+            acc -= WHEEL_HI_RES_DETENT if acc > 0 else -WHEEL_HI_RES_DETENT
+            # Consume every detent so accumulation does not backlog, but only
+            # the first detent of this gesture becomes a trigger.
+            if self._accept_gesture_trigger(hi_res_axis, direction):
+                triggers.append(
+                    {"type": "wheel", "axis": hi_res_axis, "direction": direction}
+                )
+        self._accum[hi_res_axis] = acc
+        return triggers
 
 
 def button_code_name(code: int) -> str | None:
