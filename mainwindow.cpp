@@ -65,6 +65,8 @@
 #include <QMenuBar>
 #include <QCoreApplication>
 #include <QSet>
+#include <QScrollArea>
+#include <QSplitter>
 
 namespace {
 
@@ -928,8 +930,8 @@ void MainWindow::createWidgets()
     tblGitRepoMeta->setSelectionBehavior(QAbstractItemView::SelectRows);
     tblGitRepoMeta->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     tblGitRepoMeta->verticalHeader()->setVisible(false);
-    tblGitRepoMeta->setMinimumHeight(80);
-    tblGitRepoMeta->setMaximumHeight(160);
+    tblGitRepoMeta->setMinimumHeight(48);
+    tblGitRepoMeta->setMaximumHeight(120);
     tblGitRepoMeta->setToolTip(QStringLiteral("为各记忆路径设置日报中文名；勾选「主项目」后复制到日报时填入该仓库的工作目标与完成度"));
 
     tblGitGoals = new QTableWidget();
@@ -943,7 +945,9 @@ void MainWindow::createWidgets()
     tblGitGoals->setSelectionMode(QAbstractItemView::SingleSelection);
     tblGitGoals->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tblGitGoals->verticalHeader()->setVisible(false);
-    tblGitGoals->setMinimumHeight(120);
+    tblGitGoals->setMinimumHeight(80);
+    tblGitGoals->setMaximumHeight(220);
+    tblGitGoals->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     tblGitGoals->setToolTip(QStringLiteral("双击行可将目标分支下拉框切换到该目标绑定的分支"));
 
     btnGitGoalAdd = new QPushButton("添加目标");
@@ -1299,9 +1303,15 @@ QWidget* MainWindow::createSerialPage()
 QWidget* MainWindow::createGitPage()
 {
     QWidget *page = new QWidget();
-    QVBoxLayout *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(10, 10, 10, 10);
-    layout->setSpacing(10);
+    QVBoxLayout *pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(6, 6, 6, 6);
+    pageLayout->setSpacing(6);
+
+    // Upper controls scroll on small screens; log stays usable below.
+    QWidget *controlsHost = new QWidget();
+    QVBoxLayout *layout = new QVBoxLayout(controlsHost);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
     
     // 1. Repository Selection
     QGroupBox *grpRepo = new QGroupBox("Git 仓库 (记忆路径)");
@@ -1346,12 +1356,16 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layBranch = new QHBoxLayout();
     layBranch->addWidget(new QLabel(QStringLiteral("目标分支:")));
     layBranch->addWidget(cmbGitBranches, 1);
-    layBranch->addWidget(btnGitRefreshBranches);
-    layBranch->addWidget(btnGitCheckout);
-    layBranch->addWidget(btnGitSyncRemote);
-    layBranch->addWidget(btnGitCreateBranch);
-    layBranch->addWidget(btnGitDeleteBranch);
     layOps->addLayout(layBranch);
+
+    QHBoxLayout *layBranchBtns = new QHBoxLayout();
+    layBranchBtns->addWidget(btnGitRefreshBranches);
+    layBranchBtns->addWidget(btnGitCheckout);
+    layBranchBtns->addWidget(btnGitSyncRemote);
+    layBranchBtns->addWidget(btnGitCreateBranch);
+    layBranchBtns->addWidget(btnGitDeleteBranch);
+    layBranchBtns->addStretch();
+    layOps->addLayout(layBranchBtns);
     
     // Commit Msg
     QHBoxLayout *layCommit = new QHBoxLayout();
@@ -1361,29 +1375,32 @@ QWidget* MainWindow::createGitPage()
     layCommit->addWidget(btnGitDeepSeekSettings);
     layOps->addLayout(layCommit);
     
-    // Common actions grouped by scenario
+    // Common actions — keep columns modest so narrow widths do not crush labels
     QGridLayout *layBtns = new QGridLayout();
+    layBtns->setHorizontalSpacing(6);
+    layBtns->setVerticalSpacing(6);
     layBtns->addWidget(btnGitAdd, 0, 0);
     layBtns->addWidget(btnGitCommit, 0, 1);
     layBtns->addWidget(btnGitStatus, 0, 2);
     layBtns->addWidget(btnGitDiff, 0, 3);
-    layBtns->addWidget(btnGitFetch, 0, 4);
 
-    layBtns->addWidget(new QLabel("远程仓库:"), 1, 0);
-    layBtns->addWidget(cmbGitRemote, 1, 1, 1, 2);
-    layBtns->addWidget(btnGitPush, 1, 3);
-    layBtns->addWidget(btnGitPull, 1, 4);
-    layBtns->addWidget(btnGitMerge, 1, 5);
-    layBtns->addWidget(btnGitRebase, 1, 6);
+    layBtns->addWidget(btnGitFetch, 1, 0);
+    layBtns->addWidget(btnGitPush, 1, 1);
+    layBtns->addWidget(btnGitPull, 1, 2);
+    layBtns->addWidget(btnGitMerge, 1, 3);
 
-    layBtns->addWidget(btnGitStash, 2, 0);
-    layBtns->addWidget(btnGitStashPop, 2, 1);
-    layBtns->addWidget(btnGitRemoteAdd, 2, 2);
-    layBtns->addWidget(btnGitWorktreeManage, 2, 3);
+    layBtns->addWidget(new QLabel("远程仓库:"), 2, 0);
+    layBtns->addWidget(cmbGitRemote, 2, 1, 1, 2);
+    layBtns->addWidget(btnGitRebase, 2, 3);
 
-    layBtns->addWidget(btnGitGetSshKey, 3, 0);
-    layBtns->addWidget(btnGitCheckIgnore, 3, 1);
-    layBtns->addWidget(btnGitOpenIgnore, 3, 2);
+    layBtns->addWidget(btnGitStash, 3, 0);
+    layBtns->addWidget(btnGitStashPop, 3, 1);
+    layBtns->addWidget(btnGitRemoteAdd, 3, 2);
+    layBtns->addWidget(btnGitWorktreeManage, 3, 3);
+
+    layBtns->addWidget(btnGitGetSshKey, 4, 0);
+    layBtns->addWidget(btnGitCheckIgnore, 4, 1);
+    layBtns->addWidget(btnGitOpenIgnore, 4, 2);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -1403,13 +1420,17 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layHist = new QHBoxLayout();
     layHist->addWidget(new QLabel("版本历史:"));
     layHist->addWidget(cmbGitHistory, 1);
-    layHist->addWidget(btnGitRefreshLog);
-    layHist->addWidget(btnGitSoftReset); // <--- Add Here
-    layHist->addWidget(btnGitReset);
-    layHist->addWidget(btnGitCopyDaily);
-    layHist->addWidget(btnGitOpenDaily);
-    layHist->addWidget(btnGitOpenSkills);
     layOps->addLayout(layHist);
+
+    QHBoxLayout *layHistBtns = new QHBoxLayout();
+    layHistBtns->addWidget(btnGitRefreshLog);
+    layHistBtns->addWidget(btnGitSoftReset);
+    layHistBtns->addWidget(btnGitReset);
+    layHistBtns->addWidget(btnGitCopyDaily);
+    layHistBtns->addWidget(btnGitOpenDaily);
+    layHistBtns->addWidget(btnGitOpenSkills);
+    layHistBtns->addStretch();
+    layOps->addLayout(layHistBtns);
 
     // SCP Transfer Section
     QHBoxLayout *layScp = new QHBoxLayout();
@@ -1417,9 +1438,13 @@ QWidget* MainWindow::createGitPage()
     layScp->addWidget(txtScpTargetIp, 1);
     layScp->addWidget(new QLabel("密码:"));
     layScp->addWidget(txtScpPassword, 1);
-    layScp->addWidget(btnScpTransfer);
-    layScp->addWidget(btnRebootTarget);
     layOps->addLayout(layScp);
+
+    QHBoxLayout *layScpBtns = new QHBoxLayout();
+    layScpBtns->addWidget(btnScpTransfer);
+    layScpBtns->addWidget(btnRebootTarget);
+    layScpBtns->addStretch();
+    layOps->addLayout(layScpBtns);
 
     // Monitoring Section
     QHBoxLayout *layMon = new QHBoxLayout();
@@ -1454,6 +1479,16 @@ QWidget* MainWindow::createGitPage()
     
     grpOps->setLayout(layOps);
     layout->addWidget(grpOps);
+    layout->addStretch(0);
+
+    QScrollArea *controlsScroll = new QScrollArea();
+    controlsScroll->setWidgetResizable(true);
+    controlsScroll->setFrameShape(QFrame::NoFrame);
+    controlsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    controlsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    controlsScroll->setWidget(controlsHost);
+    controlsScroll->setMinimumHeight(100);
+    controlsScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     
     // 3. Log Output + interactive command line (same console surface)
     QGroupBox *grpLog = new QGroupBox("Git 输出");
@@ -1477,6 +1512,7 @@ QWidget* MainWindow::createGitPage()
     QVBoxLayout *layConsole = new QVBoxLayout(consoleFrame);
     layConsole->setContentsMargins(4, 4, 4, 4);
     layConsole->setSpacing(0);
+    txtGitLog->setMinimumHeight(80);
     layConsole->addWidget(txtGitLog, 1);
 
     QFrame *cmdSep = new QFrame();
@@ -1503,12 +1539,18 @@ QWidget* MainWindow::createGitPage()
 
     layLog->addWidget(consoleFrame, 1);
     grpLog->setLayout(layLog);
-    layout->addWidget(grpLog);
-    
-    layout->setStretch(0, 0);
-    layout->setStretch(1, 0);
-    layout->setStretch(2, 0);
-    layout->setStretch(3, 1);
+    grpLog->setMinimumHeight(140);
+    grpLog->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    QSplitter *gitSplitter = new QSplitter(Qt::Vertical);
+    gitSplitter->setChildrenCollapsible(false);
+    gitSplitter->addWidget(controlsScroll);
+    gitSplitter->addWidget(grpLog);
+    gitSplitter->setStretchFactor(0, 3);
+    gitSplitter->setStretchFactor(1, 2);
+    gitSplitter->setSizes({420, 280});
+
+    pageLayout->addWidget(gitSplitter, 1);
     return page;
 }
 
