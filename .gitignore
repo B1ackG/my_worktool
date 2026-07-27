@@ -82,3 +82,6 @@ docs/180
 
 # Added by Assistant staging review
 *.pyc
+
+# Added by Assistant staging review
+*.json
