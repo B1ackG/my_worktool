@@ -940,8 +940,8 @@ void MainWindow::createWidgets()
     txtGitCommitMsg->setPlaceholderText("Git Commit Message...");
     
     cmbGitRemote = new QComboBox();
+    cmbGitRemote->addItem("GitHub");
     cmbGitRemote->addItem("origin");
-    cmbGitRemote->addItem("github");
     cmbGitRemote->setEditable(true); // Allow custom remotes
     
     btnGitAdd = new QPushButton("git add . (暂存全部)");
@@ -4340,7 +4340,7 @@ void MainWindow::promptRemoteAheadOnOpen()
 
     const QString message =
         QStringLiteral("以下仓库的远程分支领先于本地：\n\n%1\n\n建议先拉取同步后再继续工作。\n"
-                       "（选择「去处理」将切换到第一个待处理仓库）")
+                       "（「一键全部同步」将对上述仓库执行 git pull；「去处理」切换到第一个仓库）")
             .arg(warnings.join(QLatin1Char('\n')));
 
     QMessageBox box(this);
@@ -4348,15 +4348,112 @@ void MainWindow::promptRemoteAheadOnOpen()
     box.setWindowTitle(QStringLiteral("启动前提醒"));
     box.setText(message);
     QPushButton *laterBtn = box.addButton(QStringLiteral("稍后"), QMessageBox::AcceptRole);
-    QPushButton *handleBtn = box.addButton(QStringLiteral("去处理"), QMessageBox::RejectRole);
-    box.setDefaultButton(handleBtn);
+    QPushButton *syncAllBtn = box.addButton(QStringLiteral("一键全部同步"), QMessageBox::YesRole);
+    box.addButton(QStringLiteral("去处理"), QMessageBox::RejectRole);
+    box.setDefaultButton(syncAllBtn);
     box.exec();
 
     if (box.clickedButton() == laterBtn) {
         return;
     }
 
+    if (box.clickedButton() == syncAllBtn) {
+        QStringList dirs;
+        dirs.reserve(items.size());
+        for (const auto &item : items) {
+            dirs << item.first;
+        }
+        pullAllRemoteAheadRepos(dirs);
+        return;
+    }
+
     focusGitPendingRepo(items.first().first);
+}
+
+void MainWindow::pullAllRemoteAheadRepos(const QStringList &repoDirs)
+{
+    if (repoDirs.isEmpty()) {
+        return;
+    }
+
+    constexpr int kGitPageIndex = 2;
+    if (navWidget && navWidget->currentRow() != kGitPageIndex) {
+        navWidget->setCurrentRow(kGitPageIndex);
+    }
+
+    int okCount = 0;
+    QStringList failures;
+
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>[一键同步] 开始拉取 %1 个远程领先仓库…</font>")
+                              .arg(repoDirs.size()));
+    }
+
+    for (const QString &repoDir : repoDirs) {
+        const QString absPath = QDir(repoDir).absolutePath();
+        QString name = gitRepoDisplayName(absPath);
+        if (name.isEmpty()) {
+            name = QFileInfo(absPath).fileName();
+        }
+
+        if (absPath.isEmpty() || !QDir(absPath).exists() || !isGitRepository(absPath)) {
+            failures << QStringLiteral("%1（目录无效）").arg(name);
+            continue;
+        }
+
+        if (txtGitLog) {
+            txtGitLog->append(QStringLiteral("<font color='cyan'>$ [%1] git pull</font>").arg(name));
+        }
+
+        QString out;
+        QString err;
+        const bool ok = GitWorktreeRunner::runInRepo(
+            absPath, {QStringLiteral("pull")}, &out, &err, 60000);
+
+        if (txtGitLog) {
+            if (!out.trimmed().isEmpty()) {
+                txtGitLog->append(out.trimmed());
+            }
+            if (!err.trimmed().isEmpty()) {
+                txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>").arg(err.trimmed()));
+            }
+        }
+
+        if (ok) {
+            ++okCount;
+            if (txtGitLog) {
+                txtGitLog->append(QStringLiteral("<font color='green'>[一键同步] %1：拉取成功</font>").arg(name));
+            }
+        } else {
+            failures << name;
+            if (txtGitLog) {
+                txtGitLog->append(QStringLiteral("<font color='red'>[一键同步] %1：拉取失败</font>").arg(name));
+            }
+        }
+    }
+
+    const QString current = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    if (!current.isEmpty() && QDir(current).exists()) {
+        refreshGitBranchesLocal();
+    }
+
+    if (txtGitLog) {
+        txtGitLog->moveCursor(QTextCursor::End);
+    }
+
+    if (failures.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("一键全部同步"),
+            QStringLiteral("已全部同步完成（%1 个仓库）。").arg(okCount));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("一键全部同步"),
+            QStringLiteral("成功 %1 个，失败 %2 个：\n%3")
+                .arg(okCount)
+                .arg(failures.size())
+                .arg(failures.join(QLatin1Char('\n'))));
+        focusGitPendingRepo(repoDirs.first());
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

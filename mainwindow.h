@@ -601,6 +601,8 @@ private:
     bool confirmExitDespiteGitPending();
     /** 启动后若远程领先本地则弹窗提示处理。 */
     void promptRemoteAheadOnOpen();
+    /** 对给定仓库逐个 git pull，将远程领先同步到本地。 */
+    void pullAllRemoteAheadRepos(const QStringList &repoDirs);
     void saveGitHistory(const QString &dir);
     void loadGitHistory();
     void removeGitHistoryPath(const QString &dir);
