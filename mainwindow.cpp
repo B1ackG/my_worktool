@@ -981,20 +981,16 @@ void MainWindow::createWidgets()
     btnGitCancelNetwork->setToolTip(QStringLiteral("中断当前进行中的 git 远程通讯（fetch/pull/push）"));
     btnGitStash = new QPushButton("git stash (临时存档)");
     btnGitStashPop = new QPushButton("git stash pop (恢复临存)");
-    btnGitSetDiffRule = new QPushButton("设置Diff提醒标准");
-    btnGitAutoDiffReminder = new QPushButton("开启Diff提醒");
+    btnGitAutoDiffReminder = new QPushButton(QStringLiteral("开启可执行文件提醒"));
     btnGitAutoDiffReminder->setCheckable(true);
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
+    btnGitAutoDiffReminder->setToolTip(
+        QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒 SCP 传输"));
     spinGitDiffIntervalMinutes = new QSpinBox();
     spinGitDiffIntervalMinutes->setRange(1, 24 * 60);
-    spinGitDiffIntervalMinutes->setValue(30);
+    spinGitDiffIntervalMinutes->setValue(5);
     spinGitDiffIntervalMinutes->setSuffix(" 分钟");
-    spinGitDiffFileThreshold = new QSpinBox();
-    spinGitDiffFileThreshold->setRange(1, 5000);
-    spinGitDiffFileThreshold->setValue(5);
-    spinGitDiffLineThreshold = new QSpinBox();
-    spinGitDiffLineThreshold->setRange(1, 200000);
-    spinGitDiffLineThreshold->setValue(kGitGoalLinesPerStar);
+    spinGitDiffIntervalMinutes->setToolTip(QStringLiteral("可执行文件更新检查间隔"));
     btnGitOpenIgnore = new QPushButton("管理 .gitignore");
     btnGitGetSshKey = new QPushButton("获取SSH公钥"); 
     btnGitGetSshKey->setToolTip("获取本机 SSH 公钥并复制到剪贴板，用于上传 GitHub");
@@ -1355,13 +1351,8 @@ QWidget* MainWindow::createGitPage()
 
     QHBoxLayout *layReminder = new QHBoxLayout();
     layReminder->addWidget(btnGitAutoDiffReminder);
-    layReminder->addWidget(btnGitSetDiffRule);
-    layReminder->addWidget(new QLabel("间隔:"));
+    layReminder->addWidget(new QLabel(QStringLiteral("检查间隔:")));
     layReminder->addWidget(spinGitDiffIntervalMinutes);
-    layReminder->addWidget(new QLabel("文件阈值:"));
-    layReminder->addWidget(spinGitDiffFileThreshold);
-    layReminder->addWidget(new QLabel("行数阈值:"));
-    layReminder->addWidget(spinGitDiffLineThreshold);
     layReminder->addStretch();
     layOps->addLayout(layReminder);
     
@@ -1414,7 +1405,7 @@ QWidget* MainWindow::createGitPage()
     lblMemUsage = new QLabel("MEM: 0%");
     chartMem = new MonitorChart();
     gitDiffReminderTimer = new QTimer(this);
-    gitDiffReminderTimer->setInterval(30 * 60 * 1000);
+    gitDiffReminderTimer->setInterval(5 * 60 * 1000);
     
     layMon->addWidget(lblCpuUsage);
     layMon->addWidget(chartCpu);
@@ -1961,21 +1952,14 @@ void MainWindow::createConnections()
     connect(chkGitAutoFetch, &QCheckBox::toggled, this, &MainWindow::onGitAutoFetchToggled);
     connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
     connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
-    connect(btnGitSetDiffRule, &QPushButton::clicked, this, &MainWindow::onGitSetDiffRuleClicked);
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
     connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(spinGitDiffIntervalMinutes, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int minutes){
         int ms = qMax(1, minutes) * 60 * 1000;
         gitDiffReminderTimer->setInterval(ms);
         if (btnGitAutoDiffReminder->isChecked()) {
-            txtGitLog->append(QString("[Diff提醒] 间隔已更新为 %1 分钟").arg(minutes));
+            txtGitLog->append(QStringLiteral("[可执行文件提醒] 间隔已更新为 %1 分钟").arg(minutes));
         }
-        saveGitDiffReminderSettings();
-    });
-    connect(spinGitDiffFileThreshold, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
-        saveGitDiffReminderSettings();
-    });
-    connect(spinGitDiffLineThreshold, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
         saveGitDiffReminderSettings();
     });
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
@@ -4582,33 +4566,130 @@ void MainWindow::onGitStashPopClicked() {
     runGitCommand(QStringList() << "stash" << "pop");
 }
 
-void MainWindow::onGitSetDiffRuleClicked() {
-    int fileThreshold = spinGitDiffFileThreshold->value();
-    int lineThreshold = spinGitDiffLineThreshold->value();
+QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir) const
+{
+    if (workDir.trimmed().isEmpty() || !QDir(workDir).exists()) {
+        return QFileInfo();
+    }
 
-    QStringList options;
-    options << QStringLiteral("只要有改动就提醒")
-            << QString("改动文件数 >= %1 时提醒").arg(fileThreshold)
-            << QString("新增+删除总行数 >= %1 时提醒（%2 星）")
-                   .arg(lineThreshold)
-                   .arg(gitLinesToStarCount(lineThreshold))
-            << QStringLiteral("涉及配置文件改动时提醒")
-            << QStringLiteral("涉及源码文件改动时提醒");
+    const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
 
-    int defaultIndex = (gitDiffReminderRule >= 0 && gitDiffReminderRule < options.size()) ? gitDiffReminderRule : 2;
-    bool ok = false;
-    QString selected = QInputDialog::getItem(this,
-                                             QStringLiteral("Diff 提醒标准"),
-                                             QStringLiteral("请选择定时检查 git diff 的判断标准:"),
-                                             options,
-                                             defaultIndex,
-                                             false,
-                                             &ok);
-    if (!ok) return;
+    QFileInfo bestBin;
+    QFileInfo bestScript;
+    QDateTime bestBinTime;
+    QDateTime bestScriptTime;
 
-    gitDiffReminderRule = options.indexOf(selected);
-    saveGitDiffReminderSettings();
-    txtGitLog->append(QString("[Diff提醒] 已设置标准: %1").arg(selected));
+    QDirIterator it(workDir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo fileInfo = it.fileInfo();
+        const QString fileName = fileInfo.fileName();
+        const QString absPath = fileInfo.absoluteFilePath();
+
+        // Only skip the currently running helper binary, not every file with the same name
+        // (this repo builds as ModbusTCPAssistant, not myAssistant).
+        if (!selfPath.isEmpty() && absPath == selfPath) {
+            continue;
+        }
+
+        // Skip obvious non-deploy paths
+        const QString rel = QDir(workDir).relativeFilePath(absPath);
+        if (rel.contains(QStringLiteral("/.venv/")) || rel.startsWith(QStringLiteral(".venv/"))
+            || rel.contains(QStringLiteral("/.git/")) || rel.contains(QStringLiteral("/node_modules/"))) {
+            continue;
+        }
+
+        if (fileName.startsWith(QLatin1Char('.')) || fileName.endsWith(QStringLiteral(".so"))) {
+            continue;
+        }
+        // Allow extension-less binaries and *.sh; skip other dotted names (objects, images, …)
+        if (fileName.contains(QLatin1Char('.')) && !fileName.endsWith(QStringLiteral(".sh"))) {
+            continue;
+        }
+
+        if (fileName.endsWith(QStringLiteral(".sh"))) {
+            if (!bestScript.exists() || fileInfo.lastModified() > bestScriptTime) {
+                bestScript = fileInfo;
+                bestScriptTime = fileInfo.lastModified();
+            }
+        } else {
+            if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
+                bestBin = fileInfo;
+                bestBinTime = fileInfo.lastModified();
+            }
+        }
+    }
+
+    if (bestBin.exists()) {
+        return bestBin;
+    }
+    return bestScript;
+}
+
+static QString deployExeBaselineId(const QString &repoDir)
+{
+    return QString::fromLatin1(QDir(repoDir).absolutePath().toUtf8().toHex());
+}
+
+void MainWindow::rememberDeployExecutableBaseline(const QString &repoDir, const QFileInfo &fi)
+{
+    if (repoDir.trimmed().isEmpty() || !fi.exists()) {
+        return;
+    }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("exeUpdateReminder"));
+    settings.beginGroup(QStringLiteral("baselines"));
+    settings.beginGroup(deployExeBaselineId(repoDir));
+    settings.setValue(QStringLiteral("path"), fi.absoluteFilePath());
+    settings.setValue(QStringLiteral("mtimeMs"), fi.lastModified().toMSecsSinceEpoch());
+    settings.setValue(QStringLiteral("size"), fi.size());
+    settings.endGroup();
+    settings.endGroup();
+    settings.endGroup();
+}
+
+bool MainWindow::hasDeployExecutableBaseline(const QString &repoDir) const
+{
+    if (repoDir.trimmed().isEmpty()) {
+        return false;
+    }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("exeUpdateReminder"));
+    settings.beginGroup(QStringLiteral("baselines"));
+    settings.beginGroup(deployExeBaselineId(repoDir));
+    const bool ok = settings.contains(QStringLiteral("path"))
+                    && settings.contains(QStringLiteral("mtimeMs"))
+                    && settings.contains(QStringLiteral("size"));
+    settings.endGroup();
+    settings.endGroup();
+    settings.endGroup();
+    return ok;
+}
+
+bool MainWindow::deployExecutableNewerThanBaseline(const QString &repoDir, const QFileInfo &fi) const
+{
+    if (!fi.exists() || repoDir.trimmed().isEmpty()) {
+        return false;
+    }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("exeUpdateReminder"));
+    settings.beginGroup(QStringLiteral("baselines"));
+    settings.beginGroup(deployExeBaselineId(repoDir));
+    const QString basePath = settings.value(QStringLiteral("path")).toString();
+    const qint64 baseMtime = settings.value(QStringLiteral("mtimeMs"), qint64(-1)).toLongLong();
+    const qint64 baseSize = settings.value(QStringLiteral("size"), qint64(-1)).toLongLong();
+    settings.endGroup();
+    settings.endGroup();
+    settings.endGroup();
+
+    if (basePath.isEmpty() || baseMtime < 0 || baseSize < 0) {
+        return false;
+    }
+
+    const QString curPath = fi.absoluteFilePath();
+    const qint64 curMtime = fi.lastModified().toMSecsSinceEpoch();
+    const qint64 curSize = fi.size();
+    return curPath != basePath || curMtime != baseMtime || curSize != baseSize;
 }
 
 void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
@@ -4616,217 +4697,105 @@ void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
     saveGitDiffReminderSettings();
 
     if (checked) {
-        if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
-            gitDiffReminderRule = 2;
-        }
-
-        btnGitAutoDiffReminder->setText(QStringLiteral("关闭Diff提醒"));
+        btnGitAutoDiffReminder->setText(QStringLiteral("关闭可执行文件提醒"));
         gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
         gitDiffReminderTimer->start();
-        txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
+        txtGitLog->append(QStringLiteral("[可执行文件提醒] 已开启：每 %1 分钟检查记忆仓库中全部仓库的可执行文件是否更新。")
                               .arg(spinGitDiffIntervalMinutes->value()));
         onGitAutoDiffReminderTick();
     } else {
         gitDiffReminderTimer->stop();
-        if (gitDiffReminderProcess && gitDiffReminderProcess->state() != QProcess::NotRunning) {
-            gitDiffReminderProcess->kill();
-        }
-        gitDiffReminderBusy = false;
-        btnGitAutoDiffReminder->setText(QStringLiteral("开启Diff提醒"));
-        txtGitLog->append("[Diff提醒] 已关闭。");
+        btnGitAutoDiffReminder->setText(QStringLiteral("开启可执行文件提醒"));
+        txtGitLog->append(QStringLiteral("[可执行文件提醒] 已关闭。"));
     }
 }
 
 void MainWindow::onGitAutoDiffReminderTick()
 {
-    if (gitDiffReminderBusy) {
-        txtGitLog->append(QStringLiteral("[Diff提醒] 上一次检查尚未结束，跳过本轮。"));
-        return;
-    }
-
-    const QString workDir = cmbGitDir->currentText().trimmed();
-    if (workDir.isEmpty() || !QDir(workDir).exists()) {
-        txtGitLog->append(QStringLiteral("[Diff提醒] Git 仓库目录无效，跳过本次检查。"));
-        return;
-    }
-
-    if (gitDiffReminderProcess) {
-        gitDiffReminderProcess->disconnect(this);
-        if (gitDiffReminderProcess->state() != QProcess::NotRunning) {
-            gitDiffReminderProcess->kill();
-            gitDiffReminderProcess->waitForFinished(1000);
-        }
-        gitDiffReminderProcess->deleteLater();
-        gitDiffReminderProcess = nullptr;
-    }
-
-    gitDiffReminderProcess = new QProcess(this);
-    gitDiffReminderProcess->setWorkingDirectory(workDir);
-    gitDiffReminderProcess->setProgram(PlatformPrefs::gitBinary());
-    gitDiffReminderProcess->setArguments(QStringList() << QStringLiteral("diff") << QStringLiteral("--numstat"));
-
-    connect(gitDiffReminderProcess,
-            static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
-            this,
-            &MainWindow::onGitDiffReminderFinished);
-    connect(gitDiffReminderProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
-            gitDiffReminderBusy = false;
-            txtGitLog->append(QStringLiteral("[Diff提醒] 无法启动 git，请检查是否已安装。"));
-        }
-    });
-
-    gitDiffReminderBusy = true;
-    txtGitLog->append(QStringLiteral("[Diff提醒] 正在异步分析 git diff …"));
-    gitDiffReminderProcess->start();
-
-    QTimer::singleShot(15000, this, [this]() {
-        if (!gitDiffReminderBusy || !gitDiffReminderProcess) {
+    QStringList repos;
+    QSet<QString> seen;
+    auto appendRepo = [&](const QString &raw) {
+        const QString path = QDir(raw.trimmed()).absolutePath();
+        if (path.isEmpty() || !QDir(path).exists() || seen.contains(path)) {
             return;
         }
-        if (gitDiffReminderProcess->state() != QProcess::NotRunning) {
-            txtGitLog->append(QStringLiteral("[Diff提醒] git diff --numstat 执行超时。"));
-            gitDiffReminderProcess->kill();
-        }
-    });
-}
+        seen.insert(path);
+        repos << path;
+    };
 
-void MainWindow::onGitDiffReminderFinished(int exitCode, QProcess::ExitStatus exitStatus)
-{
-    gitDiffReminderBusy = false;
-    if (!gitDiffReminderProcess) {
+    if (cmbGitDir) {
+        for (int i = 0; i < cmbGitDir->count(); ++i) {
+            appendRepo(cmbGitDir->itemText(i));
+        }
+        appendRepo(cmbGitDir->currentText());
+    }
+    if (repos.isEmpty()) {
+        QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+        const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+        for (const QString &h : history) {
+            appendRepo(h);
+        }
+    }
+
+    if (repos.isEmpty()) {
+        txtGitLog->append(QStringLiteral("[可执行文件提醒] 记忆仓库为空，跳过本次检查。"));
         return;
     }
 
-    QProcess *process = gitDiffReminderProcess;
-    gitDiffReminderProcess = nullptr;
-    process->deleteLater();
+    txtGitLog->append(QStringLiteral("[可执行文件提醒] 开始检查 %1 个记忆仓库…").arg(repos.size()));
 
-    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-        txtGitLog->append(QStringLiteral("[Diff提醒] git diff --numstat 执行失败。"));
-        return;
-    }
+    QStringList updatedLines;
+    int baselineOnly = 0;
+    int unchanged = 0;
+    int noExe = 0;
 
-    const QString output = PlatformPrefs::decodeProcessOutput(process->readAllStandardOutput());
-
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-#else
-    const QStringList lines = output.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-#endif
-
-    int changedFiles = 0;
-    int addedLines = 0;
-    int removedLines = 0;
-    int sourceTouched = 0;
-    int configTouched = 0;
-    int binaryTouched = 0;
-
-    for (const QString &rawLine : lines) {
-        QString line = rawLine;
-        if (line.endsWith(QLatin1Char('\r'))) {
-            line.chop(1);
-        }
-        const QStringList parts = line.split(QLatin1Char('\t'));
-        if (parts.size() < 3) {
+    for (const QString &workDir : repos) {
+        const QFileInfo fi = findLatestDeployExecutable(workDir);
+        if (!fi.exists()) {
+            ++noExe;
+            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到可部署可执行文件")
+                                  .arg(workDir));
             continue;
         }
 
-        changedFiles++;
-
-        bool okAdd = false;
-        bool okDel = false;
-        const int add = parts[0].toInt(&okAdd);
-        const int del = parts[1].toInt(&okDel);
-        if (okAdd) {
-            addedLines += add;
-        } else {
-            binaryTouched++;
-        }
-        if (okDel) {
-            removedLines += del;
-        } else {
-            binaryTouched++;
+        if (!hasDeployExecutableBaseline(workDir)) {
+            rememberDeployExecutableBaseline(workDir, fi);
+            ++baselineOnly;
+            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：已记录基线 %2 (%3)")
+                                  .arg(workDir, fi.fileName(),
+                                       fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
+            continue;
         }
 
-        const QString path = parts.mid(2).join(QLatin1Char('\t')).toLower();
-        if (path.endsWith(QLatin1String(".cpp")) || path.endsWith(QLatin1String(".c"))
-            || path.endsWith(QLatin1String(".h")) || path.endsWith(QLatin1String(".hpp"))
-            || path.endsWith(QLatin1String(".cc")) || path.endsWith(QLatin1String(".py"))
-            || path.endsWith(QLatin1String(".js")) || path.endsWith(QLatin1String(".ts"))
-            || path.endsWith(QLatin1String(".java"))) {
-            sourceTouched++;
+        if (!deployExecutableNewerThanBaseline(workDir, fi)) {
+            ++unchanged;
+            continue;
         }
-        if (path.endsWith(QLatin1String(".json")) || path.endsWith(QLatin1String(".yaml"))
-            || path.endsWith(QLatin1String(".yml")) || path.endsWith(QLatin1String(".ini"))
-            || path.endsWith(QLatin1String(".toml")) || path.endsWith(QLatin1String(".conf"))
-            || path.endsWith(QLatin1String(".pro")) || path.contains(QLatin1String("cmakelists.txt"))) {
-            configTouched++;
-        }
+
+        rememberDeployExecutableBaseline(workDir, fi);
+        updatedLines << QStringLiteral("仓库: %1\n文件: %2\n路径: %3\n修改时间: %4\n大小: %5 字节")
+                            .arg(workDir, fi.fileName(), fi.absoluteFilePath(),
+                                 fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                            .arg(fi.size());
+        txtGitLog->append(QStringLiteral("[可执行文件提醒] 有更新: %1 -> %2")
+                              .arg(workDir, fi.absoluteFilePath()));
     }
 
-    if (changedFiles <= 0) {
-        txtGitLog->append(QStringLiteral("[Diff提醒] 当前无未提交改动。"));
+    txtGitLog->append(QStringLiteral("[可执行文件提醒] 检查完成：更新 %1，新建基线 %2，无变化 %3，无产物 %4")
+                          .arg(updatedLines.size())
+                          .arg(baselineOnly)
+                          .arg(unchanged)
+                          .arg(noExe));
+
+    if (updatedLines.isEmpty()) {
         return;
     }
 
-    const int totalLines = addedLines + removedLines;
-    const int fileThreshold = spinGitDiffFileThreshold->value();
-    const int lineThreshold = spinGitDiffLineThreshold->value();
-    txtGitLog->append(QStringLiteral("[Diff分析] 文件:%1, +%2/-%3, 总变更:%4, 源码文件:%5, 配置文件:%6, 二进制变更项:%7")
-                          .arg(changedFiles)
-                          .arg(addedLines)
-                          .arg(removedLines)
-                          .arg(totalLines)
-                          .arg(sourceTouched)
-                          .arg(configTouched)
-                          .arg(binaryTouched));
-
-    bool shouldRemind = false;
-    QString ruleDesc;
-    switch (gitDiffReminderRule) {
-    case 0:
-        shouldRemind = changedFiles > 0;
-        ruleDesc = QStringLiteral("只要有改动就提醒");
-        break;
-    case 1:
-        shouldRemind = changedFiles >= fileThreshold;
-        ruleDesc = QStringLiteral("改动文件数 >= %1").arg(fileThreshold);
-        break;
-    case 2:
-        shouldRemind = totalLines >= lineThreshold;
-        ruleDesc = QStringLiteral("新增+删除总行数 >= %1（%2 星）")
-                       .arg(lineThreshold)
-                       .arg(gitLinesToStarCount(lineThreshold));
-        break;
-    case 3:
-        shouldRemind = configTouched > 0;
-        ruleDesc = QStringLiteral("涉及配置文件改动");
-        break;
-    case 4:
-        shouldRemind = sourceTouched > 0;
-        ruleDesc = QStringLiteral("涉及源码文件改动");
-        break;
-    default:
-        shouldRemind = false;
-        ruleDesc = QStringLiteral("未设置");
-        break;
-    }
-
-    if (!shouldRemind) {
-        return;
-    }
-
-    const QString tips = QStringLiteral("检测到改动达到提醒标准：%1\n\n"
-                                        "建议执行存档操作（如 git commit / git tag / 导出补丁）以避免修改丢失。\n"
-                                        "统计: 文件 %2 个, +%3/-%4, 总变更 %5 行。")
-                             .arg(ruleDesc)
-                             .arg(changedFiles)
-                             .arg(addedLines)
-                             .arg(removedLines)
-                             .arg(totalLines);
-    QMessageBox::information(this, QStringLiteral("Git 存档提醒"), tips);
-    txtGitLog->append(QStringLiteral("[Diff提醒] 已触发存档提醒，标准: %1").arg(ruleDesc));
+    const QString tips = QStringLiteral(
+                             "检测到 %1 个记忆仓库的可执行文件已更新，建议执行 SCP 传输到目标设备。\n\n%2")
+                             .arg(updatedLines.size())
+                             .arg(updatedLines.join(QStringLiteral("\n\n────────\n\n")));
+    QMessageBox::information(this, QStringLiteral("可执行文件更新提醒"), tips);
 }
 
 void MainWindow::onGitSyncRemoteClicked() {
@@ -6117,33 +6086,14 @@ void MainWindow::onScpTransferClicked() {
         txtGitLog->append("工作区无未提交改动，跳过 git add / commit，继续搜索可执行文件...");
     }
 
-    // 递归查找目录下最深层、最新的可执行文件
-    QString latestFile;
-    QDateTime latestTime;
-
-    QDirIterator it(dir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        QFileInfo fileInfo = it.fileInfo();
-        QString fileName = fileInfo.fileName();
-
-        // 过滤掉辅助工具自身和常见的非嵌入式程序
-        if (fileName == "ModbusTCPAssistant") continue;
-        if (fileName.startsWith(".") || fileName.endsWith(".so")) continue;
-        if (fileName.contains(".") && !fileName.endsWith(".sh")) continue;
-
-        if (latestFile.isEmpty() || fileInfo.lastModified() > latestTime) {
-            latestFile = fileInfo.absoluteFilePath();
-            latestTime = fileInfo.lastModified();
-        }
-    }
-
-    if (latestFile.isEmpty()) {
+    // 递归查找目录下最新的可执行文件（与可执行文件提醒共用规则）
+    const QFileInfo fi = findLatestDeployExecutable(dir);
+    if (!fi.exists()) {
         txtGitLog->append("未在目录及其子目录下找到符合条件的可执行文件");
         return;
     }
 
-    QFileInfo fi(latestFile);
+    const QString latestFile = fi.absoluteFilePath();
     txtGitLog->append(QString("发现最新可执行文件: %1 (修改时间: %2)").arg(fi.fileName()).arg(fi.lastModified().toString()));
 
     // 检查文件时间与当前时间的差距
@@ -6187,7 +6137,7 @@ void MainWindow::onScpTransferClicked() {
     txtGitLog->append(QString("正在停止目标程序: %1 ...").arg(fileName));
     
     QProcess *stopProcess = new QProcess(this);
-    connect(stopProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, stopProcess, fileName, password, targetIp, latestFile, remotePath, runCmd](int, QProcess::ExitStatus) {
+    connect(stopProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, stopProcess, fileName, password, targetIp, latestFile, dir, remotePath, runCmd](int, QProcess::ExitStatus) {
         stopProcess->deleteLater();
         
         // 停止命令执行完（无论成功失败，可能程序本就没运行），开始传输
@@ -6205,10 +6155,15 @@ void MainWindow::onScpTransferClicked() {
         txtGitLog->append(QString("正在传输文件: %1 ...").arg(fileName));
 
         QProcess *scpProcess = new QProcess(this);
-        connect(scpProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, scpProcess, fileName](int exitCode, QProcess::ExitStatus exitStatus) {
+        connect(scpProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
+                [this, scpProcess, fileName, dir, latestFile](int exitCode, QProcess::ExitStatus exitStatus) {
             if (exitStatus == QProcess::NormalExit && exitCode == 0) {
                 txtGitLog->append(QString("传输成功: %1 已上传至 /userfs/app").arg(fileName));
                 currentMonitoringProcess = fileName; // 记录当前传输的文件名以便监测
+                const QFileInfo transferred(latestFile);
+                if (transferred.exists()) {
+                    rememberDeployExecutableBaseline(dir, transferred);
+                }
             } else {
                 QString error = scpProcess->readAllStandardError();
                 txtGitLog->append(QString("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
@@ -6287,18 +6242,9 @@ void MainWindow::onMonitorUsageToggled() {
         if (currentMonitoringProcess.isEmpty()) {
             QString dir = cmbGitDir->currentText();
             if (!dir.isEmpty() && QDir(dir).exists()) {
-                QDirIterator it(dir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
-                QDateTime latestTime;
-                while (it.hasNext()) {
-                    it.next();
-                    QFileInfo fileInfo = it.fileInfo();
-                    if (fileInfo.fileName() == "ModbusTCPAssistant") continue;
-                    if (fileInfo.fileName().startsWith(".") || fileInfo.fileName().endsWith(".so")) continue;
-                    if (fileInfo.fileName().contains(".") && !fileInfo.fileName().endsWith(".sh")) continue;
-                    if (currentMonitoringProcess.isEmpty() || fileInfo.lastModified() > latestTime) {
-                        currentMonitoringProcess = fileInfo.fileName();
-                        latestTime = fileInfo.lastModified();
-                    }
+                const QFileInfo fi = findLatestDeployExecutable(dir);
+                if (fi.exists()) {
+                    currentMonitoringProcess = fi.fileName();
                 }
             }
         }
@@ -6716,29 +6662,29 @@ void MainWindow::loadGitHistory() {
 
 void MainWindow::loadGitDiffReminderSettings() {
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    settings.beginGroup(QStringLiteral("gitDiffReminder"));
+    settings.beginGroup(QStringLiteral("exeUpdateReminder"));
 
-    gitDiffReminderEnabled = settings.value(QStringLiteral("enabled"), true).toBool();
-    gitDiffReminderRule = settings.value(QStringLiteral("rule"), 2).toInt();
-
-    if (spinGitDiffIntervalMinutes) {
-        spinGitDiffIntervalMinutes->setValue(
-            settings.value(QStringLiteral("intervalMinutes"), 30).toInt());
-    }
-    if (spinGitDiffFileThreshold) {
-        spinGitDiffFileThreshold->setValue(
-            settings.value(QStringLiteral("fileThreshold"), 5).toInt());
-    }
-    if (spinGitDiffLineThreshold) {
-        spinGitDiffLineThreshold->setValue(
-            settings.value(QStringLiteral("lineThreshold"), kGitGoalLinesPerStar).toInt());
+    // Prefer new group; fall back to legacy gitDiffReminder.enabled / interval
+    if (!settings.contains(QStringLiteral("enabled"))) {
+        settings.endGroup();
+        settings.beginGroup(QStringLiteral("gitDiffReminder"));
+        gitDiffReminderEnabled = settings.value(QStringLiteral("enabled"), true).toBool();
+        const int legacyInterval = settings.value(QStringLiteral("intervalMinutes"), 5).toInt();
+        settings.endGroup();
+        settings.beginGroup(QStringLiteral("exeUpdateReminder"));
+        if (spinGitDiffIntervalMinutes) {
+            spinGitDiffIntervalMinutes->setValue(legacyInterval);
+        }
+    } else {
+        gitDiffReminderEnabled = settings.value(QStringLiteral("enabled"), true).toBool();
+        if (spinGitDiffIntervalMinutes) {
+            spinGitDiffIntervalMinutes->setValue(
+                settings.value(QStringLiteral("intervalMinutes"), 5).toInt());
+        }
     }
 
     settings.endGroup();
 
-    if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
-        gitDiffReminderRule = 2;
-    }
     if (gitDiffReminderTimer && spinGitDiffIntervalMinutes) {
         gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
     }
@@ -6746,17 +6692,10 @@ void MainWindow::loadGitDiffReminderSettings() {
 
 void MainWindow::saveGitDiffReminderSettings() {
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    settings.beginGroup(QStringLiteral("gitDiffReminder"));
+    settings.beginGroup(QStringLiteral("exeUpdateReminder"));
     settings.setValue(QStringLiteral("enabled"), gitDiffReminderEnabled);
-    settings.setValue(QStringLiteral("rule"), gitDiffReminderRule);
     if (spinGitDiffIntervalMinutes) {
         settings.setValue(QStringLiteral("intervalMinutes"), spinGitDiffIntervalMinutes->value());
-    }
-    if (spinGitDiffFileThreshold) {
-        settings.setValue(QStringLiteral("fileThreshold"), spinGitDiffFileThreshold->value());
-    }
-    if (spinGitDiffLineThreshold) {
-        settings.setValue(QStringLiteral("lineThreshold"), spinGitDiffLineThreshold->value());
     }
     settings.endGroup();
 }
@@ -6767,8 +6706,8 @@ void MainWindow::applyGitDiffReminderEnabled(bool enabled) {
     if (btnGitAutoDiffReminder) {
         btnGitAutoDiffReminder->blockSignals(true);
         btnGitAutoDiffReminder->setChecked(enabled);
-        btnGitAutoDiffReminder->setText(enabled ? QStringLiteral("关闭Diff提醒")
-                                                : QStringLiteral("开启Diff提醒"));
+        btnGitAutoDiffReminder->setText(enabled ? QStringLiteral("关闭可执行文件提醒")
+                                                : QStringLiteral("开启可执行文件提醒"));
         btnGitAutoDiffReminder->blockSignals(false);
     }
 
@@ -6777,10 +6716,7 @@ void MainWindow::applyGitDiffReminderEnabled(bool enabled) {
     }
 
     if (enabled) {
-        if (gitDiffReminderRule < 0 || gitDiffReminderRule > 4) {
-            gitDiffReminderRule = 2;
-        }
-        const int minutes = spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 30;
+        const int minutes = spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 5;
         gitDiffReminderTimer->setInterval(qMax(1, minutes) * 60 * 1000);
         gitDiffReminderTimer->start();
     } else {
@@ -6808,8 +6744,8 @@ void MainWindow::deferredGitRepoInit() {
     if (gitDiffReminderEnabled) {
         applyGitDiffReminderEnabled(true);
         saveGitDiffReminderSettings();
-        txtGitLog->append(QString("[Diff提醒] 已开启：每 %1 分钟自动分析 git diff 并按标准提醒存档。")
-                              .arg(spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 30));
+        txtGitLog->append(QStringLiteral("[可执行文件提醒] 已开启：每 %1 分钟检查记忆仓库中全部仓库的可执行文件是否更新。")
+                              .arg(spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 5));
         onGitAutoDiffReminderTick();
     }
 }

@@ -40,6 +40,8 @@
 #include <QDirIterator>
 #include <QPainter>
 #include <QPolygonF>
+#include <QFileInfo>
+#include <QDateTime>
 #include "modbusslave.h"
 
 class LifeAssistantWidget;
@@ -195,10 +197,8 @@ private slots:
     void onGitFetchClicked();
     void onGitStashClicked();
     void onGitStashPopClicked();
-    void onGitSetDiffRuleClicked();
     void onGitAutoDiffReminderToggled(bool checked);
     void onGitAutoDiffReminderTick();
-    void onGitDiffReminderFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onGitOpenIgnoreClicked();
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
     void onGitRemoteAddClicked(); // 新增：链接远程仓库
@@ -431,11 +431,8 @@ private:
     QPushButton *btnGitCancelNetwork = nullptr;
     QPushButton *btnGitStash;
     QPushButton *btnGitStashPop;
-    QPushButton *btnGitSetDiffRule;
     QPushButton *btnGitAutoDiffReminder;
     QSpinBox *spinGitDiffIntervalMinutes;
-    QSpinBox *spinGitDiffFileThreshold;
-    QSpinBox *spinGitDiffLineThreshold;
     QPushButton *btnGitOpenIgnore;
     QPushButton *btnGitGetSshKey; // 新增
     QPushButton *btnGitRemoteAdd; // 新增
@@ -473,8 +470,6 @@ private:
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
-    QProcess *gitDiffReminderProcess = nullptr;
-    bool gitDiffReminderBusy = false;
     QTimer *dailyReportAutoSaveTimer = nullptr;
     QTimer *gitNetworkTimeout = nullptr;
     QProcess *gitNetworkProcess = nullptr;
@@ -486,7 +481,6 @@ private:
     int gitNetworkLastTimeoutMs = 30000;
     std::function<void(bool)> gitNetworkDoneCallback;
     std::function<void(bool)> gitNetworkLastDoneCallback;
-    int gitDiffReminderRule = 2;
     bool gitDiffReminderEnabled = true;
     bool gitAutoFetchEnabled = false;
     QHash<QString, QSet<QString>> gitGoalCollapsedByRepo;
@@ -663,6 +657,11 @@ private:
     void loadGitDiffReminderSettings();
     void saveGitDiffReminderSettings();
     void applyGitDiffReminderEnabled(bool enabled);
+    /** Latest deployable executable under workDir (same rules as SCP). Invalid if none. */
+    QFileInfo findLatestDeployExecutable(const QString &workDir) const;
+    void rememberDeployExecutableBaseline(const QString &repoDir, const QFileInfo &fi);
+    bool hasDeployExecutableBaseline(const QString &repoDir) const;
+    bool deployExecutableNewerThanBaseline(const QString &repoDir, const QFileInfo &fi) const;
     QString gitCheckedOutBranch(const QString &repoDir) const;
     QStringList gitBranchHintLinesFromCombo() const;
     bool branchNameInBranchHints(const QStringList &hints, const QString &name) const;
