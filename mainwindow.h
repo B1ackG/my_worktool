@@ -608,6 +608,8 @@ private:
     QList<QPair<QString, QString>> collectRemoteAheadItems() const;
     void focusGitPendingRepo(const QString &repoDir);
     bool confirmExitDespiteGitPending();
+    /** 对有未推送提交的仓库逐个 git push。 */
+    void pushAllUnpushedRepos(const QStringList &repoDirs);
     /** 启动后若远程领先本地则弹窗提示处理。 */
     void promptRemoteAheadOnOpen();
     /** 对给定仓库逐个 git pull，将远程领先同步到本地。 */

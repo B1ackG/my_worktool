@@ -4257,30 +4257,144 @@ bool MainWindow::confirmExitDespiteGitPending()
 
     QStringList warnings;
     warnings.reserve(items.size());
+    QStringList unpushedDirs;
     for (const auto &item : items) {
         warnings << item.second;
+        if (gitUnpushedCommitCount(item.first) > 0) {
+            unpushedDirs << item.first;
+        }
+    }
+
+    QString hint = QStringLiteral("（选择「去处理」将切换到第一个待处理仓库）");
+    if (!unpushedDirs.isEmpty()) {
+        hint = QStringLiteral("（「一键推送」将推送有未推送提交的仓库；「去处理」切换到第一个仓库）");
     }
 
     const QString message =
-        QStringLiteral("以下仓库仍有未提交或未推送的内容：\n\n%1\n\n仍要退出程序吗？\n"
-                       "（选择「去处理」将切换到第一个待处理仓库）")
-            .arg(warnings.join(QLatin1Char('\n')));
+        QStringLiteral("以下仓库仍有未提交或未推送的内容：\n\n%1\n\n仍要退出程序吗？\n%2")
+            .arg(warnings.join(QLatin1Char('\n')), hint);
 
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(QStringLiteral("关闭前提醒"));
     box.setText(message);
     QPushButton *quitBtn = box.addButton(QStringLiteral("仍要退出"), QMessageBox::AcceptRole);
+    QPushButton *pushAllBtn = nullptr;
+    if (!unpushedDirs.isEmpty()) {
+        pushAllBtn = box.addButton(QStringLiteral("一键推送"), QMessageBox::ActionRole);
+    }
     QPushButton *handleBtn = box.addButton(QStringLiteral("去处理"), QMessageBox::RejectRole);
-    box.setDefaultButton(handleBtn);
+    if (pushAllBtn) {
+        box.setDefaultButton(pushAllBtn);
+    } else {
+        box.setDefaultButton(handleBtn);
+    }
     box.exec();
 
     if (box.clickedButton() == quitBtn) {
         return true;
     }
 
+    if (pushAllBtn && box.clickedButton() == pushAllBtn) {
+        pushAllUnpushedRepos(unpushedDirs);
+        // 推送后再检查：仍有未提交/未推送则继续提示，全部清掉则允许退出
+        return confirmExitDespiteGitPending();
+    }
+
     focusGitPendingRepo(items.first().first);
     return false;
+}
+
+void MainWindow::pushAllUnpushedRepos(const QStringList &repoDirs)
+{
+    if (repoDirs.isEmpty()) {
+        return;
+    }
+
+    constexpr int kGitPageIndex = 2;
+    if (navWidget && navWidget->currentRow() != kGitPageIndex) {
+        navWidget->setCurrentRow(kGitPageIndex);
+    }
+
+    int okCount = 0;
+    QStringList failures;
+
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>[一键推送] 开始推送 %1 个有未推送提交的仓库…</font>")
+                              .arg(repoDirs.size()));
+    }
+
+    for (const QString &repoDir : repoDirs) {
+        const QString absPath = QDir(repoDir).absolutePath();
+        QString name = gitRepoDisplayName(absPath);
+        if (name.isEmpty()) {
+            name = QFileInfo(absPath).fileName();
+        }
+
+        if (absPath.isEmpty() || !QDir(absPath).exists() || !isGitRepository(absPath)) {
+            failures << QStringLiteral("%1（目录无效）").arg(name);
+            continue;
+        }
+
+        if (gitUnpushedCommitCount(absPath) <= 0) {
+            if (txtGitLog) {
+                txtGitLog->append(QStringLiteral("<font color='gray'>[一键推送] %1：无需推送，跳过</font>").arg(name));
+            }
+            continue;
+        }
+
+        if (txtGitLog) {
+            txtGitLog->append(QStringLiteral("<font color='cyan'>$ [%1] git push</font>").arg(name));
+        }
+
+        QString out;
+        QString err;
+        const bool ok = GitWorktreeRunner::runInRepo(
+            absPath, {QStringLiteral("push")}, &out, &err, 60000);
+
+        if (txtGitLog) {
+            if (!out.trimmed().isEmpty()) {
+                txtGitLog->append(out.trimmed());
+            }
+            if (!err.trimmed().isEmpty()) {
+                txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>").arg(err.trimmed()));
+            }
+        }
+
+        if (ok) {
+            ++okCount;
+            if (txtGitLog) {
+                txtGitLog->append(QStringLiteral("<font color='green'>[一键推送] %1：推送成功</font>").arg(name));
+            }
+        } else {
+            failures << name;
+            if (txtGitLog) {
+                txtGitLog->append(QStringLiteral("<font color='red'>[一键推送] %1：推送失败</font>").arg(name));
+            }
+        }
+    }
+
+    const QString current = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    if (!current.isEmpty() && QDir(current).exists()) {
+        refreshGitBranchesLocal();
+    }
+
+    if (txtGitLog) {
+        txtGitLog->moveCursor(QTextCursor::End);
+    }
+
+    if (failures.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("一键推送"),
+            QStringLiteral("已全部推送完成（%1 个仓库）。").arg(okCount));
+    } else {
+        QMessageBox::warning(
+            this, QStringLiteral("一键推送"),
+            QStringLiteral("成功 %1 个，失败 %2 个：\n%3")
+                .arg(okCount)
+                .arg(failures.size())
+                .arg(failures.join(QLatin1Char('\n'))));
+    }
 }
 
 QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
