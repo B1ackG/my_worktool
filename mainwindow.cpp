@@ -548,8 +548,9 @@ MainWindow::MainWindow(QWidget *parent)
     , float32WordOrder(Float32WordOrder::CDAB)
     , float64WordOrder(Float64WordOrder::GHEF_CDAB)
 {
-    setWindowTitle("李晨阳的linux工作助手");
-    resize(1200, 720);
+    setWindowTitle(QStringLiteral("李晨阳的linux工作助手"));
+    resize(1280, 780);
+    setMinimumSize(960, 600);
 
     // Initialize Objects
     tcpSocket = new QTcpSocket(this);
@@ -668,17 +669,39 @@ void MainWindow::createWidgets()
 {
     // --- Navigation ---
     navWidget = new QListWidget();
-    navWidget->addItem("Modbus TCP 助手");
-    navWidget->addItem("串口调试助手");
-    navWidget->addItem("Git 工作流助手");
-    navWidget->addItem("Modbus 从站模拟器");
-    navWidget->addItem("TCP 通讯助手");
-    navWidget->addItem("性能监控器");
-    navWidget->addItem("快捷助手");
-    navWidget->addItem("生活办公助手");
-    navWidget->setFixedWidth(160);
-    navWidget->setStyleSheet("QListWidget::item { height: 50px; padding-left: 10px; font-size: 14px; } "
-                             "QListWidget::item:selected { background-color: #3399ff; color: white; }");
+    navWidget->addItem(QStringLiteral("Modbus TCP"));
+    navWidget->addItem(QStringLiteral("串口调试"));
+    navWidget->addItem(QStringLiteral("Git 工作流"));
+    navWidget->addItem(QStringLiteral("从站模拟器"));
+    navWidget->addItem(QStringLiteral("TCP 通讯"));
+    navWidget->addItem(QStringLiteral("性能监控"));
+    navWidget->addItem(QStringLiteral("快捷助手"));
+    navWidget->addItem(QStringLiteral("生活办公"));
+    navWidget->setFixedWidth(168);
+    navWidget->setFocusPolicy(Qt::NoFocus);
+    navWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    navWidget->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    navWidget->setStyleSheet(QStringLiteral(
+        "QListWidget {"
+        "  background: #1f2a37;"
+        "  border: none;"
+        "  outline: 0;"
+        "  padding: 8px 0;"
+        "  color: #c5d0db;"
+        "}"
+        "QListWidget::item {"
+        "  height: 44px;"
+        "  margin: 2px 8px;"
+        "  padding-left: 12px;"
+        "  border-radius: 6px;"
+        "  font-size: 13px;"
+        "}"
+        "QListWidget::item:hover { background: #2a3747; color: #ffffff; }"
+        "QListWidget::item:selected {"
+        "  background: #2f6fed;"
+        "  color: #ffffff;"
+        "  font-weight: 600;"
+        "}"));
 
     // --- Page 1: Modbus TCP Widgets ---
     
@@ -988,7 +1011,9 @@ void MainWindow::createWidgets()
     btnGitAutoDiffReminder->setCheckable(true);
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
     btnGitAutoDiffReminder->setToolTip(
-        QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒 SCP 传输"));
+        QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒"));
+    btnGitExeReminderCheckNow = new QPushButton(QStringLiteral("立即检查"));
+    btnGitExeReminderCheckNow->setToolTip(QStringLiteral("立刻扫描全部记忆仓库的可执行文件更新（不必等间隔）"));
     spinGitDiffIntervalMinutes = new QSpinBox();
     spinGitDiffIntervalMinutes->setRange(1, 24 * 60);
     spinGitDiffIntervalMinutes->setValue(5);
@@ -1363,6 +1388,7 @@ QWidget* MainWindow::createGitPage()
 
     QHBoxLayout *layReminder = new QHBoxLayout();
     layReminder->addWidget(btnGitAutoDiffReminder);
+    layReminder->addWidget(btnGitExeReminderCheckNow);
     layReminder->addWidget(new QLabel(QStringLiteral("检查间隔:")));
     layReminder->addWidget(spinGitDiffIntervalMinutes);
     layReminder->addStretch();
@@ -1789,26 +1815,32 @@ bool MainWindow::setAutostartEnabled(bool enabled)
         if (!autostartDir.exists() && !autostartDir.mkpath(QStringLiteral(".")))
             return false;
 
-        QFile file(desktopPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-            return false;
-
+        // Write UTF-8 bytes directly. QTextStream << const char* treats the
+        // payload as Latin-1 and double-encodes Chinese (can inject NEL into Name).
         const QString execPath = QCoreApplication::applicationFilePath();
-        QTextStream out(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        out.setEncoding(QStringConverter::Utf8);
-#else
-        out.setCodec("UTF-8");
-#endif
-        out << "[Desktop Entry]\n";
-        out << "Type=Application\n";
-        out << "Version=1.0\n";
-        out << "Name=李晨阳的linux工作助手\n";
-        out << "Comment=Linux工作助手\n";
-        out << "Exec=\"" << execPath << "\"\n";
-        out << "Terminal=false\n";
-        out << "Categories=Utility;\n";
-        out << "X-GNOME-Autostart-enabled=true\n";
+        const QString quotedExec = execPath.contains(QLatin1Char(' '))
+                                       ? QStringLiteral("\"%1\"").arg(execPath)
+                                       : execPath;
+        const QByteArray content =
+            QByteArrayLiteral("[Desktop Entry]\n")
+            + QByteArrayLiteral("Type=Application\n")
+            + QByteArrayLiteral("Version=1.0\n")
+            + QStringLiteral("Name=李晨阳的linux工作助手\n").toUtf8()
+            + QStringLiteral("Comment=Linux工作助手\n").toUtf8()
+            + QByteArrayLiteral("Exec=") + quotedExec.toUtf8() + '\n'
+            + QByteArrayLiteral("TryExec=") + execPath.toUtf8() + '\n'
+            + QByteArrayLiteral("Path=") + QFileInfo(execPath).absolutePath().toUtf8() + '\n'
+            + QByteArrayLiteral("Terminal=false\n")
+            + QByteArrayLiteral("Categories=Utility;\n")
+            + QByteArrayLiteral("StartupNotify=true\n")
+            + QByteArrayLiteral("X-GNOME-Autostart-enabled=true\n");
+
+        QFile file(desktopPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        if (file.write(content) != content.size())
+            return false;
+        file.close();
 
         QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
         settings.setValue(QStringLiteral("autostart/enabled"), true);
@@ -1852,8 +1884,8 @@ void MainWindow::createLayouts()
     setCentralWidget(centralWidget);
     
     mainLayout = new QHBoxLayout(centralWidget);
-    mainLayout->setContentsMargins(5, 5, 5, 5);
-    mainLayout->setSpacing(5);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
     
     stackedWidget = new QStackedWidget();
     modbusPageWidget = createModbusPage();
@@ -1873,13 +1905,17 @@ void MainWindow::createLayouts()
     stackedWidget->addWidget(performancePageWidget);
     stackedWidget->addWidget(inputQuickerPageWidget);
     stackedWidget->addWidget(lifeAssistantPageWidget);
+
+    QWidget *contentHost = new QWidget();
+    contentHost->setObjectName(QStringLiteral("contentHost"));
+    contentHost->setStyleSheet(QStringLiteral("#contentHost { background: #f4f6f8; }"));
+    QVBoxLayout *contentLayout = new QVBoxLayout(contentHost);
+    contentLayout->setContentsMargins(14, 12, 14, 12);
+    contentLayout->setSpacing(0);
+    contentLayout->addWidget(stackedWidget);
     
     mainLayout->addWidget(navWidget);
-    mainLayout->addWidget(stackedWidget);
-    
-    // Set stretch, allow stack to expand
-    mainLayout->setStretch(0, 0);
-    mainLayout->setStretch(1, 1);
+    mainLayout->addWidget(contentHost, 1);
 }
 
 void MainWindow::createConnections()
@@ -2004,6 +2040,7 @@ void MainWindow::createConnections()
     connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
     connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
+    connect(btnGitExeReminderCheckNow, &QPushButton::clicked, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(spinGitDiffIntervalMinutes, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int minutes){
         int ms = qMax(1, minutes) * 60 * 1000;
@@ -4917,7 +4954,7 @@ void MainWindow::onGitStashPopClicked() {
     runGitCommand(QStringList() << "stash" << "pop");
 }
 
-QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir) const
+QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool allowRunningApp) const
 {
     if (workDir.trimmed().isEmpty() || !QDir(workDir).exists()) {
         return QFileInfo();
@@ -4937,9 +4974,8 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir) const
         const QString fileName = fileInfo.fileName();
         const QString absPath = fileInfo.absoluteFilePath();
 
-        // Only skip the currently running helper binary, not every file with the same name
-        // (this repo builds as ModbusTCPAssistant, not myAssistant).
-        if (!selfPath.isEmpty() && absPath == selfPath) {
+        // SCP must not pick the running helper; reminder must see rebuilds of this binary.
+        if (!allowRunningApp && !selfPath.isEmpty() && absPath == selfPath) {
             continue;
         }
 
@@ -5095,13 +5131,16 @@ void MainWindow::onGitAutoDiffReminderTick()
 
     txtGitLog->append(QStringLiteral("[可执行文件提醒] 开始检查 %1 个记忆仓库…").arg(repos.size()));
 
+    const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
     QStringList updatedLines;
+    QStringList updatedRepos;
     int baselineOnly = 0;
     int unchanged = 0;
     int noExe = 0;
+    int selfUpdated = 0;
 
     for (const QString &workDir : repos) {
-        const QFileInfo fi = findLatestDeployExecutable(workDir);
+        const QFileInfo fi = findLatestDeployExecutable(workDir, true);
         if (!fi.exists()) {
             ++noExe;
             txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到可部署可执行文件")
@@ -5124,10 +5163,23 @@ void MainWindow::onGitAutoDiffReminderTick()
         }
 
         rememberDeployExecutableBaseline(workDir, fi);
-        updatedLines << QStringLiteral("仓库: %1\n文件: %2\n路径: %3\n修改时间: %4\n大小: %5 字节")
-                            .arg(workDir, fi.fileName(), fi.absoluteFilePath(),
-                                 fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
-                            .arg(fi.size());
+        updatedRepos << workDir;
+        const bool isSelf = (!selfPath.isEmpty()
+                             && fi.absoluteFilePath() == selfPath);
+        if (isSelf) {
+            ++selfUpdated;
+            updatedLines << QStringLiteral(
+                                "仓库: %1\n本工具可执行文件已更新（重编）\n文件: %2\n路径: %3\n修改时间: %4\n大小: %5 字节")
+                                .arg(workDir, fi.fileName(), fi.absoluteFilePath(),
+                                     fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                                .arg(fi.size());
+        } else {
+            updatedLines << QStringLiteral(
+                                "仓库: %1\n文件: %2\n路径: %3\n修改时间: %4\n大小: %5 字节\n建议: SCP 传输到目标设备")
+                                .arg(workDir, fi.fileName(), fi.absoluteFilePath(),
+                                     fi.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")))
+                                .arg(fi.size());
+        }
         txtGitLog->append(QStringLiteral("[可执行文件提醒] 有更新: %1 -> %2")
                               .arg(workDir, fi.absoluteFilePath()));
     }
@@ -5142,11 +5194,45 @@ void MainWindow::onGitAutoDiffReminderTick()
         return;
     }
 
-    const QString tips = QStringLiteral(
-                             "检测到 %1 个记忆仓库的可执行文件已更新，建议执行 SCP 传输到目标设备。\n\n%2")
-                             .arg(updatedLines.size())
-                             .arg(updatedLines.join(QStringLiteral("\n\n────────\n\n")));
-    QMessageBox::information(this, QStringLiteral("可执行文件更新提醒"), tips);
+    QString header;
+    if (selfUpdated > 0 && selfUpdated == updatedLines.size()) {
+        header = QStringLiteral("检测到本工具可执行文件已更新（重编）。\n\n");
+    } else if (selfUpdated > 0) {
+        header = QStringLiteral("检测到 %1 个记忆仓库的可执行文件已更新（含本工具重编）。\n"
+                                "其它仓库建议执行 SCP 传输到目标设备。\n\n")
+                     .arg(updatedLines.size());
+    } else {
+        header = QStringLiteral("检测到 %1 个记忆仓库的可执行文件已更新，建议执行 SCP 传输到目标设备。\n\n")
+                     .arg(updatedLines.size());
+    }
+
+    const QString tips = header + updatedLines.join(QStringLiteral("\n\n────────\n\n"));
+
+    // Prefer current combo repo if it is among updated; else first updated repo.
+    QString targetRepo = updatedRepos.first();
+    const QString currentRepo = cmbGitDir ? QDir(cmbGitDir->currentText().trimmed()).absolutePath()
+                                          : QString();
+    if (!currentRepo.isEmpty() && updatedRepos.contains(currentRepo)) {
+        targetRepo = currentRepo;
+    }
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Information);
+    box.setWindowTitle(QStringLiteral("可执行文件更新提醒"));
+    box.setText(tips);
+    auto *btnAi = box.addButton(QStringLiteral("AI 整理提交说明"), QMessageBox::AcceptRole);
+    box.addButton(QStringLiteral("稍后"), QMessageBox::RejectRole);
+    box.setDefaultButton(btnAi);
+    box.exec();
+
+    if (box.clickedButton() != btnAi) {
+        return;
+    }
+
+    focusGitPendingRepo(targetRepo);
+    txtGitLog->append(QStringLiteral("<font color='cyan'>[可执行文件提醒] 已切换到 %1，开始 AI 整理提交说明…</font>")
+                          .arg(targetRepo));
+    onGitAiCommitMsgClicked();
 }
 
 void MainWindow::onGitSyncRemoteClicked() {

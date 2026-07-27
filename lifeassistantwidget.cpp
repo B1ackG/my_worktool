@@ -59,9 +59,10 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
     sidebarList->setFixedWidth(180);
     sidebarList->setIconSize(QSize(32, 32));
     sidebarList->setStyleSheet(
-        "QListWidget { background-color: #f5f5f5; border: none; border-right: 1px solid #ddd; outline: 0; }"
-        "QListWidget::item { height: 50px; padding-left: 15px; border-bottom: 1px solid #eee; }"
-        "QListWidget::item:selected { background-color: #e3f2fd; color: #1976d2; border-right: 3px solid #1976d2; }"
+        "QListWidget { background-color: #eef2f6; border: none; border-right: 1px solid #d5dde5; outline: 0; color: #334155; padding: 8px 0; }"
+        "QListWidget::item { height: 44px; margin: 2px 8px; padding-left: 12px; border-radius: 6px; }"
+        "QListWidget::item:hover { background-color: #e2e8f0; color: #0f172a; }"
+        "QListWidget::item:selected { background-color: #dbeafe; color: #1d4ed8; font-weight: 600; }"
     );
     
     QListWidgetItem *itemWork = new QListWidgetItem("💼 工作助手");

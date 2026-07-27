@@ -435,6 +435,7 @@ private:
     QPushButton *btnGitStash;
     QPushButton *btnGitStashPop;
     QPushButton *btnGitAutoDiffReminder;
+    QPushButton *btnGitExeReminderCheckNow = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
     QPushButton *btnGitOpenIgnore;
     QPushButton *btnGitGetSshKey; // 新增
@@ -671,8 +672,9 @@ private:
     void loadGitDiffReminderSettings();
     void saveGitDiffReminderSettings();
     void applyGitDiffReminderEnabled(bool enabled);
-    /** Latest deployable executable under workDir (same rules as SCP). Invalid if none. */
-    QFileInfo findLatestDeployExecutable(const QString &workDir) const;
+    /** Latest deployable executable under workDir. If allowRunningApp is false, skips the
+     *  currently running application binary (for SCP). Reminder should pass true. */
+    QFileInfo findLatestDeployExecutable(const QString &workDir, bool allowRunningApp = false) const;
     void rememberDeployExecutableBaseline(const QString &repoDir, const QFileInfo &fi);
     bool hasDeployExecutableBaseline(const QString &repoDir) const;
     bool deployExecutableNewerThanBaseline(const QString &repoDir, const QFileInfo &fi) const;

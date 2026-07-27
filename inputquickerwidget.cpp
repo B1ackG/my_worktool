@@ -1,6 +1,7 @@
 #include "inputquickerwidget.h"
 #include "quickerbindingdialog.h"
 
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -15,7 +16,8 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     , statusTimer(new QTimer(this))
 {
     QLabel *header = new QLabel(QStringLiteral("快捷助手"), this);
-    header->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: bold; color: #333; margin-bottom: 8px;"));
+    header->setStyleSheet(QStringLiteral(
+        "font-size: 20px; font-weight: 700; color: #1f2a37; letter-spacing: 0.2px;"));
 
 #ifdef Q_OS_WIN
     QLabel *hint = new QLabel(
@@ -24,12 +26,13 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
         this);
 #else
     QLabel *hint = new QLabel(
-        QStringLiteral("本页仅管理映射脚本；实际按键由开机自启的守护脚本执行。"), this);
+        QStringLiteral("本页管理映射规则与守护进程；实际按键由开机自启的守护脚本执行，主窗口关闭后仍生效。"),
+        this);
 #endif
     hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("color: #666; margin-bottom: 4px;"));
+    hint->setStyleSheet(QStringLiteral("color: #5b6b7c; margin: 2px 0 10px 0;"));
 
-    chkEnabled = new QCheckBox(QStringLiteral("启用映射守护"), this);
+    chkEnabled = new QCheckBox(QStringLiteral("启用映射守护（开机自启）"), this);
     chkEnabled->setChecked(true);
     chkEnabled->setToolTip(
         QStringLiteral("开启：启动守护脚本并写入开机自启。\n"
@@ -40,19 +43,32 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     cmbDevice->setMinimumWidth(360);
     cmbDevice->setToolTip(QStringLiteral("选择要映射的输入设备；「自动选择」按能力评分挑选。"));
 
-    btnRefreshDevices = new QPushButton(QStringLiteral("刷新"), this);
+    btnRefreshDevices = new QPushButton(QStringLiteral("刷新设备"), this);
     btnRefreshDevices->setToolTip(QStringLiteral("重新扫描输入设备列表。"));
 
     lblStatus = new QLabel(QStringLiteral("状态: 未加载"), this);
-    lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #555;"));
+    lblStatus->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    lblStatus->setMinimumWidth(140);
+    lblStatus->setStyleSheet(QStringLiteral(
+        "font-weight: 600; color: #334155; background: #e8eef5; border-radius: 4px; padding: 4px 10px;"));
 
-    QHBoxLayout *topRow = new QHBoxLayout();
+    QFrame *controlBar = new QFrame(this);
+    controlBar->setObjectName(QStringLiteral("quickerControlBar"));
+    controlBar->setStyleSheet(QStringLiteral(
+        "#quickerControlBar {"
+        "  background: #ffffff;"
+        "  border: 1px solid #d5dde5;"
+        "  border-radius: 8px;"
+        "}"
+        "#quickerControlBar QLabel { color: #475569; }"));
+    QHBoxLayout *topRow = new QHBoxLayout(controlBar);
+    topRow->setContentsMargins(12, 10, 12, 10);
+    topRow->setSpacing(10);
     topRow->addWidget(chkEnabled);
-    topRow->addSpacing(16);
-    topRow->addWidget(new QLabel(QStringLiteral("输入设备:"), this));
+    topRow->addSpacing(8);
+    topRow->addWidget(new QLabel(QStringLiteral("输入设备:"), controlBar));
     topRow->addWidget(cmbDevice, 1);
     topRow->addWidget(btnRefreshDevices);
-    topRow->addSpacing(12);
     topRow->addWidget(lblStatus);
 
     tblBindings = new QTableWidget(0, 5, this);
@@ -64,19 +80,35 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     tblBindings->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     tblBindings->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     tblBindings->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblBindings->setSelectionMode(QAbstractItemView::SingleSelection);
     tblBindings->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tblBindings->setAlternatingRowColors(true);
+    tblBindings->setShowGrid(false);
+    tblBindings->verticalHeader()->setVisible(false);
+    tblBindings->setStyleSheet(QStringLiteral(
+        "QTableWidget { alternate-background-color: #f7fafc; }"
+        "QTableWidget::item { padding: 4px; }"));
 
-    btnAddBinding = new QPushButton(QStringLiteral("新增规则"), this);
+    btnAddBinding = new QPushButton(QStringLiteral("＋ 新增规则"), this);
+    btnAddBinding->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  background: #2f6fed; color: white; border: none; font-weight: 600;"
+        "  padding: 7px 16px; border-radius: 6px;"
+        "}"
+        "QPushButton:hover { background: #245bd1; }"
+        "QPushButton:pressed { background: #1e4dad; }"));
 
     QHBoxLayout *bindingButtonLayout = new QHBoxLayout();
+    bindingButtonLayout->setContentsMargins(0, 4, 0, 0);
     bindingButtonLayout->addWidget(btnAddBinding);
     bindingButtonLayout->addStretch();
 
     QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(8);
     layout->addWidget(header);
     layout->addWidget(hint);
-    layout->addLayout(topRow);
+    layout->addWidget(controlBar);
     layout->addLayout(bindingButtonLayout);
     layout->addWidget(tblBindings, 1);
 
@@ -338,11 +370,14 @@ void InputQuickerWidget::updateStatus(const QString &status)
 {
     lblStatus->setText(QStringLiteral("状态: %1").arg(status));
     if (status.startsWith(QStringLiteral("守护脚本运行中"))) {
-        lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #008000;"));
+        lblStatus->setStyleSheet(QStringLiteral(
+            "font-weight: 600; color: #166534; background: #dcfce7; border-radius: 4px; padding: 4px 10px;"));
     } else if (status.startsWith(QStringLiteral("已关闭"))) {
-        lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #777;"));
+        lblStatus->setStyleSheet(QStringLiteral(
+            "font-weight: 600; color: #475569; background: #e8eef5; border-radius: 4px; padding: 4px 10px;"));
     } else {
-        lblStatus->setStyleSheet(QStringLiteral("font-weight: bold; color: #d84315;"));
+        lblStatus->setStyleSheet(QStringLiteral(
+            "font-weight: 600; color: #9a3412; background: #ffedd5; border-radius: 4px; padding: 4px 10px;"));
     }
 }
 

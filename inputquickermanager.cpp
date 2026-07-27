@@ -1232,33 +1232,55 @@ bool InputQuickerManager::setDaemonAutostartInstalled(bool enabled)
     }
 
     const QString scriptPath = daemonScriptPath();
-    QFile file(desktopPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+    if (!QFileInfo::exists(scriptPath)) {
+        emit logMessage(QStringLiteral("[快捷助手] 找不到 daemon 脚本，无法写入开机自启动: %1").arg(scriptPath));
         return false;
     }
 
-    QTextStream out(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    out.setEncoding(QStringConverter::Utf8);
-#else
-    out.setCodec("UTF-8");
-#endif
-    out << "[Desktop Entry]\n";
-    out << "Type=Application\n";
-    out << "Version=1.0\n";
-    out << "Name=快捷助手输入守护\n";
-    out << "Comment=Mouse side buttons / bindings via input_quicker_daemon\n";
-    out << "Exec=env INPUT_QUICKER_CONFIG=\"" << configFilePath()
-        << "\" INPUT_QUICKER_PID=\"" << pidFilePath()
-        << "\" INPUT_QUICKER_LOG=\"" << logFilePath()
-        << "\" python3 \"" << scriptPath << "\"\n";
-    out << "Terminal=false\n";
-    out << "Categories=Utility;\n";
-    out << "X-GNOME-Autostart-enabled=true\n";
-    out << "X-GNOME-Autostart-Delay=5\n";
-    // Start after the session is ready; daemon itself also retries if the mouse
-    // is not present yet (Bluetooth / late USB).
-    out << "X-KDE-autostart-after=panel\n";
+    // Quote only when needed. Paths without spaces stay unquoted so desktop
+    // Exec parsers (not a shell) get clean argv for env VAR=value.
+    const auto quoteIfNeeded = [](const QString &value) -> QString {
+        if (value.contains(QLatin1Char(' ')) || value.contains(QLatin1Char('\t')))
+            return QStringLiteral("\"%1\"").arg(value);
+        return value;
+    };
+
+    // Write UTF-8 bytes directly. QTextStream << const char* treats Chinese as
+    // Latin-1 and double-encodes it (Name can contain NEL and break parsers).
+    const QByteArray content =
+        QByteArrayLiteral("[Desktop Entry]\n")
+        + QByteArrayLiteral("Type=Application\n")
+        + QByteArrayLiteral("Version=1.0\n")
+        + QStringLiteral("Name=快捷助手输入守护\n").toUtf8()
+        + QByteArrayLiteral("Comment=Mouse side buttons / bindings via input_quicker_daemon\n")
+        + QByteArrayLiteral("Exec=env INPUT_QUICKER_CONFIG=")
+        + quoteIfNeeded(configFilePath()).toUtf8()
+        + QByteArrayLiteral(" INPUT_QUICKER_PID=")
+        + quoteIfNeeded(pidFilePath()).toUtf8()
+        + QByteArrayLiteral(" INPUT_QUICKER_LOG=")
+        + quoteIfNeeded(logFilePath()).toUtf8()
+        + QByteArrayLiteral(" python3 ")
+        + quoteIfNeeded(scriptPath).toUtf8()
+        + '\n'
+        + QByteArrayLiteral("TryExec=") + scriptPath.toUtf8() + '\n'
+        + QByteArrayLiteral("Terminal=false\n")
+        + QByteArrayLiteral("NoDisplay=true\n")
+        + QByteArrayLiteral("Categories=Utility;\n")
+        + QByteArrayLiteral("StartupNotify=false\n")
+        + QByteArrayLiteral("X-GNOME-Autostart-enabled=true\n")
+        + QByteArrayLiteral("X-GNOME-Autostart-Delay=5\n")
+        // Start after the session is ready; daemon itself also retries if the mouse
+        // is not present yet (Bluetooth / late USB).
+        + QByteArrayLiteral("X-KDE-autostart-after=panel\n");
+
+    QFile file(desktopPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    if (file.write(content) != content.size()) {
+        return false;
+    }
+    file.close();
 
     daemonAutostartValue = true;
     writeJsonConfig();
