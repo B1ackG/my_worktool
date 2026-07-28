@@ -63,10 +63,13 @@
 #include <QProgressBar>
 #include <QStandardPaths>
 #include <QMenuBar>
+#include <QActionGroup>
+#include <QKeySequence>
 #include <QCoreApplication>
 #include <QSet>
 #include <QScrollArea>
 #include <QSplitter>
+#include <QSignalBlocker>
 
 namespace {
 
@@ -976,9 +979,7 @@ void MainWindow::createWidgets()
     btnGitAiCommitMsg->setToolTip(
         QStringLiteral("用 DeepSeek 根据未提交改动生成提交说明，填入输入框；可选择是否立即暂存并提交"));
     btnGitAiCommitMsg->setStyleSheet(QStringLiteral("background-color: #e8f5e9; font-weight: bold;"));
-    btnGitDeepSeekSettings = new QPushButton(QStringLiteral("DeepSeek 设置"));
-    btnGitDeepSeekSettings->setToolTip(QStringLiteral("配置 API Key / Base URL / 模型名（保存在本机，不进仓库）"));
-    
+
     cmbGitRemote = new QComboBox();
     cmbGitRemote->addItem("GitHub");
     cmbGitRemote->addItem("origin");
@@ -1023,23 +1024,11 @@ void MainWindow::createWidgets()
     spinGitDiffIntervalMinutes->setValue(5);
     spinGitDiffIntervalMinutes->setSuffix(" 分钟");
     spinGitDiffIntervalMinutes->setToolTip(QStringLiteral("可执行文件更新检查间隔"));
-    btnGitOpenIgnore = new QPushButton("管理 .gitignore");
-    btnGitGetSshKey = new QPushButton("获取SSH公钥"); 
-    btnGitGetSshKey->setToolTip("获取本机 SSH 公钥并复制到剪贴板，用于上传 GitHub");
-    btnGitGetSshKey->setStyleSheet("background-color: #fce4ec; font-weight: bold;"); // 浅粉色
 
     btnGitRemoteAdd = new QPushButton("链接远程仓库");
     btnGitRemoteAdd->setToolTip("为本地目录添加远程仓库链接 (git remote add)");
     btnGitRemoteAdd->setStyleSheet("background-color: #e8f5e9; font-weight: bold;"); // 浅绿色
 
-    btnGitCheckIgnore = new QPushButton("检查 .gitignore");
-    btnGitCheckIgnore->setToolTip("按所选 Qt/Keil 模板的完整规则与仓库 .gitignore 逐项对照，补全缺失或回写模板");
-
-    btnGitWorktreeManage = new QPushButton("Worktree 管理");
-    btnGitWorktreeManage->setToolTip(
-        "管理 Git 工作树：列表、创建向导、进入、迁回主目录、清理");
-    btnGitWorktreeManage->setStyleSheet("background-color: #e0f7fa; font-weight: bold;");
-    
     cmbGitHistory = new QComboBox();
     btnGitRefreshLog = new QPushButton("刷新历史");
     btnGitReset = new QPushButton("硬回退 (Reset)");
@@ -1048,16 +1037,6 @@ void MainWindow::createWidgets()
     btnGitSoftReset = new QPushButton("软回退 (SoftReset)");
     btnGitSoftReset->setStyleSheet("color: #FF8C00; font-weight: bold;");
     btnGitSoftReset->setToolTip("执行 git reset --soft HEAD^ (撤回最后一次提交，保留代码修改)");
-
-    btnGitCopyDaily = new QPushButton("复制到日报");
-    btnGitCopyDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
-    btnGitOpenDaily = new QPushButton("打开日报");
-    btnGitOpenDaily->setStyleSheet("background-color: #d1f2eb; font-weight: bold;");
-    btnGitOpenDaily->setToolTip("用系统默认程序打开今日日报文件");
-    btnGitOpenSkills = new QPushButton("打开 Skills");
-    btnGitOpenSkills->setStyleSheet("background-color: #e8eaf6; font-weight: bold;");
-    btnGitOpenSkills->setToolTip(
-        "查看并打开总 Skill（~/.cursor/skills）以及各记忆仓库的 .cursor/skills");
 
     txtScpTargetIp = new QLineEdit("192.168.1.245");
     txtScpTargetIp->setPlaceholderText("目标设备地址");
@@ -1372,7 +1351,6 @@ QWidget* MainWindow::createGitPage()
     layCommit->addWidget(new QLabel("提交信息:"));
     layCommit->addWidget(txtGitCommitMsg, 1);
     layCommit->addWidget(btnGitAiCommitMsg);
-    layCommit->addWidget(btnGitDeepSeekSettings);
     layOps->addLayout(layCommit);
     
     // Common actions — keep columns modest so narrow widths do not crush labels
@@ -1396,11 +1374,6 @@ QWidget* MainWindow::createGitPage()
     layBtns->addWidget(btnGitStash, 3, 0);
     layBtns->addWidget(btnGitStashPop, 3, 1);
     layBtns->addWidget(btnGitRemoteAdd, 3, 2);
-    layBtns->addWidget(btnGitWorktreeManage, 3, 3);
-
-    layBtns->addWidget(btnGitGetSshKey, 4, 0);
-    layBtns->addWidget(btnGitCheckIgnore, 4, 1);
-    layBtns->addWidget(btnGitOpenIgnore, 4, 2);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -1426,9 +1399,6 @@ QWidget* MainWindow::createGitPage()
     layHistBtns->addWidget(btnGitRefreshLog);
     layHistBtns->addWidget(btnGitSoftReset);
     layHistBtns->addWidget(btnGitReset);
-    layHistBtns->addWidget(btnGitCopyDaily);
-    layHistBtns->addWidget(btnGitOpenDaily);
-    layHistBtns->addWidget(btnGitOpenSkills);
     layHistBtns->addStretch();
     layOps->addLayout(layHistBtns);
 
@@ -1735,17 +1705,182 @@ QWidget* MainWindow::createSimulatorPage()
 
 void MainWindow::createMenus()
 {
+    // --- 文件 ---
+    QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
+
+    QAction *actOpenRepo = fileMenu->addAction(QStringLiteral("打开 Git 仓库…"));
+    actOpenRepo->setShortcut(QKeySequence::Open);
+    connect(actOpenRepo, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitSelectDirClicked();
+    });
+
+    QAction *actOpenDaily = fileMenu->addAction(QStringLiteral("打开日报"));
+    actOpenDaily->setToolTip(QStringLiteral("用系统默认程序打开今日日报文件"));
+    connect(actOpenDaily, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitOpenDailyReportClicked();
+    });
+
+    QAction *actCopyDaily = fileMenu->addAction(QStringLiteral("复制到日报"));
+    connect(actCopyDaily, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitCopyForDailyReportClicked();
+    });
+
+    fileMenu->addSeparator();
+
+    QMenu *regMapMenu = fileMenu->addMenu(QStringLiteral("寄存器映射"));
+    connect(regMapMenu->addAction(QStringLiteral("导出…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(0);
+        onExportRegisterMapClicked();
+    });
+    connect(regMapMenu->addAction(QStringLiteral("导入…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(0);
+        onImportRegisterMapClicked();
+    });
+    connect(regMapMenu->addAction(QStringLiteral("导入标准文件…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(0);
+        onImportStandardFileClicked();
+    });
+
+    QMenu *simSceneMenu = fileMenu->addMenu(QStringLiteral("模拟器场景"));
+    connect(simSceneMenu->addAction(QStringLiteral("保存寄存器快照…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(3);
+        onSimSaveSceneClicked();
+    });
+    connect(simSceneMenu->addAction(QStringLiteral("加载寄存器快照…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(3);
+        onSimLoadSceneClicked();
+    });
+    simSceneMenu->addSeparator();
+    connect(simSceneMenu->addAction(QStringLiteral("导出寄存器表 (CSV)…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(3);
+        onSimExportCsvClicked();
+    });
+    connect(simSceneMenu->addAction(QStringLiteral("导入寄存器表 (CSV)…")), &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(3);
+        onSimImportCsvClicked();
+    });
+
+    fileMenu->addSeparator();
+    QAction *actQuit = fileMenu->addAction(QStringLiteral("退出"));
+    actQuit->setShortcut(QKeySequence::Quit);
+    connect(actQuit, &QAction::triggered, this, &QWidget::close);
+
+    // --- 视图 ---
+    QMenu *viewMenu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
+    auto *pageGroup = new QActionGroup(this);
+    pageGroup->setExclusive(true);
+    const QStringList pageNames = {
+        QStringLiteral("Modbus TCP"),
+        QStringLiteral("串口调试"),
+        QStringLiteral("Git 工作流"),
+        QStringLiteral("从站模拟器"),
+        QStringLiteral("TCP 通讯"),
+        QStringLiteral("性能监控"),
+        QStringLiteral("快捷助手"),
+        QStringLiteral("生活办公"),
+    };
+    for (int i = 0; i < pageNames.size(); ++i) {
+        QAction *act = viewMenu->addAction(pageNames.at(i));
+        act->setCheckable(true);
+        act->setData(i);
+        pageGroup->addAction(act);
+        if (i == 0)
+            act->setChecked(true);
+        connect(act, &QAction::triggered, this, [this, i]() {
+            navWidget->setCurrentRow(i);
+        });
+    }
+    connect(navWidget, &QListWidget::currentRowChanged, this, [pageGroup](int row) {
+        for (QAction *a : pageGroup->actions()) {
+            if (a->data().toInt() == row) {
+                a->setChecked(true);
+                break;
+            }
+        }
+    });
+
+    // --- 工具 ---
+    QMenu *toolsMenu = menuBar()->addMenu(QStringLiteral("工具(&T)"));
+
+    QAction *actWorktree = toolsMenu->addAction(QStringLiteral("Worktree 管理…"));
+    connect(actWorktree, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitWorktreeManageClicked();
+    });
+
+    QAction *actOpenIgnore = toolsMenu->addAction(QStringLiteral("管理 .gitignore…"));
+    connect(actOpenIgnore, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitOpenIgnoreClicked();
+    });
+
+    QAction *actCheckIgnore = toolsMenu->addAction(QStringLiteral("检查 .gitignore…"));
+    connect(actCheckIgnore, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitCheckIgnoreClicked();
+    });
+
+    QAction *actSshKey = toolsMenu->addAction(QStringLiteral("获取 SSH 公钥"));
+    actSshKey->setToolTip(QStringLiteral("获取本机 SSH 公钥并复制到剪贴板，用于上传 GitHub"));
+    connect(actSshKey, &QAction::triggered, this, &MainWindow::onGitGetSshKeyClicked);
+
+    toolsMenu->addSeparator();
+
+    QAction *actSkills = toolsMenu->addAction(QStringLiteral("打开 Cursor Skills…"));
+    actSkills->setToolTip(
+        QStringLiteral("查看并打开总 Skill（~/.cursor/skills）以及各记忆仓库的 .cursor/skills"));
+    connect(actSkills, &QAction::triggered, this, &MainWindow::onGitOpenSkillsClicked);
+
+    toolsMenu->addSeparator();
+
+    QAction *actExeCheckNow = toolsMenu->addAction(QStringLiteral("立即检查可执行文件更新"));
+    connect(actExeCheckNow, &QAction::triggered, this, &MainWindow::onGitAutoDiffReminderTick);
+
+    // --- 设置 ---
     QMenu *settingsMenu = menuBar()->addMenu(QStringLiteral("设置(&S)"));
 
     actAutostart = settingsMenu->addAction(QStringLiteral("开机自启动"));
     actAutostart->setCheckable(true);
     connect(actAutostart, &QAction::toggled, this, &MainWindow::onAutostartToggled);
 
+    actExeReminder = settingsMenu->addAction(QStringLiteral("可执行文件更新提醒"));
+    actExeReminder->setCheckable(true);
+    actExeReminder->setToolTip(
+        QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒"));
+    connect(actExeReminder, &QAction::toggled, this, [this](bool checked) {
+        if (btnGitAutoDiffReminder && btnGitAutoDiffReminder->isChecked() != checked)
+            btnGitAutoDiffReminder->setChecked(checked);
+    });
+
     settingsMenu->addSeparator();
+
+    actDeepSeekSettings = settingsMenu->addAction(QStringLiteral("DeepSeek 设置…"));
+    actDeepSeekSettings->setToolTip(QStringLiteral("配置 API Key / Base URL / 模型名（保存在本机，不进仓库）"));
+    connect(actDeepSeekSettings, &QAction::triggered, this, &MainWindow::onGitDeepSeekSettingsClicked);
+
     QAction *actPlatform = settingsMenu->addAction(QStringLiteral("运行平台…"));
     connect(actPlatform, &QAction::triggered, this, &MainWindow::showPlatformModeDialog);
+
     QAction *actFloatOrder = settingsMenu->addAction(QStringLiteral("Modbus 浮点字序…"));
     connect(actFloatOrder, &QAction::triggered, this, &MainWindow::showModbusFloatOrderDialog);
+
+    // --- 帮助 ---
+    QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
+    QAction *actAbout = helpMenu->addAction(QStringLiteral("关于…"));
+    connect(actAbout, &QAction::triggered, this, [this]() {
+        QMessageBox::about(
+            this,
+            QStringLiteral("关于"),
+            QStringLiteral("<h3>%1</h3>"
+                           "<p>集成 Modbus TCP / 串口调试 / Git 工作流 / 从站模拟器 / "
+                           "TCP 通讯 / 性能监控 / 快捷助手 / 生活办公。</p>"
+                           "<p>组织：%2</p>")
+                .arg(QApplication::applicationDisplayName(),
+                     QApplication::organizationName()));
+    });
 
     syncAutostartActionState();
 }
@@ -2062,17 +2197,12 @@ void MainWindow::createConnections()
     connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
     connect(btnGitCommit, &QPushButton::clicked, this, &MainWindow::onGitCommitClicked);
     connect(btnGitAiCommitMsg, &QPushButton::clicked, this, &MainWindow::onGitAiCommitMsgClicked);
-    connect(btnGitDeepSeekSettings, &QPushButton::clicked, this, &MainWindow::onGitDeepSeekSettingsClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
     connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
     connect(btnGitRebase, &QPushButton::clicked, this, &MainWindow::onGitRebaseClicked);
     connect(btnGitStatus, &QPushButton::clicked, this, &MainWindow::onGitStatusClicked);
-    connect(btnGitOpenIgnore, &QPushButton::clicked, this, &MainWindow::onGitOpenIgnoreClicked);
-    connect(btnGitGetSshKey, &QPushButton::clicked, this, &MainWindow::onGitGetSshKeyClicked);
     connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
-    connect(btnGitWorktreeManage, &QPushButton::clicked, this, &MainWindow::onGitWorktreeManageClicked);
-    connect(btnGitCheckIgnore, &QPushButton::clicked, this, &MainWindow::onGitCheckIgnoreClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
@@ -2094,9 +2224,6 @@ void MainWindow::createConnections()
     });
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
-    connect(btnGitCopyDaily, &QPushButton::clicked, this, &MainWindow::onGitCopyForDailyReportClicked);
-    connect(btnGitOpenDaily, &QPushButton::clicked, this, &MainWindow::onGitOpenDailyReportClicked);
-    connect(btnGitOpenSkills, &QPushButton::clicked, this, &MainWindow::onGitOpenSkillsClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
     connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
     connect(btnApplyThreshold, &QPushButton::clicked, this, [this](){
@@ -5125,6 +5252,11 @@ void MainWindow::onGitAutoDiffReminderToggled(bool checked) {
     gitDiffReminderEnabled = checked;
     saveGitDiffReminderSettings();
 
+    if (actExeReminder) {
+        QSignalBlocker blocker(actExeReminder);
+        actExeReminder->setChecked(checked);
+    }
+
     if (checked) {
         btnGitAutoDiffReminder->setText(QStringLiteral("关闭可执行文件提醒"));
         gitDiffReminderTimer->setInterval(spinGitDiffIntervalMinutes->value() * 60 * 1000);
@@ -5739,8 +5871,8 @@ void MainWindow::setGitAiCommitBusy(bool busy)
 {
     if (btnGitAiCommitMsg)
         btnGitAiCommitMsg->setEnabled(!busy);
-    if (btnGitDeepSeekSettings)
-        btnGitDeepSeekSettings->setEnabled(!busy);
+    if (actDeepSeekSettings)
+        actDeepSeekSettings->setEnabled(!busy);
     if (btnGitAiCommitMsg) {
         btnGitAiCommitMsg->setText(busy ? QStringLiteral("AI 生成中…")
                                         : QStringLiteral("AI 整理提交说明"));
@@ -7202,6 +7334,11 @@ void MainWindow::applyGitDiffReminderEnabled(bool enabled) {
         btnGitAutoDiffReminder->setText(enabled ? QStringLiteral("关闭可执行文件提醒")
                                                 : QStringLiteral("开启可执行文件提醒"));
         btnGitAutoDiffReminder->blockSignals(false);
+    }
+
+    if (actExeReminder) {
+        QSignalBlocker blocker(actExeReminder);
+        actExeReminder->setChecked(enabled);
     }
 
     if (!gitDiffReminderTimer) {

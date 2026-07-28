@@ -278,6 +278,8 @@ private:
 
     // --- Main UI Structure ---
     QAction *actAutostart = nullptr;
+    QAction *actExeReminder = nullptr;
+    QAction *actDeepSeekSettings = nullptr;
     QWidget *centralWidget;
     QHBoxLayout *mainLayout; // Horizontal: Nav + Stack
     QListWidget *navWidget;
@@ -415,7 +417,6 @@ private:
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
     QPushButton *btnGitAiCommitMsg = nullptr;
-    QPushButton *btnGitDeepSeekSettings = nullptr;
     DeepSeekClient *deepSeekClient = nullptr;
     bool gitAiCommitPendingConfirm = false;
     QPushButton *btnGitAdd;
@@ -437,18 +438,11 @@ private:
     QPushButton *btnGitAutoDiffReminder;
     QPushButton *btnGitExeReminderCheckNow = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
-    QPushButton *btnGitOpenIgnore;
-    QPushButton *btnGitGetSshKey; // 新增
     QPushButton *btnGitRemoteAdd; // 新增
-    QPushButton *btnGitWorktreeManage;
-    QPushButton *btnGitCheckIgnore;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
     QPushButton *btnGitSoftReset; // <--- 新增
-    QPushButton *btnGitCopyDaily;
-    QPushButton *btnGitOpenDaily;
-    QPushButton *btnGitOpenSkills;
     QTextEdit *txtGitLog;
     QLineEdit *txtGitCmdInput = nullptr;
     QLabel *lblGitConsoleCwd = nullptr;
