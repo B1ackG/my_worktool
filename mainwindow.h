@@ -195,6 +195,7 @@ private slots:
     void onGitDeepSeekSettingsClicked();
     void onGitPushClicked();
     void onGitPullClicked();
+    void onGitSmartSyncClicked();
     void onGitMergeClicked();
     void onGitRebaseClicked();
     void onGitStatusClicked();
@@ -202,11 +203,14 @@ private slots:
     void onGitFetchClicked();
     void onGitStashClicked();
     void onGitStashPopClicked();
+    void onGitStashListClicked();
     void onGitAutoDiffReminderToggled(bool checked);
     void onGitAutoDiffReminderTick();
     void onGitOpenIgnoreClicked();
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
     void onGitRemoteAddClicked(); // 新增：链接远程仓库
+    void onGitRemoteProtocolClicked();
+    void onGitQuickBranchSwitchClicked();
     void onGitCheckIgnoreClicked();
     void onGitWorktreeManageClicked();
     void onGitRefreshLogClicked();
@@ -417,6 +421,7 @@ private:
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
+    QPushButton *btnGitQuickBranchSwitch = nullptr;
     QPushButton *btnGitSyncRemote;   // 同步远程分支
     QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
@@ -431,6 +436,7 @@ private:
     QPushButton *btnGitPush;
     QComboBox *cmbGitRemote; // Added for remote selection
     QPushButton *btnGitPull;
+    QPushButton *btnGitSmartSync = nullptr;
     QPushButton *btnGitMerge;
     QPushButton *btnGitRebase;
     QPushButton *btnGitStatus;
@@ -444,11 +450,12 @@ private:
     QProgressBar *barGitNetworkBusy = nullptr;
     QPushButton *btnGitCancelNetwork = nullptr;
     QPushButton *btnGitStash;
-    QPushButton *btnGitStashPop;
+    QPushButton *btnGitStashPop = nullptr; // 已并入 Stash 菜单
     QPushButton *btnGitAutoDiffReminder;
     QPushButton *btnGitExeReminderCheckNow = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
     QPushButton *btnGitRemoteAdd; // 新增
+    QPushButton *btnGitRemoteProtocol = nullptr;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;

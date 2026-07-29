@@ -47,6 +47,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QListWidget>
 #include <QUuid>
 #include <QFileInfo>
 #include <QNetworkAccessManager>
@@ -77,6 +78,46 @@ namespace {
 
 constexpr int kGitGoalLinesPerStar = 5000;
 constexpr int kGitGoalMaxAutoStars = 10;
+
+/** Convert git remote URL between SSH and HTTPS. Empty if unrecognized. */
+QString convertGitRemoteUrlProtocol(const QString &urlIn)
+{
+    const QString url = urlIn.trimmed();
+    if (url.isEmpty()) {
+        return {};
+    }
+
+    // git@host:path[/...](.git)?
+    static const QRegularExpression scpRe(
+        QStringLiteral(R"(^git@([^:]+):(.+)$)"));
+    // ssh://git@host[:port]/path
+    static const QRegularExpression sshRe(
+        QStringLiteral(R"(^ssh://git@([^/]+)/(.+)$)"));
+    // https://host/path or http://host/path
+    static const QRegularExpression httpsRe(
+        QStringLiteral(R"(^https?://([^/]+)/(.+)$)"),
+        QRegularExpression::CaseInsensitiveOption);
+
+    QRegularExpressionMatch m = scpRe.match(url);
+    if (m.hasMatch()) {
+        return QStringLiteral("https://%1/%2").arg(m.captured(1), m.captured(2));
+    }
+    m = sshRe.match(url);
+    if (m.hasMatch()) {
+        QString host = m.captured(1);
+        // drop optional :port for github-style HTTPS
+        const int colon = host.indexOf(QLatin1Char(':'));
+        if (colon > 0) {
+            host = host.left(colon);
+        }
+        return QStringLiteral("https://%1/%2").arg(host, m.captured(2));
+    }
+    m = httpsRe.match(url);
+    if (m.hasMatch()) {
+        return QStringLiteral("git@%1:%2").arg(m.captured(1), m.captured(2));
+    }
+    return {};
+}
 
 bool finishGitProcess(QProcess &process, int timeoutMs = -1)
 {
@@ -972,6 +1013,10 @@ void MainWindow::createWidgets()
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
     btnGitCheckout = new QPushButton("切换分支");
+    btnGitQuickBranchSwitch = new QPushButton(QStringLiteral("快速切换…"));
+    btnGitQuickBranchSwitch->setToolTip(
+        QStringLiteral("可搜索本地/远程分支，并显示最近提交信息，一键切换"));
+    btnGitQuickBranchSwitch->setStyleSheet(QStringLiteral("background-color: #e8eaf6; font-weight: bold;"));
     btnGitSyncRemote = new QPushButton("同步远程");
     btnGitSyncRemote->setToolTip("将选中的远程分支同步并签出到本地");
     btnGitSyncRemote->setStyleSheet("background-color: #e3f2fd; font-weight: bold;");
@@ -998,6 +1043,11 @@ void MainWindow::createWidgets()
     btnGitCommit = new QPushButton("git commit (提交)");
     btnGitPush = new QPushButton("git push (推送)");
     btnGitPull = new QPushButton("git pull (拉取)");
+    btnGitSmartSync = new QPushButton(QStringLiteral("智能同步"));
+    btnGitSmartSync->setToolTip(
+        QStringLiteral("有本地修改时先 stash，再 pull --rebase，然后 stash pop，最后 push。"
+                       "成功只写日志；失败时弹窗。用于处理偏离分支 / non-fast-forward。"));
+    btnGitSmartSync->setStyleSheet(QStringLiteral("background-color: #c8e6c9; font-weight: bold;"));
     btnGitMerge = new QPushButton("git merge (合并)");
     btnGitRebase = new QPushButton("git rebase (变基)");
     btnGitRebase->setToolTip("将当前分支的提交重新应用到所选分支之上（会改写当前分支历史）");
@@ -1031,8 +1081,17 @@ void MainWindow::createWidgets()
     btnGitCancelNetwork = new QPushButton(QStringLiteral("取消通讯"));
     btnGitCancelNetwork->setEnabled(false);
     btnGitCancelNetwork->setToolTip(QStringLiteral("中断当前进行中的 git 远程通讯（fetch/pull/push）"));
-    btnGitStash = new QPushButton("git stash (临时存档)");
-    btnGitStashPop = new QPushButton("git stash pop (恢复临存)");
+    btnGitStash = new QPushButton(QStringLiteral("Stash 操作 ▾"));
+    btnGitStash->setToolTip(QStringLiteral("储藏 / 恢复 / 列出所有储藏"));
+    btnGitStash->setStyleSheet(QStringLiteral("background-color: #f3e5f5; font-weight: bold;"));
+    {
+        auto *stashMenu = new QMenu(btnGitStash);
+        stashMenu->addAction(QStringLiteral("储藏（带时间戳）"), this, &MainWindow::onGitStashClicked);
+        stashMenu->addAction(QStringLiteral("恢复最近（stash pop）"), this, &MainWindow::onGitStashPopClicked);
+        stashMenu->addAction(QStringLiteral("列出并选择…"), this, &MainWindow::onGitStashListClicked);
+        btnGitStash->setMenu(stashMenu);
+    }
+    btnGitStashPop = nullptr; // 已并入 Stash 菜单
     btnGitAutoDiffReminder = new QPushButton(QStringLiteral("开启可执行文件提醒"));
     btnGitAutoDiffReminder->setCheckable(true);
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
@@ -1049,6 +1108,10 @@ void MainWindow::createWidgets()
     btnGitRemoteAdd = new QPushButton("链接远程仓库");
     btnGitRemoteAdd->setToolTip("为本地目录添加远程仓库链接 (git remote add)");
     btnGitRemoteAdd->setStyleSheet("background-color: #e8f5e9; font-weight: bold;"); // 浅绿色
+    btnGitRemoteProtocol = new QPushButton(QStringLiteral("切换 SSH/HTTPS"));
+    btnGitRemoteProtocol->setToolTip(
+        QStringLiteral("将当前远程 URL 在 SSH 与 HTTPS 之间切换，并可测试连通性"));
+    btnGitRemoteProtocol->setStyleSheet(QStringLiteral("background-color: #e0f7fa; font-weight: bold;"));
 
     cmbGitHistory = new QComboBox();
     btnGitRefreshLog = new QPushButton("刷新历史");
@@ -1361,6 +1424,7 @@ QWidget* MainWindow::createGitPage()
 
     QHBoxLayout *layBranchBtns = new QHBoxLayout();
     layBranchBtns->addWidget(btnGitRefreshBranches);
+    layBranchBtns->addWidget(btnGitQuickBranchSwitch);
     layBranchBtns->addWidget(btnGitCheckout);
     layBranchBtns->addWidget(btnGitSyncRemote);
     layBranchBtns->addWidget(btnGitCreateBranch);
@@ -1387,15 +1451,16 @@ QWidget* MainWindow::createGitPage()
     layBtns->addWidget(btnGitFetch, 1, 0);
     layBtns->addWidget(btnGitPush, 1, 1);
     layBtns->addWidget(btnGitPull, 1, 2);
-    layBtns->addWidget(btnGitMerge, 1, 3);
+    layBtns->addWidget(btnGitSmartSync, 1, 3);
 
     layBtns->addWidget(new QLabel("远程仓库:"), 2, 0);
-    layBtns->addWidget(cmbGitRemote, 2, 1, 1, 2);
+    layBtns->addWidget(cmbGitRemote, 2, 1);
+    layBtns->addWidget(btnGitMerge, 2, 2);
     layBtns->addWidget(btnGitRebase, 2, 3);
 
     layBtns->addWidget(btnGitStash, 3, 0);
-    layBtns->addWidget(btnGitStashPop, 3, 1);
-    layBtns->addWidget(btnGitRemoteAdd, 3, 2);
+    layBtns->addWidget(btnGitRemoteAdd, 3, 1);
+    layBtns->addWidget(btnGitRemoteProtocol, 3, 2);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -2217,6 +2282,7 @@ void MainWindow::createConnections()
     connect(btnGitRefreshBranches, &QPushButton::clicked, this, [this]() {
         onGitRefreshBranchesClicked(false);
     });
+    connect(btnGitQuickBranchSwitch, &QPushButton::clicked, this, &MainWindow::onGitQuickBranchSwitchClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
     connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
     connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
@@ -2227,10 +2293,12 @@ void MainWindow::createConnections()
     connect(btnGitAskDeepSeek, &QPushButton::clicked, this, &MainWindow::onGitAskDeepSeekClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
     connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
+    connect(btnGitSmartSync, &QPushButton::clicked, this, &MainWindow::onGitSmartSyncClicked);
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
     connect(btnGitRebase, &QPushButton::clicked, this, &MainWindow::onGitRebaseClicked);
     connect(btnGitStatus, &QPushButton::clicked, this, &MainWindow::onGitStatusClicked);
     connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
+    connect(btnGitRemoteProtocol, &QPushButton::clicked, this, &MainWindow::onGitRemoteProtocolClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
@@ -2243,8 +2311,7 @@ void MainWindow::createConnections()
         gitPendingStatusTimer->start();
     }
     connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
-    connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
-    connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
+    // Stash actions are wired via btnGitStash->menu()
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
     connect(btnGitExeReminderCheckNow, &QPushButton::clicked, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
@@ -4429,6 +4496,8 @@ void MainWindow::setGitNetworkBusy(bool busy, const QString &statusText)
     if (btnGitFetch) btnGitFetch->setEnabled(enableNetBtns);
     if (btnGitPush) btnGitPush->setEnabled(enableNetBtns);
     if (btnGitPull) btnGitPull->setEnabled(enableNetBtns);
+    if (btnGitSmartSync) btnGitSmartSync->setEnabled(enableNetBtns);
+    if (btnGitRemoteProtocol) btnGitRemoteProtocol->setEnabled(enableNetBtns);
 }
 
 void MainWindow::onGitCancelNetworkClicked()
@@ -5341,11 +5410,412 @@ void MainWindow::onGitFetchClicked() {
 }
 
 void MainWindow::onGitStashClicked() {
-    runGitCommand(QStringList() << "stash");
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    const QString message = QStringLiteral("临时保存 %1").arg(stamp);
+    if (runGitCommand(QStringList() << QStringLiteral("stash") << QStringLiteral("push")
+                                    << QStringLiteral("-u") << QStringLiteral("-m") << message)) {
+        txtGitLog->append(QStringLiteral("<font color='green'>[Stash] 已储藏: %1</font>").arg(message));
+    }
 }
 
 void MainWindow::onGitStashPopClicked() {
-    runGitCommand(QStringList() << "stash" << "pop");
+    if (runGitCommand(QStringList() << QStringLiteral("stash") << QStringLiteral("pop"))) {
+        txtGitLog->append(QStringLiteral("<font color='green'>[Stash] 已恢复最近一次储藏。</font>"));
+    }
+}
+
+void MainWindow::onGitStashListClicked()
+{
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Stash"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return;
+    }
+
+    QString out;
+    QString err;
+    if (!captureGitOutput(workDir,
+                          QStringList() << QStringLiteral("stash") << QStringLiteral("list"), &out, &err)) {
+        QMessageBox::warning(this, QStringLiteral("Stash"),
+                             QStringLiteral("无法列出储藏。\n%1").arg(err.trimmed()));
+        return;
+    }
+
+    const QStringList lines = out.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (lines.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Stash"), QStringLiteral("当前没有储藏记录。"));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("选择要恢复的储藏"));
+    dlg.resize(560, 360);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(QStringLiteral("双击或选中后点「应用」执行 stash apply（保留储藏记录）：")));
+    auto *list = new QListWidget(&dlg);
+    for (const QString &line : lines) {
+        list->addItem(line.trimmed());
+    }
+    list->setCurrentRow(0);
+    layout->addWidget(list, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("应用"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+
+    if (dlg.exec() != QDialog::Accepted || !list->currentItem()) {
+        return;
+    }
+
+    const QString selected = list->currentItem()->text();
+    // "stash@{0}: ..." → stash@{0}
+    const int colon = selected.indexOf(QLatin1Char(':'));
+    const QString ref = (colon > 0) ? selected.left(colon).trimmed() : selected.trimmed();
+    if (ref.isEmpty()) {
+        return;
+    }
+
+    if (runGitCommand(QStringList() << QStringLiteral("stash") << QStringLiteral("apply") << ref)) {
+        txtGitLog->append(QStringLiteral("<font color='green'>[Stash] 已应用: %1</font>").arg(ref));
+    } else {
+        QMessageBox::warning(this, QStringLiteral("Stash"),
+                             QStringLiteral("应用储藏失败，请查看下方 Git 日志（可能有冲突）。"));
+    }
+}
+
+void MainWindow::onGitSmartSyncClicked()
+{
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("智能同步"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return;
+    }
+    if (gitNetworkBusy) {
+        QMessageBox::information(this, QStringLiteral("智能同步"),
+                                 QStringLiteral("已有远程通讯进行中，请稍后再试或点「取消通讯」。"));
+        return;
+    }
+
+    const QString branch = gitCheckedOutBranch(workDir);
+    if (branch.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("智能同步"),
+                             QStringLiteral("无法识别当前检出的分支。"));
+        return;
+    }
+
+    QString remote = cmbGitRemote ? cmbGitRemote->currentText().trimmed() : QString();
+    if (remote.isEmpty()) {
+        remote = QStringLiteral("origin");
+    }
+
+    bool didStash = false;
+    if (gitHasUncommittedChanges(workDir)) {
+        const QString stamp =
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        const QString stashMsg = QStringLiteral("智能同步自动储藏 %1").arg(stamp);
+        txtGitLog->append(QStringLiteral("<font color='cyan'>[智能同步] 检测到本地修改，先 stash…</font>"));
+        if (!runGitCommand(QStringList() << QStringLiteral("stash") << QStringLiteral("push")
+                                         << QStringLiteral("-u") << QStringLiteral("-m") << stashMsg)) {
+            QMessageBox::critical(this, QStringLiteral("智能同步失败"),
+                                  QStringLiteral("自动储藏失败，已中止。请先手动处理本地修改。"));
+            return;
+        }
+        didStash = true;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='cyan'>[智能同步] pull --rebase %1 %2 …</font>")
+                          .arg(remote, branch));
+    gitNetworkSuppressRetry = true;
+    runGitNetworkCommand(
+        QStringList() << QStringLiteral("pull") << QStringLiteral("--rebase") << remote << branch, 90000,
+        [this, didStash, remote, branch](bool pullOk) {
+            if (!pullOk) {
+                QString detail = QStringLiteral("pull --rebase 失败。");
+                if (didStash) {
+                    detail += QStringLiteral("\n\n本地修改仍在 stash 中，可用「Stash 操作 → 恢复最近」取回。");
+                }
+                QMessageBox::warning(this, QStringLiteral("智能同步失败"), detail);
+                return;
+            }
+
+            if (didStash) {
+                txtGitLog->append(QStringLiteral("<font color='cyan'>[智能同步] stash pop …</font>"));
+                if (!runGitCommand(QStringList() << QStringLiteral("stash") << QStringLiteral("pop"))) {
+                    QMessageBox::warning(
+                        this, QStringLiteral("智能同步部分成功"),
+                        QStringLiteral("rebase 已完成，但 stash pop 失败（可能有冲突）。\n"
+                                       "请先解决冲突，再手动 push。未执行推送。"));
+                    refreshGitBranchesLocal();
+                    return;
+                }
+            }
+
+            txtGitLog->append(QStringLiteral("<font color='cyan'>[智能同步] push %1 %2 …</font>")
+                                  .arg(remote, branch));
+            gitNetworkSuppressRetry = true;
+            runGitNetworkCommand(
+                QStringList() << QStringLiteral("push") << QStringLiteral("-u") << remote << branch, 60000,
+                [this](bool pushOk) {
+                    if (pushOk) {
+                        txtGitLog->append(
+                            QStringLiteral("<font color='green'>[智能同步] 完成：rebase + push 成功。</font>"));
+                        refreshGitBranchesLocal();
+                    } else {
+                        QMessageBox::warning(this, QStringLiteral("智能同步失败"),
+                                             QStringLiteral("pull --rebase 已成功，但 push 失败。\n"
+                                                            "请检查网络/权限后手动推送。"));
+                    }
+                });
+        });
+}
+
+void MainWindow::onGitRemoteProtocolClicked()
+{
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("切换协议"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return;
+    }
+
+    QString remote = cmbGitRemote ? cmbGitRemote->currentText().trimmed() : QString();
+    if (remote.isEmpty()) {
+        remote = QStringLiteral("origin");
+    }
+
+    QString currentUrl;
+    QString err;
+    if (!captureGitOutput(workDir,
+                          QStringList() << QStringLiteral("remote") << QStringLiteral("get-url") << remote,
+                          &currentUrl, &err)
+        || currentUrl.trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("切换协议"),
+                             QStringLiteral("无法读取远程「%1」的 URL。\n%2")
+                                 .arg(remote, err.trimmed().isEmpty() ? currentUrl : err.trimmed()));
+        return;
+    }
+    currentUrl = currentUrl.trimmed();
+
+    const QString newUrl = convertGitRemoteUrlProtocol(currentUrl);
+    if (newUrl.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("切换协议"),
+                             QStringLiteral("无法识别当前 URL 格式，未修改：\n%1").arg(currentUrl));
+        return;
+    }
+
+    const QString fromProto = currentUrl.startsWith(QStringLiteral("http"), Qt::CaseInsensitive)
+                                  ? QStringLiteral("HTTPS")
+                                  : QStringLiteral("SSH");
+    const QString toProto = newUrl.startsWith(QStringLiteral("http"), Qt::CaseInsensitive)
+                                ? QStringLiteral("HTTPS")
+                                : QStringLiteral("SSH");
+
+    const auto reply = QMessageBox::question(
+        this, QStringLiteral("切换远程协议"),
+        QStringLiteral("远程「%1」将从 %2 切换为 %3：\n\n当前:\n%4\n\n改为:\n%5\n\n是否继续？")
+            .arg(remote, fromProto, toProto, currentUrl, newUrl),
+        QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes) {
+        return;
+    }
+
+    if (!runGitCommand(QStringList() << QStringLiteral("remote") << QStringLiteral("set-url") << remote
+                                     << newUrl)) {
+        QMessageBox::critical(this, QStringLiteral("切换协议失败"),
+                              QStringLiteral("git remote set-url 失败，请查看日志。"));
+        return;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='green'>[Remote] %1: %2 → %3</font>")
+                          .arg(remote, currentUrl, newUrl));
+
+    const auto testReply = QMessageBox::question(
+        this, QStringLiteral("测试连通性"),
+        QStringLiteral("协议已切换。是否立即用 git ls-remote 测试连通性？"),
+        QMessageBox::Yes | QMessageBox::No);
+    if (testReply != QMessageBox::Yes) {
+        return;
+    }
+
+    gitNetworkSuppressRetry = true;
+    runGitNetworkCommand(
+        QStringList() << QStringLiteral("ls-remote") << QStringLiteral("--heads") << remote, 30000,
+        [this, remote, newUrl](bool ok) {
+            if (ok) {
+                txtGitLog->append(
+                    QStringLiteral("<font color='green'>[Remote] 连通性正常：%1 (%2)</font>")
+                        .arg(remote, newUrl));
+                QMessageBox::information(this, QStringLiteral("连通性"),
+                                         QStringLiteral("远程「%1」连通正常。").arg(remote));
+            } else {
+                QMessageBox::warning(this, QStringLiteral("连通性"),
+                                     QStringLiteral("远程「%1」测试失败。\n"
+                                                    "若是端口/代理问题，可再点一次「切换 SSH/HTTPS」切回。")
+                                         .arg(remote));
+            }
+        });
+}
+
+void MainWindow::onGitQuickBranchSwitchClicked()
+{
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("快速切换"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return;
+    }
+
+    QString out;
+    QString err;
+    if (!captureGitOutput(
+            workDir,
+            QStringList() << QStringLiteral("for-each-ref")
+                          << QStringLiteral("--sort=-committerdate")
+                          << QStringLiteral(
+                                 "--format=%(refname)\t%(refname:short)\t%(objectname:short)\t%(contents:subject)")
+                          << QStringLiteral("refs/heads/") << QStringLiteral("refs/remotes/"),
+            &out, &err)) {
+        QMessageBox::warning(this, QStringLiteral("快速切换"),
+                             QStringLiteral("无法读取分支列表。\n%1").arg(err.trimmed()));
+        return;
+    }
+
+    struct BranchRow {
+        QString name;
+        QString tip;
+        QString subject;
+        bool isRemote = false;
+    };
+    QVector<BranchRow> rows;
+    const QString current = gitCheckedOutBranch(workDir);
+    for (const QString &raw : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        const QStringList parts = raw.split(QLatin1Char('\t'));
+        if (parts.size() < 2) {
+            continue;
+        }
+        const QString fullRef = parts.value(0).trimmed();
+        BranchRow row;
+        row.name = parts.value(1).trimmed();
+        row.tip = parts.value(2).trimmed();
+        row.subject = parts.value(3).trimmed();
+        if (row.name.isEmpty() || row.name.endsWith(QStringLiteral("/HEAD"))
+            || fullRef.endsWith(QStringLiteral("/HEAD"))) {
+            continue;
+        }
+        row.isRemote = fullRef.startsWith(QStringLiteral("refs/remotes/"));
+        rows.append(row);
+    }
+
+    if (rows.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("快速切换"), QStringLiteral("没有可切换的分支。"));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("快速切换分支"));
+    dlg.resize(640, 420);
+    auto *layout = new QVBoxLayout(&dlg);
+    auto *filter = new QLineEdit(&dlg);
+    filter->setPlaceholderText(QStringLiteral("键入过滤分支名…"));
+    layout->addWidget(filter);
+    auto *list = new QListWidget(&dlg);
+    layout->addWidget(list, 1);
+
+    auto refill = [list, &rows, current](const QString &needle) {
+        list->clear();
+        const QString n = needle.trimmed();
+        for (const BranchRow &row : rows) {
+            if (!n.isEmpty() && !row.name.contains(n, Qt::CaseInsensitive)
+                && !row.subject.contains(n, Qt::CaseInsensitive)) {
+                continue;
+            }
+            const QString label =
+                QStringLiteral("%1    %2  %3")
+                    .arg(row.name, -28)
+                    .arg(row.tip, -8)
+                    .arg(row.subject);
+            auto *item = new QListWidgetItem(label);
+            item->setData(Qt::UserRole, row.name);
+            item->setData(Qt::UserRole + 1, row.isRemote);
+            if (row.name == current) {
+                item->setForeground(QBrush(QColor(QStringLiteral("#2e7d32"))));
+                QFont f = item->font();
+                f.setBold(true);
+                item->setFont(f);
+            } else if (row.isRemote) {
+                item->setForeground(QBrush(Qt::darkRed));
+            }
+            list->addItem(item);
+        }
+    };
+    refill(QString());
+    connect(filter, &QLineEdit::textChanged, &dlg, [refill](const QString &text) { refill(text); });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("切换"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+
+    if (dlg.exec() != QDialog::Accepted || !list->currentItem()) {
+        return;
+    }
+
+    QString branch = list->currentItem()->data(Qt::UserRole).toString().trimmed();
+    const bool isRemote = list->currentItem()->data(Qt::UserRole + 1).toBool();
+    if (branch.isEmpty()) {
+        return;
+    }
+    if (branch == current) {
+        QMessageBox::information(this, QStringLiteral("快速切换"),
+                                 QStringLiteral("已经在分支 [%1] 上。").arg(current));
+        return;
+    }
+
+    if (isRemote) {
+        const int slash = branch.indexOf(QLatin1Char('/'));
+        if (slash <= 0 || slash + 1 >= branch.size()) {
+            QMessageBox::warning(this, QStringLiteral("快速切换"),
+                                 QStringLiteral("无法解析远程分支名: %1").arg(branch));
+            return;
+        }
+        const QString localName = branch.mid(slash + 1);
+        QString localOut;
+        const bool hasLocal =
+            captureGitOutput(workDir,
+                             QStringList() << QStringLiteral("show-ref") << QStringLiteral("--verify")
+                                           << QStringLiteral("--quiet")
+                                           << (QStringLiteral("refs/heads/") + localName),
+                             &localOut);
+        if (hasLocal) {
+            branch = localName;
+        } else {
+            if (!runGitCommand(QStringList() << QStringLiteral("checkout") << QStringLiteral("-b")
+                                             << localName << QStringLiteral("--track") << branch)) {
+                QMessageBox::warning(this, QStringLiteral("快速切换"),
+                                     QStringLiteral("跟踪签出远程分支失败，请查看日志。"));
+                return;
+            }
+            refreshGitBranchesLocal();
+            return;
+        }
+    }
+
+    if (!runGitCommand(QStringList() << QStringLiteral("checkout") << branch)) {
+        QMessageBox::warning(this, QStringLiteral("快速切换"),
+                             QStringLiteral("切换失败（可能有未提交修改）。可用「智能同步」或 Stash 后再试。"));
+        return;
+    }
+    refreshGitBranchesLocal();
 }
 
 QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool allowRunningApp) const
