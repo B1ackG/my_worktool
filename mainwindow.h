@@ -224,6 +224,8 @@ private slots:
     void onDeepSeekCommitMsgFailed(const QString &error);
     void onDeepSeekGitHelpReady(const QString &content);
     void onDeepSeekGitHelpFailed(const QString &error);
+    void onDeepSeekDailyReportReady(const QString &content);
+    void onDeepSeekDailyReportFailed(const QString &error);
     void onGitRemoveHistoryClicked();
     void onGitConsoleCommandSubmitted();
     void onGitDirChanged();
@@ -430,6 +432,8 @@ private:
     QPushButton *btnGitAskDeepSeek = nullptr;
     DeepSeekClient *deepSeekClient = nullptr;
     DeepSeekClient *deepSeekHelpClient = nullptr;
+    DeepSeekClient *deepSeekDailyReportClient = nullptr;
+    QString dailyReportDraftPending;
     bool gitAiCommitPendingConfirm = false;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
@@ -661,6 +665,8 @@ private:
     QStringList fetchTodayCommitSubjects(const QString &workDir) const;
     bool isGitRepository(const QString &workDir) const;
     QString buildDailyReportContent(QString *errorOut = nullptr, bool showUiWarnings = true);
+    QString dailyReportPolishSystemPrompt() const;
+    void finishDailyReportCopy(const QString &content, bool polished);
     QString dailyReportDocsDir() const;
     QString dailyReportFilePathForToday() const;
     bool saveDailyReportToDocs(const QString &content);
