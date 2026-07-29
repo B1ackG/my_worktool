@@ -62,6 +62,7 @@ QuickerBindingDialog::QuickerBindingDialog(InputQuickerManager *manager, QWidget
     presetCombo = new QComboBox(this);
     presetCombo->addItem(QStringLiteral("上一工作区"), QStringLiteral("workspace_prev"));
     presetCombo->addItem(QStringLiteral("下一工作区"), QStringLiteral("workspace_next"));
+    presetCombo->addItem(QStringLiteral("活动概览"), QStringLiteral("activities_overview"));
     presetCombo->addItem(QStringLiteral("音量增加"), QStringLiteral("volume_up"));
     presetCombo->addItem(QStringLiteral("音量减少"), QStringLiteral("volume_down"));
     presetCombo->addItem(QStringLiteral("静音"), QStringLiteral("mute"));

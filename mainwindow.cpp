@@ -14,6 +14,7 @@
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QEvent>
 #include <QFrame>
 #include <QInputDialog>
@@ -61,6 +62,7 @@
 #include <QPainterPath>
 #include <QtMath>
 #include <QProgressBar>
+#include <QStatusBar>
 #include <QStandardPaths>
 #include <QMenuBar>
 #include <QActionGroup>
@@ -566,6 +568,9 @@ MainWindow::MainWindow(QWidget *parent)
     deepSeekClient = new DeepSeekClient(this);
     connect(deepSeekClient, &DeepSeekClient::chatFinished, this, &MainWindow::onDeepSeekCommitMsgReady);
     connect(deepSeekClient, &DeepSeekClient::chatFailed, this, &MainWindow::onDeepSeekCommitMsgFailed);
+    deepSeekHelpClient = new DeepSeekClient(this);
+    connect(deepSeekHelpClient, &DeepSeekClient::chatFinished, this, &MainWindow::onDeepSeekGitHelpReady);
+    connect(deepSeekHelpClient, &DeepSeekClient::chatFailed, this, &MainWindow::onDeepSeekGitHelpFailed);
     simWriteRefreshTimer = new QTimer(this);
     simWriteRefreshTimer->setSingleShot(true);
     simWriteRefreshTimer->setInterval(33);
@@ -979,6 +984,10 @@ void MainWindow::createWidgets()
     btnGitAiCommitMsg->setToolTip(
         QStringLiteral("用 DeepSeek 根据未提交改动生成提交说明，填入输入框；可选择是否立即暂存并提交"));
     btnGitAiCommitMsg->setStyleSheet(QStringLiteral("background-color: #e8f5e9; font-weight: bold;"));
+    btnGitAskDeepSeek = new QPushButton(QStringLiteral("不懂，问 DeepSeek"));
+    btnGitAskDeepSeek->setToolTip(
+        QStringLiteral("把下方 Git 输出发给 DeepSeek，用通俗中文解释发生了什么，并告诉你接下来该怎么做"));
+    btnGitAskDeepSeek->setStyleSheet(QStringLiteral("background-color: #fff3e0; font-weight: bold;"));
 
     cmbGitRemote = new QComboBox();
     cmbGitRemote->addItem("GitHub");
@@ -1000,6 +1009,18 @@ void MainWindow::createWidgets()
     chkGitAutoFetch = new QCheckBox(QStringLiteral("换仓库时自动 fetch"));
     chkGitAutoFetch->setChecked(false);
     chkGitAutoFetch->setToolTip(QStringLiteral("开启后，切换记忆路径时会自动执行 git fetch。代理异常时建议关闭。"));
+    chkGitAutoPushAfterCommit = new QCheckBox(QStringLiteral("提交后自动推送"));
+    chkGitAutoPushAfterCommit->setChecked(true);
+    chkGitAutoPushAfterCommit->setToolTip(
+        QStringLiteral("开启后，git commit 成功且有未推送提交时自动执行 git push（含按钮、AI 提交与控制台）。"));
+    lblGitPendingStatus = new QLabel(QStringLiteral("Git: —"));
+    lblGitPendingStatus->setToolTip(QStringLiteral("点击可跳转到首个有未提交/未推送的仓库"));
+    lblGitPendingStatus->setCursor(Qt::PointingHandCursor);
+    lblGitPendingStatus->setMinimumWidth(180);
+    statusBar()->addPermanentWidget(lblGitPendingStatus);
+    lblGitPendingStatus->installEventFilter(this);
+    gitPendingStatusTimer = new QTimer(this);
+    gitPendingStatusTimer->setInterval(60 * 1000);
     lblGitNetworkStatus = new QLabel();
     lblGitNetworkStatus->setVisible(false);
     barGitNetworkBusy = new QProgressBar();
@@ -1303,6 +1324,7 @@ QWidget* MainWindow::createGitPage()
     layRepo->addWidget(btnGitRemoveHistory);
     layRepoVBox->addLayout(layRepo);
     layRepoVBox->addWidget(chkGitAutoFetch);
+    layRepoVBox->addWidget(chkGitAutoPushAfterCommit);
     layRepoVBox->addWidget(new QLabel(QStringLiteral("日报路径配置:")));
     layRepoVBox->addWidget(tblGitRepoMeta);
     grpRepo->setLayout(layRepoVBox);
@@ -1507,7 +1529,12 @@ QWidget* MainWindow::createGitPage()
     layConsole->addWidget(lblGitConsoleCwd);
     updateGitConsoleCwdLabel();
 
+    QHBoxLayout *layAskHelp = new QHBoxLayout();
+    layAskHelp->setContentsMargins(0, 6, 0, 0);
+    layAskHelp->addWidget(btnGitAskDeepSeek);
+    layAskHelp->addStretch(1);
     layLog->addWidget(consoleFrame, 1);
+    layLog->addLayout(layAskHelp);
     grpLog->setLayout(layLog);
     grpLog->setMinimumHeight(140);
     grpLog->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -2197,6 +2224,7 @@ void MainWindow::createConnections()
     connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
     connect(btnGitCommit, &QPushButton::clicked, this, &MainWindow::onGitCommitClicked);
     connect(btnGitAiCommitMsg, &QPushButton::clicked, this, &MainWindow::onGitAiCommitMsgClicked);
+    connect(btnGitAskDeepSeek, &QPushButton::clicked, this, &MainWindow::onGitAskDeepSeekClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
     connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
     connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
@@ -2208,6 +2236,12 @@ void MainWindow::createConnections()
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
     connect(btnGitCancelNetwork, &QPushButton::clicked, this, &MainWindow::onGitCancelNetworkClicked);
     connect(chkGitAutoFetch, &QCheckBox::toggled, this, &MainWindow::onGitAutoFetchToggled);
+    connect(chkGitAutoPushAfterCommit, &QCheckBox::toggled, this,
+            &MainWindow::onGitAutoPushAfterCommitToggled);
+    if (gitPendingStatusTimer) {
+        connect(gitPendingStatusTimer, &QTimer::timeout, this, &MainWindow::onGitPendingStatusBarTick);
+        gitPendingStatusTimer->start();
+    }
     connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
     connect(btnGitStash, &QPushButton::clicked, this, &MainWindow::onGitStashClicked);
     connect(btnGitStashPop, &QPushButton::clicked, this, &MainWindow::onGitStashPopClicked);
@@ -3972,7 +4006,23 @@ bool MainWindow::runGitCommand(const QStringList &args) {
     }
     
     txtGitLog->moveCursor(QTextCursor::End);
-    return process.exitCode() == 0;
+    const bool ok = process.exitCode() == 0;
+    if (ok && !args.isEmpty()) {
+        const QString sub = args.first().toLower();
+        if (sub == QLatin1String("commit")) {
+            maybeAutoPushAfterCommit();
+        }
+        static const QSet<QString> kRefreshPendingSubs = {
+            QStringLiteral("commit"), QStringLiteral("add"),     QStringLiteral("status"),
+            QStringLiteral("stash"),  QStringLiteral("reset"),   QStringLiteral("checkout"),
+            QStringLiteral("switch"), QStringLiteral("merge"),   QStringLiteral("rebase"),
+            QStringLiteral("restore"), QStringLiteral("rm"),     QStringLiteral("mv"),
+            QStringLiteral("clean"),  QStringLiteral("cherry-pick")};
+        if (kRefreshPendingSubs.contains(sub)) {
+            refreshGitPendingStatusBar();
+        }
+    }
+    return ok;
 }
 
 QString MainWindow::currentGitWorkDir(QString *errorOut) const
@@ -4120,6 +4170,20 @@ void MainWindow::onGitConsoleCommandSubmitted()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == lblGitPendingStatus && event
+        && event->type() == QEvent::MouseButtonRelease) {
+        const auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() == Qt::LeftButton) {
+            const QList<QPair<QString, QString>> items = collectGitPendingExitItems();
+            if (!items.isEmpty()) {
+                focusGitPendingRepo(items.first().first);
+            } else if (navWidget) {
+                constexpr int kGitPageIndex = 2;
+                navWidget->setCurrentRow(kGitPageIndex);
+            }
+            return true;
+        }
+    }
     if (watched == txtGitCmdInput && event && event->type() == QEvent::KeyPress) {
         auto *ke = static_cast<QKeyEvent *>(event);
         if (ke->key() == Qt::Key_Up) {
@@ -4157,17 +4221,29 @@ bool MainWindow::isGitAutoFetchEnabled() const
     return chkGitAutoFetch && chkGitAutoFetch->isChecked();
 }
 
+bool MainWindow::isGitAutoPushAfterCommitEnabled() const
+{
+    return chkGitAutoPushAfterCommit && chkGitAutoPushAfterCommit->isChecked();
+}
+
 void MainWindow::loadGitNetworkSettings()
 {
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
     settings.beginGroup(QStringLiteral("gitNetwork"));
     gitAutoFetchEnabled = settings.value(QStringLiteral("autoFetch"), false).toBool();
+    gitAutoPushAfterCommitEnabled =
+        settings.value(QStringLiteral("autoPushAfterCommit"), true).toBool();
     settings.endGroup();
 
     if (chkGitAutoFetch) {
         chkGitAutoFetch->blockSignals(true);
         chkGitAutoFetch->setChecked(gitAutoFetchEnabled);
         chkGitAutoFetch->blockSignals(false);
+    }
+    if (chkGitAutoPushAfterCommit) {
+        chkGitAutoPushAfterCommit->blockSignals(true);
+        chkGitAutoPushAfterCommit->setChecked(gitAutoPushAfterCommitEnabled);
+        chkGitAutoPushAfterCommit->blockSignals(false);
     }
 }
 
@@ -4176,6 +4252,7 @@ void MainWindow::saveGitNetworkSettings()
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
     settings.beginGroup(QStringLiteral("gitNetwork"));
     settings.setValue(QStringLiteral("autoFetch"), gitAutoFetchEnabled);
+    settings.setValue(QStringLiteral("autoPushAfterCommit"), gitAutoPushAfterCommitEnabled);
     settings.endGroup();
 }
 
@@ -4186,6 +4263,151 @@ void MainWindow::onGitAutoFetchToggled(bool checked)
     txtGitLog->append(checked
                           ? QStringLiteral("<font color='gray'>[Git] 已开启：换仓库时自动 fetch。</font>")
                           : QStringLiteral("<font color='gray'>[Git] 已关闭自动 fetch（推荐代理异常时使用）。</font>"));
+}
+
+void MainWindow::onGitAutoPushAfterCommitToggled(bool checked)
+{
+    gitAutoPushAfterCommitEnabled = checked;
+    saveGitNetworkSettings();
+    txtGitLog->append(checked
+                          ? QStringLiteral("<font color='gray'>[Git] 已开启：提交后自动推送。</font>")
+                          : QStringLiteral("<font color='gray'>[Git] 已关闭提交后自动推送。</font>"));
+}
+
+void MainWindow::onGitPendingStatusBarTick()
+{
+    refreshGitPendingStatusBar();
+}
+
+void MainWindow::refreshGitPendingStatusBar()
+{
+    if (!lblGitPendingStatus) {
+        return;
+    }
+
+    const QString current = currentGitWorkDir();
+    QString currentName;
+    bool currentDirty = false;
+    int currentUnpushed = 0;
+    if (!current.isEmpty() && isGitRepository(current)) {
+        currentName = gitRepoDisplayName(current);
+        if (currentName.isEmpty()) {
+            currentName = QFileInfo(current).fileName();
+        }
+        currentDirty = GitWorktreeRunner::isDirty(current);
+        currentUnpushed = gitUnpushedCommitCount(current);
+    }
+
+    const QList<QPair<QString, QString>> pending = collectGitPendingExitItems();
+    int otherPending = 0;
+    for (const auto &item : pending) {
+        if (QDir(item.first).absolutePath() != QDir(current).absolutePath()) {
+            ++otherPending;
+        }
+    }
+
+    QStringList tipLines;
+    tipLines.reserve(pending.size() + 1);
+    tipLines << QStringLiteral("点击跳转到首个待处理仓库");
+    for (const auto &item : pending) {
+        tipLines << item.second;
+    }
+    lblGitPendingStatus->setToolTip(tipLines.join(QLatin1Char('\n')));
+
+    if (currentName.isEmpty()) {
+        if (pending.isEmpty()) {
+            lblGitPendingStatus->setText(QStringLiteral("Git: —"));
+            lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #6b7785;"));
+        } else {
+            lblGitPendingStatus->setText(
+                QStringLiteral("Git: %1 仓待处理").arg(pending.size()));
+            lblGitPendingStatus->setStyleSheet(
+                QStringLiteral("color: #c0392b; font-weight: 600;"));
+        }
+        return;
+    }
+
+    QStringList parts;
+    if (currentDirty) {
+        parts << QStringLiteral("未提交");
+    }
+    if (currentUnpushed > 0) {
+        parts << QStringLiteral("未推送 %1").arg(currentUnpushed);
+    }
+
+    QString text;
+    if (parts.isEmpty()) {
+        text = QStringLiteral("Git: %1 · 干净").arg(currentName);
+        lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #1e8449;"));
+    } else {
+        text = QStringLiteral("Git: %1 · %2").arg(currentName, parts.join(QStringLiteral(" · ")));
+        lblGitPendingStatus->setStyleSheet(
+            QStringLiteral("color: #c0392b; font-weight: 600;"));
+    }
+    if (otherPending > 0) {
+        text += QStringLiteral(" ｜ 另有 %1 仓").arg(otherPending);
+    }
+    lblGitPendingStatus->setText(text);
+}
+
+void MainWindow::maybeAutoPushAfterCommit()
+{
+    if (!isGitAutoPushAfterCommitEnabled()) {
+        return;
+    }
+
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        return;
+    }
+
+    QString upstream;
+    const bool hasUpstream =
+        GitWorktreeRunner::runInRepo(
+            workDir,
+            {QStringLiteral("rev-parse"), QStringLiteral("--abbrev-ref"), QStringLiteral("@{u}")},
+            &upstream, nullptr, 8000)
+        && !upstream.trimmed().isEmpty();
+    // 已有上游且没有领先提交时跳过；无上游时仍走 push -u 建立跟踪
+    if (hasUpstream && gitUnpushedCommitCount(workDir) <= 0) {
+        txtGitLog->append(
+            QStringLiteral("<font color='gray'>[自动推送] 无未推送提交，跳过。</font>"));
+        return;
+    }
+
+    if (gitNetworkBusy) {
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[自动推送] 当前有远程通讯进行中，请稍后手动 push。</font>"));
+        return;
+    }
+
+    const QString branch = gitCheckedOutBranch(workDir);
+    if (branch.isEmpty()) {
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[自动推送] 无法识别当前分支，已跳过。</font>"));
+        return;
+    }
+
+    QString remote = cmbGitRemote ? cmbGitRemote->currentText().trimmed() : QString();
+    if (remote.isEmpty()) {
+        remote = QStringLiteral("origin");
+    }
+
+    txtGitLog->append(
+        QStringLiteral("<font color='cyan'>[自动推送] commit 成功，正在 push %1/%2 …</font>")
+            .arg(remote, branch));
+    runGitNetworkCommand(
+        QStringList() << QStringLiteral("push") << QStringLiteral("-u") << remote << branch, 60000,
+        [this](bool ok) {
+            if (ok) {
+                txtGitLog->append(QStringLiteral("<font color='green'>[自动推送] 推送成功。</font>"));
+            } else {
+                txtGitLog->append(
+                    QStringLiteral("<font color='red'>[自动推送] 推送失败，请检查网络或手动 push。</font>"));
+            }
+            refreshGitPendingStatusBar();
+        });
 }
 
 void MainWindow::setGitNetworkBusy(bool busy, const QString &statusText)
@@ -4263,6 +4485,8 @@ void MainWindow::finishGitNetworkCommand(bool ok, const QString &stdoutText, con
     if (done) {
         done(ok);
     }
+
+    refreshGitPendingStatusBar();
 
     if (!ok && !wasCancelled && !suppressRetry) {
         const QString reason = wasTimedOut
@@ -4838,6 +5062,7 @@ void MainWindow::pushAllUnpushedRepos(const QStringList &repoDirs)
                 .arg(failures.size())
                 .arg(failures.join(QLatin1Char('\n'))));
     }
+    refreshGitPendingStatusBar();
 }
 
 QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
@@ -5872,11 +6097,161 @@ void MainWindow::setGitAiCommitBusy(bool busy)
     if (btnGitAiCommitMsg)
         btnGitAiCommitMsg->setEnabled(!busy);
     if (actDeepSeekSettings)
-        actDeepSeekSettings->setEnabled(!busy);
+        actDeepSeekSettings->setEnabled(!busy && !(deepSeekHelpClient && deepSeekHelpClient->isBusy()));
     if (btnGitAiCommitMsg) {
         btnGitAiCommitMsg->setText(busy ? QStringLiteral("AI 生成中…")
                                         : QStringLiteral("AI 整理提交说明"));
     }
+}
+
+void MainWindow::setGitAskDeepSeekBusy(bool busy)
+{
+    if (btnGitAskDeepSeek) {
+        btnGitAskDeepSeek->setEnabled(!busy);
+        btnGitAskDeepSeek->setText(busy ? QStringLiteral("DeepSeek 分析中…")
+                                       : QStringLiteral("不懂，问 DeepSeek"));
+    }
+    if (actDeepSeekSettings)
+        actDeepSeekSettings->setEnabled(!busy && !(deepSeekClient && deepSeekClient->isBusy()));
+}
+
+QString MainWindow::collectGitHelpContextForAi(const QString &workDir) const
+{
+    QString context;
+    context += QStringLiteral("【仓库目录】\n");
+    context += workDir.trimmed().isEmpty() ? QStringLiteral("(未选择)\n")
+                                           : workDir.trimmed() + QLatin1Char('\n');
+
+    if (!workDir.trimmed().isEmpty()) {
+        const QString branch = gitCheckedOutBranch(workDir);
+        context += QStringLiteral("\n【当前分支】\n");
+        context += branch.isEmpty() ? QStringLiteral("(未知)\n") : branch + QLatin1Char('\n');
+
+        QString statusOut;
+        if (captureGitOutput(workDir,
+                             QStringList{QStringLiteral("status"), QStringLiteral("-sb")},
+                             &statusOut, nullptr, 15000)) {
+            context += QStringLiteral("\n【git status -sb】\n");
+            context += (statusOut.trimmed().isEmpty() ? QStringLiteral("(干净)")
+                                                      : statusOut.trimmed())
+                       + QLatin1Char('\n');
+        }
+    }
+
+    QString logPlain;
+    if (txtGitLog)
+        logPlain = txtGitLog->toPlainText().trimmed();
+
+    constexpr int kMaxLogChars = 14000;
+    if (logPlain.size() > kMaxLogChars)
+        logPlain = QStringLiteral("…(更早输出已省略)…\n") + logPlain.right(kMaxLogChars);
+
+    context += QStringLiteral("\n【Git 输出面板（用户看不懂的内容）】\n");
+    if (logPlain.isEmpty())
+        context += QStringLiteral("(输出为空；请结合仓库状态给出常规排查建议)\n");
+    else
+        context += logPlain + QLatin1Char('\n');
+
+    return context;
+}
+
+void MainWindow::showDeepSeekGitHelpDialog(const QString &advice)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("DeepSeek：接下来怎么做"));
+    dlg.resize(640, 480);
+
+    auto *txt = new QTextEdit(&dlg);
+    txt->setReadOnly(true);
+    txt->setPlainText(advice);
+    txt->setStyleSheet(QStringLiteral("font-size: 13px;"));
+
+    auto *buttons = new QDialogButtonBox(&dlg);
+    auto *btnCopy = buttons->addButton(QStringLiteral("复制建议"), QDialogButtonBox::ActionRole);
+    auto *btnClose = buttons->addButton(QDialogButtonBox::Close);
+    connect(btnCopy, &QPushButton::clicked, &dlg, [advice]() {
+        if (QClipboard *clip = QApplication::clipboard())
+            clip->setText(advice);
+    });
+    connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto *root = new QVBoxLayout(&dlg);
+    root->addWidget(new QLabel(
+        QStringLiteral("下面是 DeepSeek 根据 Git 输出给出的解释与下一步建议（仅供参考，危险操作请再确认）："),
+        &dlg));
+    root->addWidget(txt, 1);
+    root->addWidget(buttons);
+    dlg.exec();
+}
+
+void MainWindow::onGitAskDeepSeekClicked()
+{
+    if (DeepSeekClient::apiKey().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("未配置 DeepSeek API Key，请先打开「DeepSeek 设置」。"));
+        onGitDeepSeekSettingsClicked();
+        if (DeepSeekClient::apiKey().isEmpty())
+            return;
+    }
+    if (deepSeekHelpClient && deepSeekHelpClient->isBusy()) {
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("已有求助请求进行中，请稍候。"));
+        return;
+    }
+
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    // Allow asking even if path is invalid — log output alone may still be useful
+    const QString context = collectGitHelpContextForAi(workDir);
+
+    const QString logPlain = txtGitLog ? txtGitLog->toPlainText().trimmed() : QString();
+    if (logPlain.isEmpty() && workDir.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("不懂，问 DeepSeek"),
+                                 QStringLiteral("Git 输出为空，且未选择仓库。请先执行一次 Git 操作，或选择仓库后再问。"));
+        return;
+    }
+
+    const QString systemPrompt = QStringLiteral(
+        "你是耐心的 Git 助手，服务对象是不太熟悉 Git 命令行输出的用户。"
+        "根据用户提供的仓库状态和 Git 输出面板内容，用通俗中文回答。"
+        "输出结构必须包含：\n"
+        "1) 【现在是什么情况】用 1～3 句说明成功/失败/冲突/卡住等原因；\n"
+        "2) 【接下来怎么做】给出分步建议，优先安全、可逆的操作；\n"
+        "3) 【可复制命令】如需命令，每行一条，尽量写成可在本应用 Git 控制台直接粘贴的形式"
+        "（可带或不带开头的 git）；\n"
+        "危险操作（如 reset --hard、push --force、clean -fd）必须明确标出风险，并给出更安全的替代方案。"
+        "若信息不足，说明还缺什么，并建议先运行哪些查看命令（如 status、diff、log）。"
+        "不要编造仓库里并不存在的分支或提交。");
+
+    setGitAskDeepSeekBusy(true);
+    if (txtGitLog)
+        txtGitLog->append(QStringLiteral("<font color='gray'>[DeepSeek] 正在阅读 Git 输出并给出下一步建议…</font>"));
+    deepSeekHelpClient->chat(systemPrompt, context);
+}
+
+void MainWindow::onDeepSeekGitHelpReady(const QString &content)
+{
+    setGitAskDeepSeekBusy(false);
+    const QString advice = content.trimmed();
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='green'>[DeepSeek 建议]</font>"));
+        // Keep log readable: show full text as plain (escaped) with line breaks
+        const QString html = advice.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+        txtGitLog->append(html);
+        txtGitLog->moveCursor(QTextCursor::End);
+    }
+    showDeepSeekGitHelpDialog(advice);
+}
+
+void MainWindow::onDeepSeekGitHelpFailed(const QString &error)
+{
+    setGitAskDeepSeekBusy(false);
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='red'>[DeepSeek] 求助失败：%1</font>")
+                              .arg(error.toHtmlEscaped()));
+    }
+    QMessageBox::warning(this, QStringLiteral("DeepSeek"),
+                         QStringLiteral("分析 Git 输出失败：\n%1").arg(error));
 }
 
 void MainWindow::onGitDeepSeekSettingsClicked()
@@ -7378,6 +7753,8 @@ void MainWindow::deferredGitRepoInit() {
                               .arg(spinGitDiffIntervalMinutes ? spinGitDiffIntervalMinutes->value() : 5));
         onGitAutoDiffReminderTick();
     }
+
+    refreshGitPendingStatusBar();
 }
 
 void MainWindow::removeGitHistoryPath(const QString &dir) {
@@ -7431,6 +7808,7 @@ void MainWindow::onGitDirChanged() {
 
 void MainWindow::activateGitRepo(const QString &repoDir, bool fetchRemote) {
     if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
+        refreshGitPendingStatusBar();
         return;
     }
 
@@ -7440,6 +7818,7 @@ void MainWindow::activateGitRepo(const QString &repoDir, bool fetchRemote) {
     syncChildGoalEndDatesFromParents(goals);
     syncParentStartDatesFromLeaves(goals);
     saveGitGoals(repoDir, goals);
+    refreshGitPendingStatusBar();
 }
 
 void MainWindow::onGitBranchSelectionChanged() {

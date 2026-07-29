@@ -182,6 +182,8 @@ private slots:
     void onGitRefreshBranchesClicked(bool fetchRemote = false);
     void onGitCancelNetworkClicked();
     void onGitAutoFetchToggled(bool checked);
+    void onGitAutoPushAfterCommitToggled(bool checked);
+    void onGitPendingStatusBarTick();
     void onGitCheckoutClicked();
     void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
@@ -189,6 +191,7 @@ private slots:
     void onGitAddClicked();
     void onGitCommitClicked();
     void onGitAiCommitMsgClicked();
+    void onGitAskDeepSeekClicked();
     void onGitDeepSeekSettingsClicked();
     void onGitPushClicked();
     void onGitPullClicked();
@@ -215,6 +218,8 @@ private slots:
     void onDailyReportAutoSaveTick();
     void onDeepSeekCommitMsgReady(const QString &content);
     void onDeepSeekCommitMsgFailed(const QString &error);
+    void onDeepSeekGitHelpReady(const QString &content);
+    void onDeepSeekGitHelpFailed(const QString &error);
     void onGitRemoveHistoryClicked();
     void onGitConsoleCommandSubmitted();
     void onGitDirChanged();
@@ -417,7 +422,9 @@ private:
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
     QPushButton *btnGitAiCommitMsg = nullptr;
+    QPushButton *btnGitAskDeepSeek = nullptr;
     DeepSeekClient *deepSeekClient = nullptr;
+    DeepSeekClient *deepSeekHelpClient = nullptr;
     bool gitAiCommitPendingConfirm = false;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
@@ -430,6 +437,9 @@ private:
     QPushButton *btnGitDiff;
     QPushButton *btnGitFetch;
     QCheckBox *chkGitAutoFetch = nullptr;
+    QCheckBox *chkGitAutoPushAfterCommit = nullptr;
+    QLabel *lblGitPendingStatus = nullptr;
+    QTimer *gitPendingStatusTimer = nullptr;
     QLabel *lblGitNetworkStatus = nullptr;
     QProgressBar *barGitNetworkBusy = nullptr;
     QPushButton *btnGitCancelNetwork = nullptr;
@@ -485,6 +495,7 @@ private:
     std::function<void(bool)> gitNetworkLastDoneCallback;
     bool gitDiffReminderEnabled = true;
     bool gitAutoFetchEnabled = false;
+    bool gitAutoPushAfterCommitEnabled = true;
     QHash<QString, QSet<QString>> gitGoalCollapsedByRepo;
     bool gitRepoMetaRefreshing = false;
 
@@ -590,7 +601,11 @@ private:
                           QString *stderrOut = nullptr, int timeoutMs = 30000) const;
     /** Build status + diffs + recent log for DeepSeek commit-message prompt. */
     QString collectUncommittedContextForAi(const QString &workDir, QString *errorOut = nullptr) const;
+    /** Build Git console + repo snapshot for DeepSeek “what next” help. */
+    QString collectGitHelpContextForAi(const QString &workDir) const;
     void setGitAiCommitBusy(bool busy);
+    void setGitAskDeepSeekBusy(bool busy);
+    void showDeepSeekGitHelpDialog(const QString &advice);
     void runGitNetworkCommand(const QStringList &args, int timeoutMs = 30000,
                               const std::function<void(bool ok)> &done = {});
     void setGitNetworkBusy(bool busy, const QString &statusText = QString());
@@ -599,8 +614,11 @@ private:
     void refreshGitBranchesLocal();
     void updateGitConsoleCwdLabel();
     bool isGitAutoFetchEnabled() const;
+    bool isGitAutoPushAfterCommitEnabled() const;
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();
+    void refreshGitPendingStatusBar();
+    void maybeAutoPushAfterCommit();
     bool gitHasUncommittedChanges(const QString &workDir) const;
     /** Staging review gate: dialog + selective git add. Returns false if cancelled/refused. */
     bool gitStageWithReview(const QString &workDir);

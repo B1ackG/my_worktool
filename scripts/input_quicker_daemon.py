@@ -269,6 +269,123 @@ def run_command(command: str) -> None:
         log(f"ERROR: command failed: {exc}")
 
 
+def _gdbus_get_overview_active() -> bool | None:
+    """Return OverviewActive, or None if GNOME Shell D-Bus is unavailable."""
+    try:
+        result = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.gnome.Shell",
+                "--object-path",
+                "/org/gnome/Shell",
+                "--method",
+                "org.freedesktop.DBus.Properties.Get",
+                "org.gnome.Shell",
+                "OverviewActive",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    text = (result.stdout or "").lower()
+    if "true" in text:
+        return True
+    if "false" in text:
+        return False
+    return None
+
+
+def _gdbus_set_overview_active(active: bool) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.gnome.Shell",
+                "--object-path",
+                "/org/gnome/Shell",
+                "--method",
+                "org.freedesktop.DBus.Properties.Set",
+                "org.gnome.Shell",
+                "OverviewActive",
+                "<true>" if active else "<false>",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _kde_invoke_overview() -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "qdbus",
+                "org.kde.kglobalaccel",
+                "/component/kwin",
+                "org.kde.kglobalaccel.Component.invokeShortcut",
+                "Overview",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def toggle_activities_overview() -> None:
+    """Toggle desktop Activities/Overview via GNOME OverviewActive.
+
+    Fallbacks (KDE / Alt+F1) only when GNOME D-Bus is unavailable.
+    Never fall back after a partial Set — that previously fired Alt+F1 while
+    closing overview and broke an otherwise working toggle.
+    """
+    current = _gdbus_get_overview_active()
+    if current is None:
+        if _kde_invoke_overview():
+            return
+        log("WARN: overview D-Bus unavailable; falling back to alt+F1")
+        send_key("alt+F1")
+        return
+
+    target = not current
+    deadline = time.monotonic() + 0.40
+    last_after: bool | None = current
+    while time.monotonic() < deadline:
+        if not _gdbus_set_overview_active(target):
+            time.sleep(0.05)
+            continue
+        for _ in range(8):
+            last_after = _gdbus_get_overview_active()
+            if last_after == target:
+                log(f"INFO: OverviewActive -> {target}")
+                return
+            time.sleep(0.025)
+        time.sleep(0.03)
+
+    log(
+        f"WARN: OverviewActive did not become {target} "
+        f"(last={last_after}); not falling back to alt+F1"
+    )
+
+
 def execute_action(action: dict[str, Any], binding_name: str) -> None:
     atype = str(action.get("type", ""))
     if atype == "keyboard":
@@ -283,6 +400,10 @@ def execute_action(action: dict[str, Any], binding_name: str) -> None:
             run_command(command)
     elif atype == "preset":
         preset = str(action.get("preset", "")).strip()
+        if preset == "activities_overview":
+            log(f"INFO: [{binding_name}] preset activities_overview -> toggle overview")
+            toggle_activities_overview()
+            return
         combo = PRESETS.get(preset)
         if combo:
             log(f"INFO: [{binding_name}] preset {preset} -> {combo}")

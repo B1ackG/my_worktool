@@ -655,7 +655,9 @@ def event_to_trigger(event: Any) -> dict[str, str] | None:
     if ecodes is None:
         return None
 
-    if event.type == ecodes.EV_KEY and event.value == 1:
+    # Fire on release (value 0). Press-time actions race with GNOME input
+    # handling — e.g. OverviewActive Set returns success but stays false.
+    if event.type == ecodes.EV_KEY and event.value == 0:
         code_name = button_code_name(event.code)
         if code_name:
             return {"type": "mouse_button", "code": code_name}
