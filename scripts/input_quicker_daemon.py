@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ except ImportError:
 from input_device_utils import (
     DeviceSelectionError,
     WheelDetentNormalizer,
+    button_code_name,
     choose_device,
     device_hi_res_wheel_axes,
     event_to_trigger,
@@ -61,10 +63,25 @@ PRESETS: dict[str, str] = {
     "media_next": "XF86AudioNext",
     "media_prev": "XF86AudioPrev",
     "super": "super",
+    # Tiling Assistant / Mutter: Super+Left/Right
+    "window_snap_left": "super+Left",
+    "window_snap_right": "super+Right",
 }
+
+# Hold+drag: accumulate REL_X until release; horizontal dominance required.
+DEFAULT_HOLD_DRAG_THRESHOLD = 100
 
 RUNNING = True
 RELOAD_REQUESTED = False
+
+
+@dataclass
+class HoldDragSession:
+    binding: dict[str, Any]
+    code: str
+    threshold: int
+    dx: int = 0
+    dy: int = 0
 
 
 def log(message: str) -> None:
@@ -386,6 +403,14 @@ def toggle_activities_overview() -> None:
     )
 
 
+def snap_window_horizontal(side: str, binding_name: str) -> None:
+    """Snap focused window left/right via Super+Left/Right (Tiling Assistant)."""
+    preset = "window_snap_left" if side == "left" else "window_snap_right"
+    combo = PRESETS[preset]
+    log(f"INFO: [{binding_name}] window snap {side} -> {combo}")
+    send_key(combo)
+
+
 def execute_action(action: dict[str, Any], binding_name: str) -> None:
     atype = str(action.get("type", ""))
     if atype == "keyboard":
@@ -403,6 +428,16 @@ def execute_action(action: dict[str, Any], binding_name: str) -> None:
         if preset == "activities_overview":
             log(f"INFO: [{binding_name}] preset activities_overview -> toggle overview")
             toggle_activities_overview()
+            return
+        if preset == "window_snap_left":
+            snap_window_horizontal("left", binding_name)
+            return
+        if preset == "window_snap_right":
+            snap_window_horizontal("right", binding_name)
+            return
+        if preset == "window_snap_horizontal":
+            # Direction is chosen by hold-drag; calling this alone is a no-op.
+            log(f"WARN: [{binding_name}] window_snap_horizontal needs button_hold_drag")
             return
         combo = PRESETS.get(preset)
         if combo:
@@ -441,6 +476,8 @@ class InputQuickerDaemon:
         self.device: InputDevice | None = None
         self.grabbed = False
         self.active_bindings: list[dict[str, Any]] = []
+        self.hold_drag_by_code: dict[str, dict[str, Any]] = {}
+        self.hold_session: HoldDragSession | None = None
         self.listening_path = ""
         self.wheel_normalizer = WheelDetentNormalizer()
 
@@ -450,7 +487,64 @@ class InputQuickerDaemon:
             b for b in self.config.get("bindings", [])
             if isinstance(b, dict) and b.get("enabled", True)
         ]
-        log(f"INFO: loaded {len(self.active_bindings)} active binding(s)")
+        self.hold_drag_by_code = {}
+        for binding in self.active_bindings:
+            trigger = binding.get("trigger", {})
+            if not isinstance(trigger, dict):
+                continue
+            if trigger.get("type") != "button_hold_drag":
+                continue
+            code = str(trigger.get("code", "")).strip()
+            if code:
+                self.hold_drag_by_code[code] = binding
+        self.hold_session = None
+        log(
+            f"INFO: loaded {len(self.active_bindings)} active binding(s)"
+            + (
+                f", hold-drag on {', '.join(sorted(self.hold_drag_by_code))}"
+                if self.hold_drag_by_code
+                else ""
+            )
+        )
+
+    def finish_hold_drag(self) -> None:
+        session = self.hold_session
+        self.hold_session = None
+        if session is None:
+            return
+
+        binding = session.binding
+        binding_name = str(binding.get("name", binding.get("id", "?")))
+        dx = session.dx
+        dy = session.dy
+        threshold = session.threshold
+        action = binding.get("action", {})
+        if not isinstance(action, dict):
+            action = {}
+
+        # Require clear horizontal intent so vertical flicks don't steal the tap.
+        if abs(dx) >= threshold and abs(dx) >= abs(dy):
+            side = "right" if dx > 0 else "left"
+            log(
+                f"INFO: hold-drag [{binding_name}] dx={dx} dy={dy} "
+                f"threshold={threshold} -> snap {side}"
+            )
+            snap_window_horizontal(side, binding_name)
+            return
+
+        tap_preset = str(action.get("tapPreset", "")).strip()
+        if tap_preset:
+            log(
+                f"INFO: hold-drag [{binding_name}] tap "
+                f"(dx={dx} dy={dy}) -> {tap_preset}"
+            )
+            execute_action({"type": "preset", "preset": tap_preset}, binding_name)
+            return
+
+        log(
+            f"INFO: hold-drag [{binding_name}] ignored "
+            f"(dx={dx} dy={dy} < threshold {threshold})"
+        )
 
     def open_device(self) -> None:
         self.close_device()
@@ -513,6 +607,7 @@ class InputQuickerDaemon:
         self.device = None
         self.grabbed = False
         self.listening_path = ""
+        self.hold_session = None
         self.wheel_normalizer.reset()
 
     def open_device_with_retry(self, reason: str = "device unavailable") -> bool:
@@ -557,6 +652,9 @@ class InputQuickerDaemon:
             trigger = binding.get("trigger", {})
             if not isinstance(trigger, dict):
                 continue
+            # Hold-drag bindings are handled in handle_event (press/move/release).
+            if trigger.get("type") == "button_hold_drag":
+                continue
             if triggers_match(trigger, event_trigger):
                 binding_name = str(binding.get("name", binding.get("id", "?")))
                 log(
@@ -572,7 +670,36 @@ class InputQuickerDaemon:
         if not self.config.get("enabled", True):
             return
 
+        if event.type == ecodes.EV_KEY:
+            code_name = button_code_name(event.code)
+            if code_name and code_name in self.hold_drag_by_code:
+                binding = self.hold_drag_by_code[code_name]
+                trigger = binding.get("trigger", {})
+                if event.value == 1:
+                    try:
+                        threshold = int(trigger.get("threshold", DEFAULT_HOLD_DRAG_THRESHOLD))
+                    except (TypeError, ValueError):
+                        threshold = DEFAULT_HOLD_DRAG_THRESHOLD
+                    threshold = max(20, threshold)
+                    self.hold_session = HoldDragSession(
+                        binding=binding,
+                        code=code_name,
+                        threshold=threshold,
+                    )
+                    return
+                if event.value == 0:
+                    if self.hold_session and self.hold_session.code == code_name:
+                        self.finish_hold_drag()
+                    return
+                # value == 2 (key repeat): ignore
+                return
+
         if event.type == ecodes.EV_REL:
+            if self.hold_session is not None:
+                if event.code == ecodes.REL_X:
+                    self.hold_session.dx += int(event.value)
+                elif event.code == ecodes.REL_Y:
+                    self.hold_session.dy += int(event.value)
             for event_trigger in self.wheel_normalizer.process_event(event):
                 self.dispatch_trigger(event_trigger)
             return

@@ -392,6 +392,9 @@ QString InputQuickerWidget::triggerDisplayText(const QJsonObject &trigger) const
     if (type == QStringLiteral("mouse_button")) {
         return QStringLiteral("鼠标键 %1").arg(trigger.value(QStringLiteral("code")).toString());
     }
+    if (type == QStringLiteral("button_hold_drag")) {
+        return QStringLiteral("按住拖动 %1").arg(trigger.value(QStringLiteral("code")).toString());
+    }
     if (type == QStringLiteral("wheel")) {
         const QString direction = trigger.value(QStringLiteral("direction")).toString();
         const QString dirText = direction == QStringLiteral("positive") ? QStringLiteral("正向")
@@ -411,7 +414,12 @@ QString InputQuickerWidget::actionDisplayText(const QJsonObject &action) const
         return QStringLiteral("命令: %1").arg(action.value(QStringLiteral("command")).toString());
     }
     if (type == QStringLiteral("preset")) {
-        return QStringLiteral("预设: %1").arg(action.value(QStringLiteral("preset")).toString());
+        const QString preset = action.value(QStringLiteral("preset")).toString();
+        const QString tapPreset = action.value(QStringLiteral("tapPreset")).toString();
+        if (preset == QStringLiteral("window_snap_horizontal") && !tapPreset.isEmpty()) {
+            return QStringLiteral("预设: 左右分屏 / 短按 %1").arg(tapPreset);
+        }
+        return QStringLiteral("预设: %1").arg(preset);
     }
     return QStringLiteral("未知动作");
 }

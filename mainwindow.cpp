@@ -612,11 +612,6 @@ MainWindow::MainWindow(QWidget *parent)
     deepSeekHelpClient = new DeepSeekClient(this);
     connect(deepSeekHelpClient, &DeepSeekClient::chatFinished, this, &MainWindow::onDeepSeekGitHelpReady);
     connect(deepSeekHelpClient, &DeepSeekClient::chatFailed, this, &MainWindow::onDeepSeekGitHelpFailed);
-    deepSeekDailyReportClient = new DeepSeekClient(this);
-    connect(deepSeekDailyReportClient, &DeepSeekClient::chatFinished, this,
-            &MainWindow::onDeepSeekDailyReportReady);
-    connect(deepSeekDailyReportClient, &DeepSeekClient::chatFailed, this,
-            &MainWindow::onDeepSeekDailyReportFailed);
     simWriteRefreshTimer = new QTimer(this);
     simWriteRefreshTimer->setSingleShot(true);
     simWriteRefreshTimer->setInterval(33);
@@ -1025,7 +1020,7 @@ void MainWindow::createWidgets()
     txtGitCommitMsg->setPlaceholderText("Git Commit Message...");
     btnGitAiCommitMsg = new QPushButton(QStringLiteral("AI 整理提交说明"));
     btnGitAiCommitMsg->setToolTip(
-        QStringLiteral("用 DeepSeek 根据未提交改动生成提交说明，填入输入框；可选择是否立即暂存并提交"));
+        QStringLiteral("用 DeepSeek 根据未提交改动生成提交说明（按对外汇报表述准则），填入输入框；可选择是否立即暂存并提交"));
     btnGitAiCommitMsg->setStyleSheet(QStringLiteral("background-color: #e8f5e9; font-weight: bold;"));
     btnGitAskDeepSeek = new QPushButton(QStringLiteral("不懂，问 DeepSeek"));
     btnGitAskDeepSeek->setToolTip(
@@ -6793,16 +6788,35 @@ void MainWindow::onGitAiCommitMsgClicked()
         return;
     }
 
-    const QString systemPrompt = QStringLiteral(
-        "你是 Git 提交信息助手。根据用户给出的 status/diff/最近提交风格，写一条中文 commit message。"
-        "要求：1) 只输出提交信息本身，不要解释、不要 Markdown、不要引号包裹；"
-        "2) 1～2 句，说明做了什么或为什么，不要流水账列文件名；"
-        "3) 风格贴近最近提交；4) 改动杂乱时概括主线，次要改动可一句带过。");
+    const QString systemPrompt = commitMsgSystemPrompt();
 
     gitAiCommitPendingConfirm = true;
     setGitAiCommitBusy(true);
     txtGitLog->append(QStringLiteral("<font color='gray'>[DeepSeek] 正在根据未提交改动生成提交说明…</font>"));
     deepSeekClient->chat(systemPrompt, context);
+}
+
+QString MainWindow::commitMsgSystemPrompt() const
+{
+    return QStringLiteral(
+        "你是 Git 提交信息助手。根据用户给出的 status/diff/最近提交风格，写一条中文 commit message。"
+        "该说明会进入 Git 历史，也会被直接拼进工作日报，因此必须用适合向上级/客户汇报的表述。\n"
+        "\n"
+        "输出要求：\n"
+        "1) 只输出提交信息本身，不要解释、不要 Markdown、不要引号包裹；\n"
+        "2) 1～2 句，说明做了什么或解决了什么问题，不要流水账列文件名；\n"
+        "3) 风格贴近最近提交；改动杂乱时概括主线，次要改动可一句带过；\n"
+        "4) 不夸大、不编造：diff 里没有的成果不要写；不确定的细节宁可省略也不要猜测。\n"
+        "\n"
+        "对外表述准则（必须遵守）：\n"
+        "A. 不要写无业务含义的内部实现细节：随意选取的寄存器号（如 8192）、临时变量名、"
+        "自取名的配置文件名（如 config.ini、feature_switches.ini）、私有路径、调试开关名、"
+        "内部函数/类名、提交哈希、分支细节等；\n"
+        "B. 用业务语言替换实现黑话：例如「某写权限互锁寄存器」→「多示教终端写权限互锁」；"
+        "「影子寄存器读改写」→「按位控制合并后整字下发」；「singleShot 分阶段写」→"
+        "「按控制器扫描节奏分步下发」；「某某.ini」→「外部配置」；\n"
+        "C. 协议/框架专名（如 Modbus、Qt）仅在确有必要说明技术栈时保留，否则优先写"
+        "「工业通信」「图形界面」等通用说法。");
 }
 
 void MainWindow::onDeepSeekCommitMsgReady(const QString &content)
@@ -7264,92 +7278,16 @@ void MainWindow::onGitCopyForDailyReportClicked() {
                               : errorMsg);
         return;
     }
-
-    if (DeepSeekClient::apiKey().isEmpty()) {
-        txtGitLog->append(QStringLiteral(
-            "<font color='orange'>[日报] 未配置 DeepSeek API Key，已复制原文；可在「DeepSeek 设置」中配置后重试润色。</font>"));
-        finishDailyReportCopy(finalContent, false);
-        return;
-    }
-
-    if (deepSeekDailyReportClient && deepSeekDailyReportClient->isBusy()) {
-        QMessageBox::information(this, QStringLiteral("复制到日报"),
-                                 QStringLiteral("日报润色进行中，请稍候。"));
-        return;
-    }
-
-    dailyReportDraftPending = finalContent;
-    txtGitLog->append(QStringLiteral("<font color='gray'>[日报] 正在用 DeepSeek 按对外汇报准则润色…</font>"));
-    deepSeekDailyReportClient->chat(dailyReportPolishSystemPrompt(), finalContent);
+    finishDailyReportCopy(finalContent);
 }
 
-QString MainWindow::dailyReportPolishSystemPrompt() const
-{
-    return QStringLiteral(
-        "你是中文工作日报润色助手。用户会给出由今日 Git 提交与目标进度拼成的日报草稿，"
-        "请润色成适合向上级/客户汇报的表述。\n"
-        "\n"
-        "输出要求：\n"
-        "1) 只输出润色后的日报正文，不要解释、不要 Markdown 标题、不要用代码块包裹；\n"
-        "2) 保留原有结构：若草稿有「目标标题 / 编号条目 / 完成度：N%」，润色后仍保留这三部分，"
-        "完成度数字不得改动；编号条目数量可合并，但不得虚构未出现的工作；\n"
-        "3) 条目改为可读的工作成果表述（做了什么、解决了什么问题），不要流水账堆文件名；\n"
-        "4) 仓库显示名【xxx】可保留为项目简称，或改成更易懂的项目称呼，但不要编造新项目。\n"
-        "\n"
-        "对外表述准则（必须遵守）：\n"
-        "A. 不要写无业务含义的内部实现细节：随意选取的寄存器号（如 8192）、临时变量名、"
-        "自取名的配置文件名（如 config.ini、feature_switches.ini）、私有路径、调试开关名、"
-        "内部函数/类名、提交哈希、分支细节等；\n"
-        "B. 用业务语言替换实现黑话：例如「某写权限互锁寄存器」→「多示教终端写权限互锁」；"
-        "「影子寄存器读改写」→「按位控制合并后整字下发」；「singleShot 分阶段写」→"
-        "「按控制器扫描节奏分步下发」；「某某.ini」→「外部配置」；\n"
-        "C. 协议/框架专名（如 Modbus、Qt）仅在确有必要说明技术栈时保留，否则优先写"
-        "「工业通信」「图形界面」等通用说法；\n"
-        "D. 不夸大、不编造：草稿没有的成果不要写；不确定的细节宁可删掉也不要猜测；\n"
-        "E. 语气正式、简洁，适合粘贴到公司日报系统。");
-}
-
-void MainWindow::finishDailyReportCopy(const QString &content, bool polished)
+void MainWindow::finishDailyReportCopy(const QString &content)
 {
     const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
     QGuiApplication::clipboard()->setText(content);
-    txtGitLog->append(polished
-                          ? QStringLiteral("已润色并复制今日(%1)日报:").arg(today)
-                          : QStringLiteral("已拼接今日(%1)日报并复制:").arg(today));
+    txtGitLog->append(QStringLiteral("已拼接今日(%1)日报并复制:").arg(today));
     txtGitLog->append(content);
     saveDailyReportToDocs(content);
-}
-
-void MainWindow::onDeepSeekDailyReportReady(const QString &content)
-{
-    QString polished = content.trimmed();
-    // Strip accidental markdown fences
-    if (polished.startsWith(QStringLiteral("```"))) {
-        const int firstNl = polished.indexOf(QLatin1Char('\n'));
-        if (firstNl > 0)
-            polished = polished.mid(firstNl + 1);
-        if (polished.endsWith(QStringLiteral("```")))
-            polished.chop(3);
-        polished = polished.trimmed();
-    }
-
-    if (polished.isEmpty()) {
-        txtGitLog->append(QStringLiteral(
-            "<font color='orange'>[日报] DeepSeek 返回为空，已回退复制原文。</font>"));
-        finishDailyReportCopy(dailyReportDraftPending, false);
-    } else {
-        finishDailyReportCopy(polished, true);
-    }
-    dailyReportDraftPending.clear();
-}
-
-void MainWindow::onDeepSeekDailyReportFailed(const QString &error)
-{
-    txtGitLog->append(QStringLiteral("<font color='orange'>[日报] DeepSeek 润色失败: %1；已回退复制原文。</font>")
-                          .arg(error));
-    if (!dailyReportDraftPending.isEmpty())
-        finishDailyReportCopy(dailyReportDraftPending, false);
-    dailyReportDraftPending.clear();
 }
 
 void MainWindow::onGitOpenDailyReportClicked() {

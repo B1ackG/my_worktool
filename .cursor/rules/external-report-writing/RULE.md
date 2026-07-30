@@ -1,15 +1,15 @@
 ---
 description: >-
-  对外汇报与日报润色表述准则：去掉无业务含义的内部实现细节
+  对外汇报与提交说明表述准则：去掉无业务含义的内部实现细节
   （随意寄存器号、自取名配置文件、函数类名等），用业务语言写成果。
-  在「复制到日报」、软件信息采集表、验收文档等场景适用。
+  在「AI 整理提交说明」、软件信息采集表、验收文档、日报等场景适用。
 globs:
 alwaysApply: false
 ---
 
 # 对外汇报表述准则
 
-写日报、采集表、设计/使用说明中的「主要功能 / 技术特点」、或任何给上级/客户看的文字时，遵守本准则。
+写提交说明、日报、采集表、设计/使用说明中的「主要功能 / 技术特点」、或任何给上级/客户看的文字时，遵守本准则。
 
 ## 必须去掉或改写
 
@@ -29,7 +29,10 @@ alwaysApply: false
 | libmodbus_backend.so | 通信协议处理可与主程序解耦升级 |
 | Modbus TCP（非协议专章时） | 工业通信 / 工业以太网通信 |
 
-## DeepSeek「复制到日报」
+## DeepSeek「AI 整理提交说明」
 
-`MainWindow::onGitCopyForDailyReportClicked` 会调用 DeepSeek，system prompt 为
-`dailyReportPolishSystemPrompt()`，内容与本准则一致。改准则时请同步改该函数。
+`MainWindow::onGitAiCommitMsgClicked` 会调用 DeepSeek，system prompt 为
+`commitMsgSystemPrompt()`，内容与本准则一致。提交说明会进入 Git 历史，也会被
+「复制到日报」直接拼接，因此在提交时即按对外语言写好。改准则时请同步改该函数。
+
+「复制到日报」不再二次润色。

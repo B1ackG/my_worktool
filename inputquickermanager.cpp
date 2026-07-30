@@ -758,18 +758,25 @@ bool InputQuickerManager::isTriggerUsed(const QJsonObject &trigger, const QStrin
     const QString code = trigger.value(QStringLiteral("code")).toString();
     const QString axis = trigger.value(QStringLiteral("axis")).toString();
     const QString direction = trigger.value(QStringLiteral("direction")).toString();
+    const bool isButtonLike = type == QStringLiteral("mouse_button")
+        || type == QStringLiteral("button_hold_drag");
 
     for (const QuickerBinding &binding : bindingsValue) {
         if (!excludeId.isEmpty() && binding.id == excludeId) {
             continue;
         }
         const QJsonObject existing = binding.trigger;
-        if (existing.value(QStringLiteral("type")).toString() != type) {
-            continue;
-        }
-        if (type == QStringLiteral("mouse_button")
+        const QString existingType = existing.value(QStringLiteral("type")).toString();
+        const bool existingButtonLike = existingType == QStringLiteral("mouse_button")
+            || existingType == QStringLiteral("button_hold_drag");
+
+        // Same physical button cannot own both click and hold-drag rules.
+        if (isButtonLike && existingButtonLike
             && existing.value(QStringLiteral("code")).toString() == code) {
             return true;
+        }
+        if (existingType != type) {
+            continue;
         }
         if (type == QStringLiteral("wheel")
             && existing.value(QStringLiteral("axis")).toString() == axis

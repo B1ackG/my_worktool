@@ -223,8 +223,6 @@ private slots:
     void onDeepSeekCommitMsgFailed(const QString &error);
     void onDeepSeekGitHelpReady(const QString &content);
     void onDeepSeekGitHelpFailed(const QString &error);
-    void onDeepSeekDailyReportReady(const QString &content);
-    void onDeepSeekDailyReportFailed(const QString &error);
     void onGitRemoveHistoryClicked();
     void onGitConsoleCommandSubmitted();
     void onGitDirChanged();
@@ -431,8 +429,6 @@ private:
     QPushButton *btnGitAskDeepSeek = nullptr;
     DeepSeekClient *deepSeekClient = nullptr;
     DeepSeekClient *deepSeekHelpClient = nullptr;
-    DeepSeekClient *deepSeekDailyReportClient = nullptr;
-    QString dailyReportDraftPending;
     bool gitAiCommitPendingConfirm = false;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
@@ -610,6 +606,8 @@ private:
                           QString *stderrOut = nullptr, int timeoutMs = 30000) const;
     /** Build status + diffs + recent log for DeepSeek commit-message prompt. */
     QString collectUncommittedContextForAi(const QString &workDir, QString *errorOut = nullptr) const;
+    /** System prompt for AI commit message (includes external-report writing rules). */
+    QString commitMsgSystemPrompt() const;
     /** Build Git console + repo snapshot for DeepSeek “what next” help. */
     QString collectGitHelpContextForAi(const QString &workDir) const;
     void setGitAiCommitBusy(bool busy);
@@ -663,8 +661,7 @@ private:
     QStringList fetchTodayCommitSubjects(const QString &workDir) const;
     bool isGitRepository(const QString &workDir) const;
     QString buildDailyReportContent(QString *errorOut = nullptr, bool showUiWarnings = true);
-    QString dailyReportPolishSystemPrompt() const;
-    void finishDailyReportCopy(const QString &content, bool polished);
+    void finishDailyReportCopy(const QString &content);
     QString dailyReportDocsDir() const;
     QString dailyReportFilePath() const;
     bool saveDailyReportToDocs(const QString &content);

@@ -27,13 +27,15 @@ QuickerBindingDialog::QuickerBindingDialog(InputQuickerManager *manager, QWidget
 
     triggerTypeCombo = new QComboBox(this);
     triggerTypeCombo->addItem(QStringLiteral("鼠标按键"), QStringLiteral("mouse_button"));
+    triggerTypeCombo->addItem(QStringLiteral("按住拖动"), QStringLiteral("button_hold_drag"));
     triggerTypeCombo->addItem(QStringLiteral("滚轮"), QStringLiteral("wheel"));
 
+    // Labels follow common MX Master mapping: EXTRA=侧键, FORWARD=额外键.
     buttonCodeCombo = new QComboBox(this);
-    buttonCodeCombo->addItem(QStringLiteral("侧键 4 (BTN_SIDE)"), QStringLiteral("BTN_SIDE"));
-    buttonCodeCombo->addItem(QStringLiteral("侧键 5 (BTN_EXTRA)"), QStringLiteral("BTN_EXTRA"));
+    buttonCodeCombo->addItem(QStringLiteral("侧键 (BTN_SIDE)"), QStringLiteral("BTN_SIDE"));
+    buttonCodeCombo->addItem(QStringLiteral("侧键 (BTN_EXTRA)"), QStringLiteral("BTN_EXTRA"));
     buttonCodeCombo->addItem(QStringLiteral("后退 (BTN_BACK)"), QStringLiteral("BTN_BACK"));
-    buttonCodeCombo->addItem(QStringLiteral("前进 (BTN_FORWARD)"), QStringLiteral("BTN_FORWARD"));
+    buttonCodeCombo->addItem(QStringLiteral("额外键 (BTN_FORWARD)"), QStringLiteral("BTN_FORWARD"));
     buttonCodeCombo->addItem(QStringLiteral("中键 (BTN_MIDDLE)"), QStringLiteral("BTN_MIDDLE"));
 
     wheelAxisCombo = new QComboBox(this);
@@ -63,6 +65,9 @@ QuickerBindingDialog::QuickerBindingDialog(InputQuickerManager *manager, QWidget
     presetCombo->addItem(QStringLiteral("上一工作区"), QStringLiteral("workspace_prev"));
     presetCombo->addItem(QStringLiteral("下一工作区"), QStringLiteral("workspace_next"));
     presetCombo->addItem(QStringLiteral("活动概览"), QStringLiteral("activities_overview"));
+    presetCombo->addItem(QStringLiteral("左右分屏 (按住拖动)"), QStringLiteral("window_snap_horizontal"));
+    presetCombo->addItem(QStringLiteral("窗口分屏左"), QStringLiteral("window_snap_left"));
+    presetCombo->addItem(QStringLiteral("窗口分屏右"), QStringLiteral("window_snap_right"));
     presetCombo->addItem(QStringLiteral("音量增加"), QStringLiteral("volume_up"));
     presetCombo->addItem(QStringLiteral("音量减少"), QStringLiteral("volume_down"));
     presetCombo->addItem(QStringLiteral("静音"), QStringLiteral("mute"));
@@ -466,7 +471,19 @@ QuickerBinding QuickerBindingDialog::binding() const
     } else if (actionType == QStringLiteral("command")) {
         action.insert(QStringLiteral("command"), commandEdit->text().trimmed());
     } else {
-        action.insert(QStringLiteral("preset"), presetCombo->currentData().toString());
+        const QString preset = presetCombo->currentData().toString();
+        action.insert(QStringLiteral("preset"), preset);
+        // Hold-drag snap: keep short-tap fallback (default overview) so it
+        // does not fight a separate mouse_button binding on the same key.
+        if (result.trigger.value(QStringLiteral("type")).toString()
+                == QStringLiteral("button_hold_drag")
+            && preset == QStringLiteral("window_snap_horizontal")) {
+            QString tapPreset = currentBinding.action.value(QStringLiteral("tapPreset")).toString();
+            if (tapPreset.isEmpty()) {
+                tapPreset = QStringLiteral("activities_overview");
+            }
+            action.insert(QStringLiteral("tapPreset"), tapPreset);
+        }
     }
     result.action = action;
     return result;
@@ -490,7 +507,8 @@ void QuickerBindingDialog::onTriggerTypeChanged(int index)
 {
     Q_UNUSED(index)
     const QString triggerType = triggerTypeCombo->currentData().toString();
-    const bool isButton = triggerType == QStringLiteral("mouse_button");
+    const bool isButton = triggerType == QStringLiteral("mouse_button")
+        || triggerType == QStringLiteral("button_hold_drag");
     buttonCodeCombo->setVisible(isButton);
     wheelAxisCombo->setVisible(!isButton);
     wheelDirectionCombo->setVisible(!isButton);
@@ -550,11 +568,17 @@ void QuickerBindingDialog::onCaptureTriggerClicked()
 QJsonObject QuickerBindingDialog::currentTrigger() const
 {
     const QString triggerType = triggerTypeCombo->currentData().toString();
-    if (triggerType == QStringLiteral("mouse_button")) {
-        return QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("mouse_button")},
+    if (triggerType == QStringLiteral("mouse_button")
+        || triggerType == QStringLiteral("button_hold_drag")) {
+        QJsonObject trigger{
+            {QStringLiteral("type"), triggerType},
             {QStringLiteral("code"), buttonCodeCombo->currentData().toString()}
         };
+        if (triggerType == QStringLiteral("button_hold_drag")) {
+            const int existing = currentBinding.trigger.value(QStringLiteral("threshold")).toInt(100);
+            trigger.insert(QStringLiteral("threshold"), existing > 0 ? existing : 100);
+        }
+        return trigger;
     }
     return QJsonObject{
         {QStringLiteral("type"), QStringLiteral("wheel")},
@@ -568,6 +592,10 @@ QString QuickerBindingDialog::triggerSummary(const QJsonObject &trigger) const
     const QString type = trigger.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("mouse_button")) {
         return QStringLiteral("当前: 鼠标键 %1").arg(trigger.value(QStringLiteral("code")).toString());
+    }
+    if (type == QStringLiteral("button_hold_drag")) {
+        return QStringLiteral("当前: 按住 %1 左右拖动分屏")
+            .arg(trigger.value(QStringLiteral("code")).toString());
     }
     if (type == QStringLiteral("wheel")) {
         const QString direction = trigger.value(QStringLiteral("direction")).toString();
