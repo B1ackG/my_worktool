@@ -1,10 +1,34 @@
 #include "mainwindow.h"
 #include <QApplication>
 #include <QFont>
+#include <QProcess>
 #include <QStyleFactory>
+
+// GNOME autostart often races Xft.dpi: Qt then uses physical DPI (~188 on HiDPI)
+// as logical DPI and point fonts become ~2x. Prefer X resources; else 96.
+static int resolveSessionFontDpi()
+{
+    QProcess xrdb;
+    xrdb.start(QStringLiteral("xrdb"), {QStringLiteral("-query")});
+    if (!xrdb.waitForFinished(800) || xrdb.exitStatus() != QProcess::NormalExit || xrdb.exitCode() != 0)
+        return 96;
+    const QList<QByteArray> lines = xrdb.readAllStandardOutput().split('\n');
+    for (const QByteArray &line : lines) {
+        if (!line.startsWith("Xft.dpi:"))
+            continue;
+        bool ok = false;
+        const int dpi = line.mid(8).trimmed().toInt(&ok);
+        if (ok && dpi >= 48 && dpi <= 480)
+            return dpi;
+    }
+    return 96;
+}
 
 int main(int argc, char *argv[])
 {
+    if (qEnvironmentVariableIsEmpty("QT_FONT_DPI"))
+        qputenv("QT_FONT_DPI", QByteArray::number(resolveSessionFontDpi()));
+
     QApplication a(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("LiChenYang"));
     QApplication::setApplicationName(QStringLiteral("LinuxHelper"));

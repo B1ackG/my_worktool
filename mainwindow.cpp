@@ -2095,7 +2095,9 @@ bool MainWindow::setAutostartEnabled(bool enabled)
             + QByteArrayLiteral("Terminal=false\n")
             + QByteArrayLiteral("Categories=Utility;\n")
             + QByteArrayLiteral("StartupNotify=true\n")
-            + QByteArrayLiteral("X-GNOME-Autostart-enabled=true\n");
+            + QByteArrayLiteral("X-GNOME-Autostart-enabled=true\n")
+            // Let GNOME finish applying Xft.dpi before Qt reads screen metrics.
+            + QByteArrayLiteral("X-GNOME-Autostart-Delay=5\n");
 
         QFile file(desktopPath);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
