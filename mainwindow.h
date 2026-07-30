@@ -219,7 +219,6 @@ private slots:
     void onGitCopyForDailyReportClicked();
     void onGitOpenDailyReportClicked();
     void onGitOpenSkillsClicked();
-    void onDailyReportAutoSaveTick();
     void onDeepSeekCommitMsgReady(const QString &content);
     void onDeepSeekCommitMsgFailed(const QString &error);
     void onDeepSeekGitHelpReady(const QString &content);
@@ -493,7 +492,6 @@ private:
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
-    QTimer *dailyReportAutoSaveTimer = nullptr;
     QTimer *gitNetworkTimeout = nullptr;
     QProcess *gitNetworkProcess = nullptr;
     bool gitNetworkBusy = false;
@@ -668,7 +666,7 @@ private:
     QString dailyReportPolishSystemPrompt() const;
     void finishDailyReportCopy(const QString &content, bool polished);
     QString dailyReportDocsDir() const;
-    QString dailyReportFilePathForToday() const;
+    QString dailyReportFilePath() const;
     bool saveDailyReportToDocs(const QString &content);
     void tryAutoSaveDailyReport();
     QString gitGoalsRepoKey(const QString &repoDir) const;

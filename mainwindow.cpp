@@ -643,13 +643,6 @@ MainWindow::MainWindow(QWidget *parent)
     loadAutoScene(); // 自动加载上次保存的寄存器设置、格式和波形
     syncSimulatorTablesFromMaps();
 
-    dailyReportAutoSaveTimer = new QTimer(this);
-    dailyReportAutoSaveTimer->setInterval(60 * 1000);
-    connect(dailyReportAutoSaveTimer, &QTimer::timeout, this, &MainWindow::onDailyReportAutoSaveTick);
-    dailyReportAutoSaveTimer->start();
-    // 稍晚检查，给节假日助手 API 留出时间更新 isWorkdayToday
-    QTimer::singleShot(8000, this, &MainWindow::onDailyReportAutoSaveTick);
-
     connect(simMainDevice, &ModbusSlave::clientConnected, this, [this](){
         int count = simMainDevice->clientCount();
         lblSimMainStatus->setText(QString("在线(%1)").arg(count));
@@ -1813,7 +1806,7 @@ void MainWindow::createMenus()
     });
 
     QAction *actOpenDaily = fileMenu->addAction(QStringLiteral("打开日报"));
-    actOpenDaily->setToolTip(QStringLiteral("用系统默认程序打开今日日报文件"));
+    actOpenDaily->setToolTip(QStringLiteral("用系统默认程序打开日报文件"));
     connect(actOpenDaily, &QAction::triggered, this, [this]() {
         navWidget->setCurrentRow(2);
         onGitOpenDailyReportClicked();
@@ -5316,6 +5309,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         event->ignore();
         return;
     }
+    tryAutoSaveDailyReport();
     QMainWindow::closeEvent(event);
 }
 
@@ -7359,9 +7353,9 @@ void MainWindow::onDeepSeekDailyReportFailed(const QString &error)
 }
 
 void MainWindow::onGitOpenDailyReportClicked() {
-    const QString filePath = dailyReportFilePathForToday();
+    const QString filePath = dailyReportFilePath();
     if (!QFileInfo::exists(filePath)) {
-        txtGitLog->append(QStringLiteral("<font color='red'>错误: 今日日报文件不存在: %1</font>").arg(filePath));
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 日报文件不存在: %1</font>").arg(filePath));
         txtGitLog->append(QStringLiteral("提示: 可先点击「复制到日报」生成文件。"));
         return;
     }
@@ -7493,9 +7487,8 @@ QString MainWindow::dailyReportDocsDir() const {
         .filePath(QStringLiteral("docs/日报"));
 }
 
-QString MainWindow::dailyReportFilePathForToday() const {
-    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
-    return QDir(dailyReportDocsDir()).filePath(today + QStringLiteral(".txt"));
+QString MainWindow::dailyReportFilePath() const {
+    return QDir(dailyReportDocsDir()).filePath(QStringLiteral("日报.txt"));
 }
 
 bool MainWindow::saveDailyReportToDocs(const QString &content) {
@@ -7508,16 +7501,63 @@ bool MainWindow::saveDailyReportToDocs(const QString &content) {
         return false;
     }
 
-    const QString filePath = dailyReportFilePathForToday();
+    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+    const QString dateHeader = QStringLiteral("======== %1 ========").arg(today);
+    const QString todayBlock = dateHeader + QLatin1Char('\n') + content.trimmed() + QLatin1Char('\n');
+
+    const QString filePath = dailyReportFilePath();
+    QString existing;
+    {
+        QFile inFile(filePath);
+        if (inFile.exists() && inFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            existing = QString::fromUtf8(inFile.readAll());
+            inFile.close();
+        }
+    }
+
+    // 按日期标题拆分已有内容，替换或插入今日条目（最新日期在前）
+    static const QRegularExpression dateHeaderRe(
+        QStringLiteral("^======== (\\d{4}-\\d{2}-\\d{2}) ========\\s*$"),
+        QRegularExpression::MultilineOption);
+
+    QList<QRegularExpressionMatch> matches;
+    QRegularExpressionMatchIterator it = dateHeaderRe.globalMatch(existing);
+    while (it.hasNext())
+        matches.append(it.next());
+
+    QStringList otherBlocks;
+    for (int i = 0; i < matches.size(); ++i) {
+        const QRegularExpressionMatch &m = matches.at(i);
+        if (m.captured(1) == today)
+            continue;
+        const int blockEnd = (i + 1 < matches.size()) ? matches.at(i + 1).capturedStart()
+                                                      : existing.size();
+        const QString block = existing.mid(m.capturedStart(), blockEnd - m.capturedStart()).trimmed();
+        if (!block.isEmpty())
+            otherBlocks.append(block);
+    }
+
+    // 无日期标题的旧内容保留在末尾
+    QString leftover;
+    if (matches.isEmpty() && !existing.trimmed().isEmpty()) {
+        leftover = existing.trimmed();
+    } else if (!matches.isEmpty() && matches.first().capturedStart() > 0) {
+        leftover = existing.left(matches.first().capturedStart()).trimmed();
+    }
+
+    QString out = todayBlock;
+    if (!otherBlocks.isEmpty())
+        out += QLatin1Char('\n') + otherBlocks.join(QStringLiteral("\n\n")) + QLatin1Char('\n');
+    if (!leftover.isEmpty())
+        out += QLatin1Char('\n') + leftover + QLatin1Char('\n');
+
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
         txtGitLog->append(QStringLiteral("<font color='red'>[日报] 无法写入文件: %1</font>").arg(filePath));
         return false;
     }
 
-    QByteArray bytes = content.toUtf8();
-    if (!content.endsWith(QLatin1Char('\n')))
-        bytes.append('\n');
+    const QByteArray bytes = out.toUtf8();
     if (file.write(bytes) != bytes.size()) {
         txtGitLog->append(QStringLiteral("<font color='red'>[日报] 写入不完整: %1</font>").arg(filePath));
         file.close();
@@ -7525,43 +7565,25 @@ bool MainWindow::saveDailyReportToDocs(const QString &content) {
     }
     file.close();
 
-    txtGitLog->append(QStringLiteral("<font color='green'>[日报] 已保存到 %1</font>").arg(filePath));
+    txtGitLog->append(QStringLiteral("<font color='green'>[日报] 已保存到 %1（%2）</font>")
+                          .arg(filePath, today));
     return true;
 }
 
-void MainWindow::onDailyReportAutoSaveTick() {
-    tryAutoSaveDailyReport();
-}
-
 void MainWindow::tryAutoSaveDailyReport() {
-    if (!lifeAssistant || !lifeAssistant->isWorkdayToday())
-        return;
-
-    const QTime now = QTime::currentTime();
-    if (now < QTime(17, 30))
-        return;
-
-    const QString today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
-    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    settings.beginGroup(QStringLiteral("GitDailyReport"));
-    const QString lastAutoSaveDate = settings.value(QStringLiteral("lastAutoSaveDate")).toString();
-    if (lastAutoSaveDate == today) {
-        settings.endGroup();
-        return;
-    }
-
     QString errorMsg;
     const QString content = buildDailyReportContent(&errorMsg, false);
     if (content.isEmpty()) {
-        txtGitLog->append(QStringLiteral("<font color='orange'>[日报] 工作日 17:30 自动保存跳过: %1</font>")
-                              .arg(errorMsg.isEmpty() ? QStringLiteral("无内容") : errorMsg));
-    } else {
-        saveDailyReportToDocs(content);
-        txtGitLog->append(QStringLiteral("<font color='green'>[日报] 工作日 17:30 自动保存完成</font>"));
+        if (txtGitLog) {
+            txtGitLog->append(QStringLiteral("<font color='orange'>[日报] 关闭时自动保存跳过: %1</font>")
+                                  .arg(errorMsg.isEmpty() ? QStringLiteral("无内容") : errorMsg));
+        }
+        return;
     }
 
-    settings.setValue(QStringLiteral("lastAutoSaveDate"), today);
-    settings.endGroup();
+    if (saveDailyReportToDocs(content) && txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='green'>[日报] 关闭时自动保存完成</font>"));
+    }
 }
 
 void MainWindow::onScpTransferClicked() {
