@@ -65,6 +65,9 @@ int main(int argc, char *argv[])
         "QStatusBar { background: #ffffff; border-top: 1px solid #dde3ea; }"
     ));
 
+    // Keep process alive when main window is hidden to the system tray.
+    QApplication::setQuitOnLastWindowClosed(false);
+
     MainWindow w;
     w.show();
     return a.exec();

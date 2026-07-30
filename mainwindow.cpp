@@ -73,6 +73,8 @@
 #include <QScrollArea>
 #include <QSplitter>
 #include <QSignalBlocker>
+#include <QStyle>
+#include <QSystemTrayIcon>
 
 namespace {
 
@@ -626,6 +628,7 @@ MainWindow::MainWindow(QWidget *parent)
     createLayouts();
     createMenus();
     createConnections();
+    setupSystemTray();
 
     // Load History
     loadConnectionHistory();
@@ -1851,7 +1854,7 @@ void MainWindow::createMenus()
     fileMenu->addSeparator();
     QAction *actQuit = fileMenu->addAction(QStringLiteral("退出"));
     actQuit->setShortcut(QKeySequence::Quit);
-    connect(actQuit, &QAction::triggered, this, &QWidget::close);
+    connect(actQuit, &QAction::triggered, this, &MainWindow::quitApplication);
 
     // --- 视图 ---
     QMenu *viewMenu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
@@ -1941,6 +1944,10 @@ void MainWindow::createMenus()
     });
 
     settingsMenu->addSeparator();
+
+    QAction *actCloseBehavior = settingsMenu->addAction(QStringLiteral("关闭时行为…"));
+    actCloseBehavior->setToolTip(QStringLiteral("点击窗口关闭按钮时：每次询问 / 缩小到托盘 / 退出程序"));
+    connect(actCloseBehavior, &QAction::triggered, this, &MainWindow::showCloseBehaviorDialog);
 
     actDeepSeekSettings = settingsMenu->addAction(QStringLiteral("DeepSeek 设置…"));
     actDeepSeekSettings->setToolTip(QStringLiteral("配置 API Key / Base URL / 模型名（保存在本机，不进仓库）"));
@@ -2140,6 +2147,179 @@ void MainWindow::onAutostartToggled(bool checked)
                          QStringLiteral("设置失败"),
                          checked ? QStringLiteral("无法启用开机自启动，请检查程序是否有写入权限。")
                                  : QStringLiteral("无法关闭开机自启动，请检查 autostart 目录权限。"));
+}
+
+MainWindow::CloseBehavior MainWindow::closeBehavior() const
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const int value = settings.value(QStringLiteral("ui/closeBehavior"),
+                                     static_cast<int>(CloseBehavior::Ask)).toInt();
+    switch (value) {
+    case static_cast<int>(CloseBehavior::MinimizeToTray):
+        return CloseBehavior::MinimizeToTray;
+    case static_cast<int>(CloseBehavior::Quit):
+        return CloseBehavior::Quit;
+    default:
+        return CloseBehavior::Ask;
+    }
+}
+
+void MainWindow::setCloseBehavior(CloseBehavior behavior)
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.setValue(QStringLiteral("ui/closeBehavior"), static_cast<int>(behavior));
+}
+
+void MainWindow::setupSystemTray()
+{
+    if (!QSystemTrayIcon::isSystemTrayAvailable())
+        return;
+
+    trayIcon = new QSystemTrayIcon(this);
+    QIcon icon = windowIcon();
+    if (icon.isNull())
+        icon = style()->standardIcon(QStyle::SP_ComputerIcon);
+    setWindowIcon(icon);
+    trayIcon->setIcon(icon);
+    trayIcon->setToolTip(QApplication::applicationDisplayName());
+
+    auto *menu = new QMenu(this);
+    QAction *actShow = menu->addAction(QStringLiteral("显示主窗口"));
+    connect(actShow, &QAction::triggered, this, &MainWindow::onTrayShowClicked);
+    menu->addSeparator();
+    QAction *actQuit = menu->addAction(QStringLiteral("退出"));
+    connect(actQuit, &QAction::triggered, this, &MainWindow::onTrayQuitClicked);
+    trayIcon->setContextMenu(menu);
+
+    connect(trayIcon, &QSystemTrayIcon::activated, this, &MainWindow::onTrayActivated);
+    trayIcon->show();
+}
+
+void MainWindow::minimizeToTray()
+{
+    if (!trayIcon)
+        return;
+    hide();
+    if (!trayIcon->isVisible())
+        trayIcon->show();
+}
+
+void MainWindow::restoreFromTray()
+{
+    showNormal();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::onTrayActivated(QSystemTrayIcon::ActivationReason reason)
+{
+    if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick)
+        onTrayShowClicked();
+}
+
+void MainWindow::onTrayShowClicked()
+{
+    restoreFromTray();
+}
+
+void MainWindow::onTrayQuitClicked()
+{
+    quitApplication();
+}
+
+void MainWindow::quitApplication()
+{
+    forceQuit = true;
+    close();
+}
+
+bool MainWindow::promptCloseBehavior(CloseBehavior *chosenOut)
+{
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QStringLiteral("关闭窗口"));
+    box.setText(QStringLiteral("关闭主窗口时："));
+    box.setInformativeText(QStringLiteral("可缩小到系统托盘继续在后台运行，或直接退出程序。"));
+
+    QPushButton *trayBtn = box.addButton(QStringLiteral("缩小到托盘"), QMessageBox::AcceptRole);
+    QPushButton *quitBtn = box.addButton(QStringLiteral("退出程序"), QMessageBox::DestructiveRole);
+    QPushButton *cancelBtn = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(trayBtn);
+
+    QCheckBox *remember = new QCheckBox(QStringLiteral("记住我的选择"), &box);
+    box.setCheckBox(remember);
+
+    if (!trayIcon || !QSystemTrayIcon::isSystemTrayAvailable()) {
+        trayBtn->setEnabled(false);
+        trayBtn->setToolTip(QStringLiteral("当前桌面环境未提供系统托盘"));
+        box.setDefaultButton(quitBtn);
+    }
+
+    box.exec();
+    if (box.clickedButton() == cancelBtn || !box.clickedButton())
+        return false;
+
+    CloseBehavior chosen = (box.clickedButton() == trayBtn)
+                               ? CloseBehavior::MinimizeToTray
+                               : CloseBehavior::Quit;
+    if (remember->isChecked())
+        setCloseBehavior(chosen);
+    if (chosenOut)
+        *chosenOut = chosen;
+    return true;
+}
+
+void MainWindow::showCloseBehaviorDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("关闭时行为"));
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+
+    QLabel *hint = new QLabel(
+        QStringLiteral("点击窗口关闭按钮（或 Alt+F4）时的默认行为。\n"
+                       "菜单「文件 → 退出」与托盘「退出」始终真正退出程序。"),
+        &dlg);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    QRadioButton *rbAsk = new QRadioButton(QStringLiteral("每次询问"), &dlg);
+    QRadioButton *rbTray = new QRadioButton(QStringLiteral("缩小到系统托盘"), &dlg);
+    QRadioButton *rbQuit = new QRadioButton(QStringLiteral("退出程序"), &dlg);
+    layout->addWidget(rbAsk);
+    layout->addWidget(rbTray);
+    layout->addWidget(rbQuit);
+
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        rbTray->setEnabled(false);
+        rbTray->setToolTip(QStringLiteral("当前桌面环境未提供系统托盘"));
+    }
+
+    switch (closeBehavior()) {
+    case CloseBehavior::MinimizeToTray:
+        rbTray->setChecked(true);
+        break;
+    case CloseBehavior::Quit:
+        rbQuit->setChecked(true);
+        break;
+    default:
+        rbAsk->setChecked(true);
+        break;
+    }
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    if (rbTray->isChecked())
+        setCloseBehavior(CloseBehavior::MinimizeToTray);
+    else if (rbQuit->isChecked())
+        setCloseBehavior(CloseBehavior::Quit);
+    else
+        setCloseBehavior(CloseBehavior::Ask);
 }
 
 void MainWindow::createLayouts()
@@ -5302,12 +5482,41 @@ void MainWindow::pullAllRemoteAheadRepos(const QStringList &repoDirs)
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    if (!forceQuit) {
+        CloseBehavior behavior = closeBehavior();
+        if (behavior == CloseBehavior::Ask) {
+            CloseBehavior chosen = CloseBehavior::Quit;
+            if (!promptCloseBehavior(&chosen)) {
+                event->ignore();
+                return;
+            }
+            behavior = chosen;
+        }
+        if (behavior == CloseBehavior::MinimizeToTray) {
+            if (!trayIcon || !trayIcon->isVisible()) {
+                QMessageBox::warning(
+                    this, QStringLiteral("系统托盘不可用"),
+                    QStringLiteral("当前桌面环境未提供系统托盘，无法缩小到托盘，请直接退出或稍后重试。"));
+                event->ignore();
+                return;
+            }
+            minimizeToTray();
+            event->ignore();
+            return;
+        }
+    }
+
     if (!confirmExitDespiteGitPending()) {
+        forceQuit = false;
         event->ignore();
         return;
     }
     tryAutoSaveDailyReport();
+    if (trayIcon)
+        trayIcon->hide();
+    forceQuit = true;
     QMainWindow::closeEvent(event);
+    QApplication::quit();
 }
 
 void MainWindow::onGitRefreshBranchesClicked(bool fetchRemote) {

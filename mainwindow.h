@@ -34,6 +34,7 @@
 #include <QHeaderView>
 #include <QMenu>
 #include <QAction>
+#include <QSystemTrayIcon>
 #include <QJsonObject>
 #include <QSet>
 #include <QHash>
@@ -248,6 +249,11 @@ private slots:
     // Settings
     void onAutostartToggled(bool checked);
     void showPlatformModeDialog();
+    void showCloseBehaviorDialog();
+    void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
+    void onTrayShowClicked();
+    void onTrayQuitClicked();
+    void quitApplication();
 
     // Simulator Slots
     void onStartSimulatorClicked();
@@ -265,15 +271,27 @@ private slots:
     void onSimShowWaveformEditor(int row);
 
 private:
+    enum class CloseBehavior {
+        Ask = 0,
+        MinimizeToTray = 1,
+        Quit = 2
+    };
+
     void createWidgets();
     void createLayouts();
     void createConnections();
     void createMenus();
+    void setupSystemTray();
     void syncAutostartActionState();
     bool isAutostartEnabled() const;
     bool setAutostartEnabled(bool enabled);
     QString autostartDesktopFilePath() const;
     QString autostartRegistryKey() const;
+    CloseBehavior closeBehavior() const;
+    void setCloseBehavior(CloseBehavior behavior);
+    bool promptCloseBehavior(CloseBehavior *chosenOut);
+    void minimizeToTray();
+    void restoreFromTray();
     
     // Helpers to init pages
     QWidget* createModbusPage();
@@ -288,6 +306,8 @@ private:
     QAction *actAutostart = nullptr;
     QAction *actExeReminder = nullptr;
     QAction *actDeepSeekSettings = nullptr;
+    QSystemTrayIcon *trayIcon = nullptr;
+    bool forceQuit = false;
     QWidget *centralWidget;
     QHBoxLayout *mainLayout; // Horizontal: Nav + Stack
     QListWidget *navWidget;
