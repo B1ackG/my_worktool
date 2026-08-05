@@ -20,6 +20,7 @@
 #include <QCheckBox>
 #include <QProgressBar>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QScrollBar>
 #include <functional>
 #include <QStackedWidget>
@@ -36,6 +37,7 @@
 #include <QAction>
 #include <QSystemTrayIcon>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QSet>
 #include <QHash>
 #include <QDirIterator>
@@ -170,6 +172,10 @@ private slots:
     // Add these helper methods
     void saveAutoScene();
     void loadAutoScene();
+    void refreshWaveChannelsTable();
+    void updateSimTickTimerState();
+    QJsonArray waveformsToJson() const;
+    void applyWaveformsFromJson(const QJsonArray &waveArr);
 
     // Serial Port Slots
     void onSerialOpenClicked();
@@ -823,20 +829,24 @@ private:
     struct CyclicTimer {
         QString device; // "Main" or "AGV"
         quint16 addr;
-        QString type; // "Sine", "Square", "Triangle", "Random", "Sawtooth"
-        double amplitude;
-        double offset;
-        double period; // in seconds
-        double phase; // in degrees
-        double dutyCycle; // for square wave (0-1)
-        int currentTicks;
-        bool active;
+        QString type; // UI labels: 正弦波/方波/三角波/锯齿波/随机/来回增减
+        double amplitude = 0.0;
+        double offset = 0.0;
+        double period = 1.0; // seconds
+        double phase = 0.0; // degrees
+        double dutyCycle = 0.5; // square wave 0-1
+        double elapsedSec = 0.0; // real-time phase base while active
+        qint64 lastUiMs = -1000;
+        qint64 lastLogMs = -1000;
+        bool active = false;
         int cachedRow = -1;
         QString cachedFmt;
         bool cacheValid = false;
     };
     QList<CyclicTimer> simCyclicTimers;
-    QTimer *simTickTimer;
+    QTimer *simTickTimer = nullptr;
+    QElapsedTimer simWaveClock;
+    qint64 simWaveLastMs = -1;
 
     // UI Widgets for Waveform Configuration
     QComboBox *cmbWaveDevice;

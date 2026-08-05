@@ -696,8 +696,9 @@ MainWindow::MainWindow(QWidget *parent)
     btnSimStopAGV->setEnabled(false);
     lblSimAGVStatus->setText("离线"); lblSimAGVStatus->setStyleSheet("color: red; font-weight: bold;");
 
-    // 程序启动时确保波形初始状态为停止
-    onSimStopAllWaveformsClicked();
+    // 恢复场景中的波形通道状态，并按需启动采样定时器
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
 }
 
 MainWindow::~MainWindow()
@@ -2520,66 +2521,149 @@ void MainWindow::createConnections()
     
     simTickTimer = new QTimer(this);
     connect(simTickTimer, &QTimer::timeout, this, &MainWindow::onSimTimerTick);
-    simTickTimer->start(100); 
+    // 仅在有激活通道时由 updateSimTickTimerState() 启动，避免空转
+}
+
+void MainWindow::refreshWaveChannelsTable()
+{
+    if (!tblWaveChannels) return;
+
+    tblWaveChannels->setRowCount(simCyclicTimers.size());
+    for (int i = 0; i < simCyclicTimers.size(); ++i) {
+        const CyclicTimer &ct = simCyclicTimers[i];
+        tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV")));
+        tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
+        tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
+        tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active ? QStringLiteral("运行中") : QStringLiteral("停止")));
+
+        QPushButton *btnRemove = new QPushButton(QStringLiteral("删除"));
+        tblWaveChannels->setCellWidget(i, 4, btnRemove);
+        connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
+    }
+}
+
+void MainWindow::updateSimTickTimerState()
+{
+    if (!simTickTimer) return;
+
+    bool anyActive = false;
+    for (const CyclicTimer &t : simCyclicTimers) {
+        if (t.active) {
+            anyActive = true;
+            break;
+        }
+    }
+
+    if (anyActive) {
+        if (!simTickTimer->isActive()) {
+            simWaveClock.restart();
+            simWaveLastMs = -1;
+            simTickTimer->start(100);
+        }
+    } else if (simTickTimer->isActive()) {
+        simTickTimer->stop();
+        simWaveLastMs = -1;
+    }
+}
+
+QJsonArray MainWindow::waveformsToJson() const
+{
+    QJsonArray waveArr;
+    for (const CyclicTimer &t : simCyclicTimers) {
+        QJsonObject o;
+        o.insert(QStringLiteral("device"), t.device);
+        o.insert(QStringLiteral("addr"), int(t.addr));
+        o.insert(QStringLiteral("type"), t.type);
+        o.insert(QStringLiteral("amplitude"), t.amplitude);
+        o.insert(QStringLiteral("offset"), t.offset);
+        o.insert(QStringLiteral("period"), t.period);
+        o.insert(QStringLiteral("phase"), t.phase);
+        o.insert(QStringLiteral("dutyCycle"), t.dutyCycle);
+        o.insert(QStringLiteral("active"), t.active);
+        waveArr.append(o);
+    }
+    return waveArr;
+}
+
+void MainWindow::applyWaveformsFromJson(const QJsonArray &waveArr)
+{
+    simCyclicTimers.clear();
+    for (const QJsonValue &v : waveArr) {
+        const QJsonObject o = v.toObject();
+        CyclicTimer t;
+        t.device = o.value(QStringLiteral("device")).toString();
+        t.addr = static_cast<quint16>(o.value(QStringLiteral("addr")).toInt());
+        t.type = o.value(QStringLiteral("type")).toString();
+        t.amplitude = o.value(QStringLiteral("amplitude")).toDouble();
+        t.offset = o.value(QStringLiteral("offset")).toDouble();
+        t.period = o.value(QStringLiteral("period")).toDouble(1.0);
+        t.phase = o.value(QStringLiteral("phase")).toDouble();
+        t.dutyCycle = o.value(QStringLiteral("dutyCycle")).toDouble(0.5);
+        t.elapsedSec = 0.0;
+        t.lastUiMs = -1000;
+        t.lastLogMs = -1000;
+        t.active = o.value(QStringLiteral("active")).toBool();
+        t.cacheValid = false;
+        simCyclicTimers.append(t);
+    }
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
 }
 
 void MainWindow::onSimStopAllWaveformsClicked()
 {
     if (simCyclicTimers.isEmpty()) return;
 
-    // 如果当前有任何一个是激活的，则全部停止；如果全都是停止的，则全部激活。
+    // 若有任一通道在跑则全部暂停；否则全部恢复（保留 elapsedSec，相位连续）
     bool anyActive = false;
-    for (const auto &t : simCyclicTimers) if (t.active) { anyActive = true; break; }
-
-    for (int i=0; i<simCyclicTimers.size(); ++i) {
-        simCyclicTimers[i].active = !anyActive;
-    }
-    
-    // 刷新日志和界面
-    QString status = anyActive ? "全部停止" : "全部启动";
-    txtSimLog->append(QString("[%1] 周期波形已%2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(status));
-    
-    // 强制刷新表格显示
-    if (tblWaveChannels) {
-        tblWaveChannels->setRowCount(simCyclicTimers.size());
-        for (int i=0; i<simCyclicTimers.size(); ++i) {
-            const CyclicTimer &ct = simCyclicTimers[i];
-            tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device == "Main" ? "主设备" : "AGV"));
-            tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
-            tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
-            tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active ? "运行中" : "停止"));
-            
-            QPushButton *btnRemove = new QPushButton("删除");
-            tblWaveChannels->setCellWidget(i, 4, btnRemove);
-            connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
+    for (const CyclicTimer &t : simCyclicTimers) {
+        if (t.active) {
+            anyActive = true;
+            break;
         }
     }
+
+    for (int i = 0; i < simCyclicTimers.size(); ++i) {
+        simCyclicTimers[i].active = !anyActive;
+    }
+
+    const QString status = anyActive ? QStringLiteral("全部停止") : QStringLiteral("全部启动");
+    if (txtSimLog) {
+        txtSimLog->append(QStringLiteral("[%1] 周期波形已%2")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), status));
+    }
+
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
 }
 
 void MainWindow::onSimAddCyclicTimerClicked()
 {
     if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveAmp || !spinWaveOffset || !spinWavePeriod || !tblWaveChannels) {
         if (txtSimLog) {
-            txtSimLog->append(QString("[%1] 波形控件未初始化，无法添加通道").arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
+            txtSimLog->append(QStringLiteral("[%1] 波形控件未初始化，无法添加通道")
+                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
         }
         return;
     }
 
     CyclicTimer t;
-    t.device = cmbWaveDevice->currentText() == "主设备" ? "Main" : "AGV";
-    t.addr = (quint16)spinWaveAddr->value();
+    t.device = cmbWaveDevice->currentText() == QStringLiteral("主设备") ? QStringLiteral("Main") : QStringLiteral("AGV");
+    t.addr = static_cast<quint16>(spinWaveAddr->value());
     t.type = cmbWaveType->currentText();
     t.amplitude = spinWaveAmp->value();
     t.offset = spinWaveOffset->value();
-    t.period = spinWavePeriod->value();
+    t.period = qMax(0.001, spinWavePeriod->value());
     t.phase = spinWavePhase ? spinWavePhase->value() : 0.0;
     t.dutyCycle = spinWaveDuty ? spinWaveDuty->value() : 0.5;
-    t.currentTicks = 0;
+    t.elapsedSec = 0.0;
+    t.lastUiMs = -1000;
+    t.lastLogMs = -1000;
     t.active = true;
+    t.cacheValid = false;
 
-    // Replace if exists, else append
     bool found = false;
-    for (int i=0; i<simCyclicTimers.size(); ++i) {
+    for (int i = 0; i < simCyclicTimers.size(); ++i) {
         if (simCyclicTimers[i].device == t.device && simCyclicTimers[i].addr == t.addr) {
             simCyclicTimers[i] = t;
             found = true;
@@ -2588,150 +2672,161 @@ void MainWindow::onSimAddCyclicTimerClicked()
     }
     if (!found) simCyclicTimers.append(t);
 
-    // Refresh UI Table
-    tblWaveChannels->setRowCount(simCyclicTimers.size());
-    for (int i=0; i<simCyclicTimers.size(); ++i) {
-        const CyclicTimer &ct = simCyclicTimers[i];
-        tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device == "Main" ? "主设备" : "AGV"));
-        tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
-        tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
-        tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active ? "运行中" : "停止"));
-        
-        QPushButton *btnRemove = new QPushButton("删除");
-        tblWaveChannels->setCellWidget(i, 4, btnRemove);
-        connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
-    }
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
 }
 
 void MainWindow::onSimRemoveCyclicTimerClicked()
 {
     QPushButton *btn = qobject_cast<QPushButton*>(sender());
-    if (!btn) return;
-    // 通过位置查找对应行
+    if (!btn || !tblWaveChannels) return;
+
     int row = -1;
-    for(int r=0; r < tblWaveChannels->rowCount(); ++r) {
-        if(tblWaveChannels->cellWidget(r, 4) == btn) {
+    for (int r = 0; r < tblWaveChannels->rowCount(); ++r) {
+        if (tblWaveChannels->cellWidget(r, 4) == btn) {
             row = r;
             break;
         }
     }
-    if (row >= 0 && row < simCyclicTimers.size()) {
-        QString msg = QString("停止并移除波形通道: %1 地址 %2").arg(simCyclicTimers[row].device).arg(simCyclicTimers[row].addr);
-        txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(msg));
-        simCyclicTimers.removeAt(row);
-        // 刷新界面表格内容
-        onSimAddCyclicTimerClicked(); 
+    if (row < 0 || row >= simCyclicTimers.size()) return;
+
+    if (txtSimLog) {
+        const QString msg = QStringLiteral("停止并移除波形通道: %1 地址 %2")
+                                .arg(simCyclicTimers[row].device)
+                                .arg(simCyclicTimers[row].addr);
+        txtSimLog->append(QStringLiteral("[%1] %2")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), msg));
     }
+    simCyclicTimers.removeAt(row);
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
 }
 
 void MainWindow::onSimTimerTick()
 {
-    for (int i=0; i<simCyclicTimers.size(); ++i) {
+    if (!simWaveClock.isValid())
+        simWaveClock.start();
+
+    const qint64 nowMs = simWaveClock.elapsed();
+    double dt = (simWaveLastMs < 0) ? 0.0 : (nowMs - simWaveLastMs) / 1000.0;
+    // 休眠/卡顿后避免相位跳变过大
+    if (dt > 0.5)
+        dt = 0.1;
+    simWaveLastMs = nowMs;
+
+    for (int i = 0; i < simCyclicTimers.size(); ++i) {
         CyclicTimer &t = simCyclicTimers[i];
         if (!t.active) continue;
 
-        t.currentTicks++;
-        double currentTime = t.currentTicks * 0.1; // 100ms per tick
-        double freq = 1.0 / t.period;
-        double omega = 2 * M_PI * freq;
-        double phaseRad = t.phase * M_PI / 180.0;
-        
-        double val = 0;
-        if (t.type == "正弦波") {
+        t.elapsedSec += dt;
+        const double period = qMax(0.001, t.period);
+        const double currentTime = t.elapsedSec;
+        const double freq = 1.0 / period;
+        const double omega = 2.0 * M_PI * freq;
+        const double phaseRad = t.phase * M_PI / 180.0;
+
+        double val = 0.0;
+        if (t.type == QLatin1String("正弦波")) {
             val = t.amplitude * sin(omega * currentTime + phaseRad) + t.offset;
-        } else if (t.type == "方波") {
-            double cyclePos = fmod(currentTime + (t.phase/360.0)*t.period, t.period) / t.period;
+        } else if (t.type == QLatin1String("方波")) {
+            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            if (cyclePos < 0.0) cyclePos += 1.0;
             val = (cyclePos < t.dutyCycle) ? (t.amplitude + t.offset) : (-t.amplitude + t.offset);
-        } else if (t.type == "三角波") {
-            double cyclePos = fmod(currentTime + (t.phase/360.0)*t.period, t.period) / t.period;
+        } else if (t.type == QLatin1String("三角波")) {
+            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            if (cyclePos < 0.0) cyclePos += 1.0;
             if (cyclePos < 0.25) val = t.amplitude * (cyclePos * 4.0);
             else if (cyclePos < 0.75) val = t.amplitude * (2.0 - cyclePos * 4.0);
             else val = t.amplitude * (cyclePos * 4.0 - 4.0);
             val += t.offset;
-        } else if (t.type == "锯齿波") {
-            double cyclePos = fmod(currentTime + (t.phase/360.0)*t.period, t.period) / t.period;
+        } else if (t.type == QLatin1String("锯齿波")) {
+            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            if (cyclePos < 0.0) cyclePos += 1.0;
             val = t.amplitude * (2.0 * cyclePos - 1.0) + t.offset;
-        } else if (t.type == "随机") {
+        } else if (t.type == QLatin1String("随机")) {
             val = (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0) * t.amplitude + t.offset;
-        } else if (t.type == "来回增减") {
-            // 来回增减逻辑：在 offset 到 amplitude 之间循环
-            // t.offset 对应最小值，t.amplitude 对应最大值
+        } else if (t.type == QLatin1String("来回增减")) {
             double minVal = t.offset;
             double maxVal = t.amplitude;
             if (minVal > maxVal) qSwap(minVal, maxVal);
-            double range = maxVal - minVal;
-            if (range <= 0) {
+            const double range = maxVal - minVal;
+            if (range <= 0.0) {
                 val = minVal;
             } else {
-                // cyclePos 从 0 到 1
-                double cyclePos = fmod(currentTime + (t.phase / 360.0) * t.period, t.period) / t.period;
-                // 0 -> 0.5 增加, 0.5 -> 1.0 减少
-                if (cyclePos < 0.5) {
+                double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+                if (cyclePos < 0.0) cyclePos += 1.0;
+                if (cyclePos < 0.5)
                     val = minVal + (cyclePos * 2.0) * range;
-                } else {
+                else
                     val = maxVal - ((cyclePos - 0.5) * 2.0) * range;
-                }
             }
         }
 
-        ModbusSlave *target = (t.device == "Main") ? simMainDevice : simAGVDevice;
-        if (target) {
-            QTableWidget *table = (t.device == "Main") ? tblSimMain : tblSimAGV;
-            QString fmt = QStringLiteral("Unsigned");
-            int foundRow = -1;
-            if (table) {
-                if (t.cacheValid && t.cachedRow >= 0 && t.cachedRow < table->rowCount()) {
-                    foundRow = t.cachedRow;
-                    fmt = t.cachedFmt;
-                } else {
-                    foundRow = findSimRowByAddress(table, t.addr);
-                    if (foundRow >= 0) {
-                        fmt = simTableFormats.value(table).value(foundRow, QStringLiteral("Unsigned"));
-                    }
-                    t.cachedRow = foundRow;
-                    t.cachedFmt = fmt;
-                    t.cacheValid = true;
-                }
-            }
+        ModbusSlave *target = (t.device == QLatin1String("Main")) ? simMainDevice : simAGVDevice;
+        if (!target) continue;
 
-            if (fmt == "32-bit Float") {
-                writeFloat32ToSlave(target, t.addr, static_cast<float>(val));
-            } else if (fmt == "32-bit Signed" || fmt == "32-bit Unsigned") {
-                uint32_t val32 = (fmt == "32-bit Signed") ? (uint32_t)(int32_t)val : (uint32_t)val;
-                target->setRegisters(t.addr, {
-                    static_cast<quint16>(val32 >> 16),
-                    static_cast<quint16>(val32 & 0xFFFF)
-                });
-            } else if (fmt == "64-bit Float") {
-                writeFloat64ToSlave(target, t.addr, static_cast<double>(val));
-            } else if (fmt == "String") {
-                // String 格式不支持数值波形写入
+        QTableWidget *table = (t.device == QLatin1String("Main")) ? tblSimMain : tblSimAGV;
+        QString fmt = QStringLiteral("Unsigned");
+        int foundRow = -1;
+        if (table) {
+            if (t.cacheValid && t.cachedRow >= 0 && t.cachedRow < table->rowCount()) {
+                foundRow = t.cachedRow;
+                fmt = t.cachedFmt;
             } else {
-                quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
-                target->setRegister(t.addr, regVal);
-            }
-
-            // UI refresh ~5Hz (every 2 ticks); register values still update at 10Hz
-            if (table && foundRow >= 0 && (t.currentTicks % 2) == 0) {
-                refreshSimTableForAddr(table, t.addr);
-            }
-
-            // 每秒记录一次日志，避免刷新过快 (100ms * 10 = 1s)
-            if (t.currentTicks % 10 == 0) {
-                QString logMsg = QString("周期更新: %1 地址[%2] -> %3 (类型:%4, 格式:%5)")
-                                 .arg(t.device == "Main" ? "主设备" : "AGV")
-                                 .arg(t.addr)
-                                 .arg(val)
-                                 .arg(t.type)
-                                 .arg(fmt);
-                txtSimLog->append(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(logMsg));
-
-                if (txtSimLog->document()->blockCount() > 1000) {
-                    QTextCursor cursor = txtSimLog->textCursor();
-                    cursor.movePosition(QTextCursor::Start);
-                    cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, 100);
-                    cursor.removeSelectedText();
+                foundRow = findSimRowByAddress(table, t.addr);
+                if (foundRow >= 0) {
+                    fmt = simTableFormats.value(table).value(foundRow, QStringLiteral("Unsigned"));
                 }
+                t.cachedRow = foundRow;
+                t.cachedFmt = fmt;
+                t.cacheValid = true;
+            }
+        }
+
+        if (fmt == QLatin1String("32-bit Float")) {
+            writeFloat32ToSlave(target, t.addr, static_cast<float>(val));
+        } else if (fmt == QLatin1String("32-bit Signed") || fmt == QLatin1String("32-bit Unsigned")) {
+            const uint32_t val32 = (fmt == QLatin1String("32-bit Signed"))
+                                       ? static_cast<uint32_t>(static_cast<int32_t>(val))
+                                       : static_cast<uint32_t>(val);
+            target->setRegisters(t.addr, {
+                static_cast<quint16>(val32 >> 16),
+                static_cast<quint16>(val32 & 0xFFFF)
+            });
+        } else if (fmt == QLatin1String("64-bit Float")) {
+            writeFloat64ToSlave(target, t.addr, val);
+        } else if (fmt == QLatin1String("String")) {
+            // String 格式不支持数值波形写入
+        } else if (fmt == QLatin1String("Signed")) {
+            const qint16 s = static_cast<qint16>(qBound(-32768.0, val, 32767.0));
+            target->setRegister(t.addr, static_cast<quint16>(s));
+        } else {
+            const quint16 regVal = static_cast<quint16>(qBound(0.0, val, 65535.0));
+            target->setRegister(t.addr, regVal);
+        }
+
+        // UI ~5Hz
+        if (table && foundRow >= 0 && (nowMs - t.lastUiMs) >= 200) {
+            t.lastUiMs = nowMs;
+            refreshSimTableForAddr(table, t.addr);
+        }
+
+        // 日志 ~1Hz
+        if (txtSimLog && (nowMs - t.lastLogMs) >= 1000) {
+            t.lastLogMs = nowMs;
+            const QString logMsg = QStringLiteral("周期更新: %1 地址[%2] -> %3 (类型:%4, 格式:%5)")
+                                       .arg(t.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV"))
+                                       .arg(t.addr)
+                                       .arg(val)
+                                       .arg(t.type, fmt);
+            txtSimLog->append(QStringLiteral("[%1] %2")
+                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), logMsg));
+
+            if (txtSimLog->document()->blockCount() > 1000) {
+                QTextCursor cursor = txtSimLog->textCursor();
+                cursor.movePosition(QTextCursor::Start);
+                cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor, 100);
+                cursor.removeSelectedText();
             }
         }
     }
@@ -3454,21 +3549,7 @@ void MainWindow::onSimSaveSceneClicked()
     root.insert("agv", exportDeviceHolding(simAGVDevice, tblSimAGV));
 
     // Save Waveform Settings (CyclicTimers)
-    QJsonArray waveArr;
-    for (const CyclicTimer &t : simCyclicTimers) {
-        QJsonObject o;
-        o.insert("device", t.device);
-        o.insert("addr", int(t.addr));
-        o.insert("type", t.type);
-        o.insert("amplitude", t.amplitude);
-        o.insert("offset", t.offset);
-        o.insert("period", t.period);
-        o.insert("phase", t.phase);
-        o.insert("dutyCycle", t.dutyCycle);
-        o.insert("active", t.active);
-        waveArr.append(o);
-    }
-    root.insert("waveforms", waveArr);
+    root.insert("waveforms", waveformsToJson());
 
     QFile f(fn);
     if (!f.open(QIODevice::WriteOnly)) {
@@ -3481,7 +3562,8 @@ void MainWindow::onSimSaveSceneClicked()
 
     int mCount = root.value("main").toObject().value("values").toObject().size();
     int aCount = root.value("agv").toObject().value("values").toObject().size();
-    txtSimLog->append(QString("场景已保存: %1 (主:%2个, AGV:%3个)").arg(fn).arg(mCount).arg(aCount));
+    txtSimLog->append(QString("场景已保存: %1 (主:%2个, AGV:%3个, 波形:%4)")
+                          .arg(fn).arg(mCount).arg(aCount).arg(simCyclicTimers.size()));
 }
 
 void MainWindow::onSimLoadSceneClicked()
@@ -3506,12 +3588,10 @@ void MainWindow::onSimLoadSceneClicked()
         if (!dev || !table) return 0;
         int count = 0;
 
-        // Support both old and new format
         QJsonObject valuesObj;
         if (obj.contains("values") && obj.value("values").isObject()) {
             valuesObj = obj.value("values").toObject();
         } else {
-            // Backward compatibility
             valuesObj = obj;
         }
 
@@ -3521,24 +3601,57 @@ void MainWindow::onSimLoadSceneClicked()
             dev->setRegister(addr, val);
             count++;
         }
+
+        if (obj.contains("formats") && obj.value("formats").isObject()) {
+            QJsonObject formatsObj = obj.value("formats").toObject();
+            for (auto it = formatsObj.begin(); it != formatsObj.end(); ++it) {
+                const int row = it.key().toInt();
+                const QString fmt = it.value().toString();
+                simTableFormats[table][row] = fmt;
+                if (fmt == QLatin1String("String")) {
+                    simTableStringLengths[table][row] = kDefaultStringRegisterCount;
+                }
+            }
+            rebuildSimRowStates(table);
+        }
         return count;
     };
 
+    auto takeDeviceObj = [&root](const char *lowerKey, const char *upperKey) -> QJsonObject {
+        if (root.contains(QLatin1String(lowerKey)))
+            return root.value(QLatin1String(lowerKey)).toObject();
+        if (root.contains(QLatin1String(upperKey)))
+            return root.value(QLatin1String(upperKey)).toObject();
+        return QJsonObject();
+    };
+
     int cAGV = 0, cMain = 0;
-    if (root.contains("AGV")) {
-        QJsonObject agvObj = root.value("AGV").toObject();
-        cAGV = loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
+    {
+        QJsonObject agvObj = takeDeviceObj("agv", "AGV");
+        if (!agvObj.isEmpty())
+            cAGV = loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
     }
-    if (root.contains("Main")) {
-        QJsonObject mainObj = root.value("Main").toObject();
-        cMain = loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
+    {
+        QJsonObject mainObj = takeDeviceObj("main", "Main");
+        if (!mainObj.isEmpty())
+            cMain = loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
     }
 
-    logMessage(QString("场景加载成功: AGV(%1) 主设备(%2)").arg(cAGV).arg(cMain));
-    
-    // 强制刷新表格显示
-    for(int i=0; i<tblSimAGV->rowCount(); ++i) refreshSimRowDisplay(tblSimAGV, i);
-    for(int i=0; i<tblSimMain->rowCount(); ++i) refreshSimRowDisplay(tblSimMain, i);
+    int waveCount = 0;
+    if (root.contains(QStringLiteral("waveforms"))) {
+        applyWaveformsFromJson(root.value(QStringLiteral("waveforms")).toArray());
+        waveCount = simCyclicTimers.size();
+    }
+
+    logMessage(QStringLiteral("场景加载成功: AGV(%1) 主设备(%2) 波形(%3)").arg(cAGV).arg(cMain).arg(waveCount));
+    if (txtSimLog) {
+        txtSimLog->append(QStringLiteral("[%1] 场景已加载: %2 (主:%3, AGV:%4, 波形:%5)")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), fn)
+                              .arg(cMain).arg(cAGV).arg(waveCount));
+    }
+
+    for (int i = 0; i < tblSimAGV->rowCount(); ++i) refreshSimRowDisplay(tblSimAGV, i);
+    for (int i = 0; i < tblSimMain->rowCount(); ++i) refreshSimRowDisplay(tblSimMain, i);
 }
 
 void MainWindow::onSimExportCsvClicked()
@@ -11791,10 +11904,10 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     }
 
     menu.addSeparator();
-    QAction *actBit = menu.addAction("bit Edit");
+    QAction *actBit = menu.addAction(QStringLiteral("位编辑"));
     connect(actBit, &QAction::triggered, this, [this, table, row](){ onSimShowBitEditor(table, row); });
 
-    QAction *actWave = menu.addAction("periodic waveformation");
+    QAction *actWave = menu.addAction(QStringLiteral("周期波形"));
     connect(actWave, &QAction::triggered, this, [this, row](){ onSimShowWaveformEditor(row); });
 
     menu.exec(table->viewport()->mapToGlobal(pos));
@@ -11873,20 +11986,22 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     
     connect(btnOk, &QPushButton::clicked, dlg, [=](){
         CyclicTimer t;
-        t.device = (tabSimRegisterMaps->currentIndex() == 0) ? "AGV" : "Main";
-        t.addr = (quint16)addr;
+        t.device = (tabSimRegisterMaps->currentIndex() == 0) ? QStringLiteral("AGV") : QStringLiteral("Main");
+        t.addr = static_cast<quint16>(addr);
         t.type = cbType->currentText();
         t.amplitude = spAmp->value();
         t.offset = spOff->value();
-        t.period = spPer->value();
+        t.period = qMax(0.001, spPer->value());
         t.phase = 0.0;
         t.dutyCycle = 0.5;
-        t.currentTicks = 0;
+        t.elapsedSec = 0.0;
+        t.lastUiMs = -1000;
+        t.lastLogMs = -1000;
         t.active = true;
+        t.cacheValid = false;
 
-        // Replace if exists, else append
         bool found = false;
-        for (int i=0; i<simCyclicTimers.size(); ++i) {
+        for (int i = 0; i < simCyclicTimers.size(); ++i) {
             if (simCyclicTimers[i].device == t.device && simCyclicTimers[i].addr == t.addr) {
                 simCyclicTimers[i] = t;
                 found = true;
@@ -11895,13 +12010,16 @@ void MainWindow::onSimShowWaveformEditor(int row) {
         }
         if (!found) simCyclicTimers.append(t);
 
-        // 如果全局 UI 的波形表格已初始化，刷新它
-        if (tblWaveChannels) {
-            onSimAddCyclicTimerClicked();
-        }
+        refreshWaveChannelsTable();
+        updateSimTickTimerState();
 
-        txtSimLog->append(QString("地址 %1 开始生成 %2 (格式: %3, 幅度:%4, 周期:%5s)")
-            .arg(addr).arg(cbType->currentText()).arg(currentFmt).arg(spAmp->value()).arg(spPer->value()));
+        if (txtSimLog) {
+            txtSimLog->append(QStringLiteral("地址 %1 开始生成 %2 (格式: %3, 幅度:%4, 周期:%5s)")
+                                  .arg(addr)
+                                  .arg(cbType->currentText(), currentFmt)
+                                  .arg(spAmp->value())
+                                  .arg(spPer->value()));
+        }
         dlg->accept();
     });
     connect(btnCancel, &QPushButton::clicked, dlg, &QDialog::reject);
@@ -11943,16 +12061,7 @@ void MainWindow::saveAutoScene()
     };
     root.insert("main", exportDeviceHolding(simMainDevice, tblSimMain));
     root.insert("agv", exportDeviceHolding(simAGVDevice, tblSimAGV));
-    
-    QJsonArray waveArr;
-    for (const CyclicTimer &t : simCyclicTimers) {
-        QJsonObject o;
-        o.insert("device", t.device); o.insert("addr", int(t.addr)); o.insert("type", t.type);
-        o.insert("amplitude", t.amplitude); o.insert("offset", t.offset); o.insert("period", t.period);
-        o.insert("phase", t.phase); o.insert("dutyCycle", t.dutyCycle); o.insert("active", t.active);
-        waveArr.append(o);
-    }
-    root.insert("waveforms", waveArr);
+    root.insert("waveforms", waveformsToJson());
     
     QFile f("autoscene.json");
     if (f.open(QIODevice::WriteOnly)) {
@@ -12001,25 +12110,20 @@ void MainWindow::loadAutoScene()
     if (root.contains("main")) {
         QJsonObject mainObj = root.value("main").toObject();
         loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
+    } else if (root.contains("Main")) {
+        QJsonObject mainObj = root.value("Main").toObject();
+        loadDeviceHolding(simMainDevice, tblSimMain, mainObj);
     }
     if (root.contains("agv")) {
         QJsonObject agvObj = root.value("agv").toObject();
         loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
+    } else if (root.contains("AGV")) {
+        QJsonObject agvObj = root.value("AGV").toObject();
+        loadDeviceHolding(simAGVDevice, tblSimAGV, agvObj);
     }
     
     if (root.contains("waveforms")) {
-        simCyclicTimers.clear();
-        QJsonArray waveArr = root.value("waveforms").toArray();
-        for (auto v : waveArr) {
-            QJsonObject o = v.toObject();
-            CyclicTimer t;
-            t.device = o.value("device").toString(); t.addr = (quint16)o.value("addr").toInt();
-            t.type = o.value("type").toString(); t.amplitude = o.value("amplitude").toDouble();
-            t.offset = o.value("offset").toDouble(); t.period = o.value("period").toDouble();
-            t.phase = o.value("phase").toDouble(); t.dutyCycle = o.value("dutyCycle").toDouble();
-            t.currentTicks = 0; t.active = o.value("active").toBool();
-            simCyclicTimers.append(t);
-        }
+        applyWaveformsFromJson(root.value("waveforms").toArray());
     }
 }
 
