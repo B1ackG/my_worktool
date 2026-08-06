@@ -830,11 +830,9 @@ private:
         QString device; // "Main" or "AGV"
         quint16 addr;
         QString type; // UI labels: 正弦波/方波/三角波/锯齿波/随机/来回增减
-        double amplitude = 0.0;
-        double offset = 0.0;
+        double maxValue = 1000.0;
+        double minValue = 0.0;
         double period = 1.0; // seconds
-        double phase = 0.0; // degrees
-        double dutyCycle = 0.5; // square wave 0-1
         double elapsedSec = 0.0; // real-time phase base while active
         qint64 lastUiMs = 0;   // wall-clock ms; 0 = never refreshed
         qint64 lastLogMs = 0;  // wall-clock ms; 0 = never logged
@@ -852,11 +850,9 @@ private:
     QComboBox *cmbWaveDevice;
     QSpinBox *spinWaveAddr;
     QComboBox *cmbWaveType;
-    QDoubleSpinBox *spinWaveAmp;
-    QDoubleSpinBox *spinWaveOffset;
+    QDoubleSpinBox *spinWaveMax;
+    QDoubleSpinBox *spinWaveMin;
     QDoubleSpinBox *spinWavePeriod;
-    QDoubleSpinBox *spinWavePhase;
-    QDoubleSpinBox *spinWaveDuty;
     QTableWidget *tblWaveChannels;
     QPushButton *btnWaveAdd;
     QPushButton *btnWaveStopAll;

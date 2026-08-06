@@ -1684,27 +1684,21 @@ QWidget* MainWindow::createSimulatorPage()
     glWave->addWidget(new QLabel("类型:"), 1, 0);
     cmbWaveType = new QComboBox(); cmbWaveType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机" << "来回增减");
     glWave->addWidget(cmbWaveType, 1, 1);
-    glWave->addWidget(new QLabel("幅度(或最大):"), 1, 2);
-    spinWaveAmp = new QDoubleSpinBox(); spinWaveAmp->setRange(-65535, 65535); spinWaveAmp->setValue(1000);
-    glWave->addWidget(spinWaveAmp, 1, 3);
-    glWave->addWidget(new QLabel("周期(s):"), 2, 0);
-    spinWavePeriod = new QDoubleSpinBox(); spinWavePeriod->setRange(0.1, 3600); spinWavePeriod->setValue(2.0);
-    glWave->addWidget(spinWavePeriod, 2, 1);
-    glWave->addWidget(new QLabel("偏移(或最小):"), 2, 2);
-    spinWaveOffset = new QDoubleSpinBox(); spinWaveOffset->setRange(-65535, 65535); spinWaveOffset->setValue(0);
-    glWave->addWidget(spinWaveOffset, 2, 3);
-    glWave->addWidget(new QLabel("相位(°):"), 3, 0);
-    spinWavePhase = new QDoubleSpinBox(); spinWavePhase->setRange(0.0, 360.0); spinWavePhase->setValue(0.0);
-    glWave->addWidget(spinWavePhase, 3, 1);
-    glWave->addWidget(new QLabel("占空比:"), 3, 2);
-    spinWaveDuty = new QDoubleSpinBox(); spinWaveDuty->setRange(0.01, 0.99); spinWaveDuty->setSingleStep(0.05); spinWaveDuty->setValue(0.5);
-    glWave->addWidget(spinWaveDuty, 3, 3);
+    glWave->addWidget(new QLabel("最大值:"), 1, 2);
+    spinWaveMax = new QDoubleSpinBox(); spinWaveMax->setRange(-1e9, 1e9); spinWaveMax->setDecimals(3); spinWaveMax->setValue(1000);
+    glWave->addWidget(spinWaveMax, 1, 3);
+    glWave->addWidget(new QLabel("最小值:"), 2, 0);
+    spinWaveMin = new QDoubleSpinBox(); spinWaveMin->setRange(-1e9, 1e9); spinWaveMin->setDecimals(3); spinWaveMin->setValue(0);
+    glWave->addWidget(spinWaveMin, 2, 1);
+    glWave->addWidget(new QLabel("周期(s):"), 2, 2);
+    spinWavePeriod = new QDoubleSpinBox(); spinWavePeriod->setRange(0.1, 3600); spinWavePeriod->setDecimals(3); spinWavePeriod->setValue(2.0);
+    glWave->addWidget(spinWavePeriod, 2, 3);
     btnWaveAdd = new QPushButton("➕ 添加/更新通道");
     btnWaveStopAll = new QPushButton("⏹️ 全部暂停/恢复");
     QHBoxLayout *hWaveBtns = new QHBoxLayout();
     hWaveBtns->addWidget(btnWaveAdd);
     hWaveBtns->addWidget(btnWaveStopAll);
-    glWave->addLayout(hWaveBtns, 4, 0, 1, 4);
+    glWave->addLayout(hWaveBtns, 3, 0, 1, 4);
     lw->addLayout(glWave);
     tblWaveChannels = new QTableWidget();
     tblWaveChannels->setColumnCount(5);
@@ -2579,11 +2573,9 @@ QJsonArray MainWindow::waveformsToJson() const
         o.insert(QStringLiteral("device"), t.device);
         o.insert(QStringLiteral("addr"), int(t.addr));
         o.insert(QStringLiteral("type"), t.type);
-        o.insert(QStringLiteral("amplitude"), t.amplitude);
-        o.insert(QStringLiteral("offset"), t.offset);
+        o.insert(QStringLiteral("max"), t.maxValue);
+        o.insert(QStringLiteral("min"), t.minValue);
         o.insert(QStringLiteral("period"), t.period);
-        o.insert(QStringLiteral("phase"), t.phase);
-        o.insert(QStringLiteral("dutyCycle"), t.dutyCycle);
         o.insert(QStringLiteral("active"), t.active);
         waveArr.append(o);
     }
@@ -2599,11 +2591,23 @@ void MainWindow::applyWaveformsFromJson(const QJsonArray &waveArr)
         t.device = o.value(QStringLiteral("device")).toString();
         t.addr = static_cast<quint16>(o.value(QStringLiteral("addr")).toInt());
         t.type = o.value(QStringLiteral("type")).toString();
-        t.amplitude = o.value(QStringLiteral("amplitude")).toDouble();
-        t.offset = o.value(QStringLiteral("offset")).toDouble();
+        // 新字段 max/min；兼容旧场景 amplitude/offset（幅度+偏移）
+        if (o.contains(QStringLiteral("max")) || o.contains(QStringLiteral("min"))) {
+            t.maxValue = o.value(QStringLiteral("max")).toDouble(1000.0);
+            t.minValue = o.value(QStringLiteral("min")).toDouble(0.0);
+        } else {
+            const double amp = o.value(QStringLiteral("amplitude")).toDouble(1000.0);
+            const double off = o.value(QStringLiteral("offset")).toDouble(0.0);
+            // 旧「来回增减」把 amplitude 当最大、offset 当最小；其余类型为 偏移±幅度
+            if (t.type == QStringLiteral("来回增减")) {
+                t.maxValue = amp;
+                t.minValue = off;
+            } else {
+                t.maxValue = off + amp;
+                t.minValue = off - amp;
+            }
+        }
         t.period = o.value(QStringLiteral("period")).toDouble(1.0);
-        t.phase = o.value(QStringLiteral("phase")).toDouble();
-        t.dutyCycle = o.value(QStringLiteral("dutyCycle")).toDouble(0.5);
         t.elapsedSec = 0.0;
         t.lastUiMs = 0;
         t.lastLogMs = 0;
@@ -2644,7 +2648,7 @@ void MainWindow::onSimStopAllWaveformsClicked()
 
 void MainWindow::onSimAddCyclicTimerClicked()
 {
-    if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveAmp || !spinWaveOffset || !spinWavePeriod || !tblWaveChannels) {
+    if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveMax || !spinWaveMin || !spinWavePeriod || !tblWaveChannels) {
         if (txtSimLog) {
             txtSimLog->append(QStringLiteral("[%1] 波形控件未初始化，无法添加通道")
                                   .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
@@ -2656,11 +2660,9 @@ void MainWindow::onSimAddCyclicTimerClicked()
     t.device = cmbWaveDevice->currentText() == QStringLiteral("主设备") ? QStringLiteral("Main") : QStringLiteral("AGV");
     t.addr = static_cast<quint16>(spinWaveAddr->value());
     t.type = cmbWaveType->currentText();
-    t.amplitude = spinWaveAmp->value();
-    t.offset = spinWaveOffset->value();
+    t.maxValue = spinWaveMax->value();
+    t.minValue = spinWaveMin->value();
     t.period = qMax(0.001, spinWavePeriod->value());
-    t.phase = spinWavePhase ? spinWavePhase->value() : 0.0;
-    t.dutyCycle = spinWaveDuty ? spinWaveDuty->value() : 0.5;
     t.elapsedSec = 0.0;
     t.lastUiMs = 0;
     t.lastLogMs = 0;
@@ -2728,37 +2730,39 @@ void MainWindow::onSimTimerTick()
         const double currentTime = t.elapsedSec;
         const double freq = 1.0 / period;
         const double omega = 2.0 * M_PI * freq;
-        const double phaseRad = t.phase * M_PI / 180.0;
 
-        double val = 0.0;
+        double minVal = t.minValue;
+        double maxVal = t.maxValue;
+        if (minVal > maxVal)
+            qSwap(minVal, maxVal);
+        const double mid = (minVal + maxVal) * 0.5;
+        const double amp = (maxVal - minVal) * 0.5;
+        const double range = maxVal - minVal;
+
+        double val = mid;
         if (t.type == QStringLiteral("正弦波")) {
-            val = t.amplitude * sin(omega * currentTime + phaseRad) + t.offset;
+            val = mid + amp * sin(omega * currentTime);
         } else if (t.type == QStringLiteral("方波")) {
-            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            double cyclePos = fmod(currentTime, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
-            val = (cyclePos < t.dutyCycle) ? (t.amplitude + t.offset) : (-t.amplitude + t.offset);
+            val = (cyclePos < 0.5) ? maxVal : minVal;
         } else if (t.type == QStringLiteral("三角波")) {
-            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            double cyclePos = fmod(currentTime, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
-            if (cyclePos < 0.25) val = t.amplitude * (cyclePos * 4.0);
-            else if (cyclePos < 0.75) val = t.amplitude * (2.0 - cyclePos * 4.0);
-            else val = t.amplitude * (cyclePos * 4.0 - 4.0);
-            val += t.offset;
+            if (cyclePos < 0.25) val = mid + amp * (cyclePos * 4.0);
+            else if (cyclePos < 0.75) val = mid + amp * (2.0 - cyclePos * 4.0);
+            else val = mid + amp * (cyclePos * 4.0 - 4.0);
         } else if (t.type == QStringLiteral("锯齿波")) {
-            double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+            double cyclePos = fmod(currentTime, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
-            val = t.amplitude * (2.0 * cyclePos - 1.0) + t.offset;
+            val = minVal + cyclePos * range;
         } else if (t.type == QStringLiteral("随机")) {
-            val = (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0) * t.amplitude + t.offset;
+            val = minVal + QRandomGenerator::global()->generateDouble() * range;
         } else if (t.type == QStringLiteral("来回增减")) {
-            double minVal = t.offset;
-            double maxVal = t.amplitude;
-            if (minVal > maxVal) qSwap(minVal, maxVal);
-            const double range = maxVal - minVal;
             if (range <= 0.0) {
                 val = minVal;
             } else {
-                double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
+                double cyclePos = fmod(currentTime, period) / period;
                 if (cyclePos < 0.0) cyclePos += 1.0;
                 if (cyclePos < 0.5)
                     val = minVal + (cyclePos * 2.0) * range;
@@ -11936,7 +11940,7 @@ void MainWindow::onSimShowWaveformEditor(int row) {
 
     QDialog *dlg = new QDialog(this);
     dlg->setWindowTitle(QString("地址 %1 周期波形配置").arg(addr));
-    dlg->setMinimumSize(400, 300); // 设置最小大小确保显示
+    dlg->setMinimumSize(400, 260);
     QVBoxLayout *v = new QVBoxLayout(dlg);
     
     QGroupBox *group = new QGroupBox("波形参数", dlg);
@@ -11950,34 +11954,26 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     cbType->addItems(QStringList() << "正弦波" << "方波" << "三角波" << "锯齿波" << "随机" << "来回增减");
     g->addWidget(cbType, 0, 1);
     
-    QLabel *lblAmp = new QLabel("幅度(或最大):");
-    g->addWidget(lblAmp, 1, 0);
-    QDoubleSpinBox *spAmp = new QDoubleSpinBox(); 
-    spAmp->setRange(-1e9, 1e9); 
-    spAmp->setValue(isFloat32 ? 10.0 : 1000.0);
-    g->addWidget(spAmp, 1, 1);
+    g->addWidget(new QLabel("最大值:"), 1, 0);
+    QDoubleSpinBox *spMax = new QDoubleSpinBox(); 
+    spMax->setRange(-1e9, 1e9);
+    spMax->setDecimals(3);
+    spMax->setValue(isFloat32 ? 10.0 : 1000.0);
+    g->addWidget(spMax, 1, 1);
     
-    g->addWidget(new QLabel("周期(s):"), 2, 0);
-    QDoubleSpinBox *spPer = new QDoubleSpinBox(); spPer->setRange(0.1, 3600); spPer->setValue(2.0);
-    g->addWidget(spPer, 2, 1);
+    g->addWidget(new QLabel("最小值:"), 2, 0);
+    QDoubleSpinBox *spMin = new QDoubleSpinBox(); 
+    spMin->setRange(-1e9, 1e9);
+    spMin->setDecimals(3);
+    spMin->setValue(0);
+    g->addWidget(spMin, 2, 1);
 
-    QLabel *lblOff = new QLabel("偏移(或最小):");
-    g->addWidget(lblOff, 3, 0);
-    QDoubleSpinBox *spOff = new QDoubleSpinBox(); 
-    spOff->setRange(-1e9, 1e9); 
-    spOff->setValue(0);
-    g->addWidget(spOff, 3, 1);
-
-    // 切换类型时自动更新标签提示
-    connect(cbType, &QComboBox::currentTextChanged, [=](const QString &text){
-        if (text == "来回增减") {
-            lblAmp->setText("最大值:");
-            lblOff->setText("最小值:");
-        } else {
-            lblAmp->setText("幅度:");
-            lblOff->setText("偏移:");
-        }
-    });
+    g->addWidget(new QLabel("周期(s):"), 3, 0);
+    QDoubleSpinBox *spPer = new QDoubleSpinBox();
+    spPer->setRange(0.1, 3600);
+    spPer->setDecimals(3);
+    spPer->setValue(2.0);
+    g->addWidget(spPer, 3, 1);
     
     v->addWidget(group);
     
@@ -11994,11 +11990,9 @@ void MainWindow::onSimShowWaveformEditor(int row) {
         t.device = (tabSimRegisterMaps->currentIndex() == 0) ? QStringLiteral("AGV") : QStringLiteral("Main");
         t.addr = static_cast<quint16>(addr);
         t.type = cbType->currentText();
-        t.amplitude = spAmp->value();
-        t.offset = spOff->value();
+        t.maxValue = spMax->value();
+        t.minValue = spMin->value();
         t.period = qMax(0.001, spPer->value());
-        t.phase = 0.0;
-        t.dutyCycle = 0.5;
         t.elapsedSec = 0.0;
         t.lastUiMs = 0;
         t.lastLogMs = 0;
@@ -12019,10 +12013,11 @@ void MainWindow::onSimShowWaveformEditor(int row) {
         updateSimTickTimerState();
 
         if (txtSimLog) {
-            txtSimLog->append(QStringLiteral("地址 %1 开始生成 %2 (格式: %3, 幅度:%4, 周期:%5s)")
+            txtSimLog->append(QStringLiteral("地址 %1 开始生成 %2 (格式: %3, 最大:%4, 最小:%5, 周期:%6s)")
                                   .arg(addr)
                                   .arg(cbType->currentText(), currentFmt)
-                                  .arg(spAmp->value())
+                                  .arg(spMax->value())
+                                  .arg(spMin->value())
                                   .arg(spPer->value()));
         }
         dlg->accept();
