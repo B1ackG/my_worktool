@@ -836,8 +836,8 @@ private:
         double phase = 0.0; // degrees
         double dutyCycle = 0.5; // square wave 0-1
         double elapsedSec = 0.0; // real-time phase base while active
-        qint64 lastUiMs = -1000;
-        qint64 lastLogMs = -1000;
+        qint64 lastUiMs = 0;   // wall-clock ms; 0 = never refreshed
+        qint64 lastLogMs = 0;  // wall-clock ms; 0 = never logged
         bool active = false;
         int cachedRow = -1;
         QString cachedFmt;

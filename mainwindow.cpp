@@ -2558,6 +2558,11 @@ void MainWindow::updateSimTickTimerState()
         if (!simTickTimer->isActive()) {
             simWaveClock.restart();
             simWaveLastMs = -1;
+            // 时钟重启后旧的 UI/日志时间戳会失效，必须清零
+            for (CyclicTimer &t : simCyclicTimers) {
+                t.lastUiMs = 0;
+                t.lastLogMs = 0;
+            }
             simTickTimer->start(100);
         }
     } else if (simTickTimer->isActive()) {
@@ -2600,8 +2605,8 @@ void MainWindow::applyWaveformsFromJson(const QJsonArray &waveArr)
         t.phase = o.value(QStringLiteral("phase")).toDouble();
         t.dutyCycle = o.value(QStringLiteral("dutyCycle")).toDouble(0.5);
         t.elapsedSec = 0.0;
-        t.lastUiMs = -1000;
-        t.lastLogMs = -1000;
+        t.lastUiMs = 0;
+        t.lastLogMs = 0;
         t.active = o.value(QStringLiteral("active")).toBool();
         t.cacheValid = false;
         simCyclicTimers.append(t);
@@ -2657,8 +2662,8 @@ void MainWindow::onSimAddCyclicTimerClicked()
     t.phase = spinWavePhase ? spinWavePhase->value() : 0.0;
     t.dutyCycle = spinWaveDuty ? spinWaveDuty->value() : 0.5;
     t.elapsedSec = 0.0;
-    t.lastUiMs = -1000;
-    t.lastLogMs = -1000;
+    t.lastUiMs = 0;
+    t.lastLogMs = 0;
     t.active = true;
     t.cacheValid = false;
 
@@ -2726,26 +2731,26 @@ void MainWindow::onSimTimerTick()
         const double phaseRad = t.phase * M_PI / 180.0;
 
         double val = 0.0;
-        if (t.type == QLatin1String("正弦波")) {
+        if (t.type == QStringLiteral("正弦波")) {
             val = t.amplitude * sin(omega * currentTime + phaseRad) + t.offset;
-        } else if (t.type == QLatin1String("方波")) {
+        } else if (t.type == QStringLiteral("方波")) {
             double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
             val = (cyclePos < t.dutyCycle) ? (t.amplitude + t.offset) : (-t.amplitude + t.offset);
-        } else if (t.type == QLatin1String("三角波")) {
+        } else if (t.type == QStringLiteral("三角波")) {
             double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
             if (cyclePos < 0.25) val = t.amplitude * (cyclePos * 4.0);
             else if (cyclePos < 0.75) val = t.amplitude * (2.0 - cyclePos * 4.0);
             else val = t.amplitude * (cyclePos * 4.0 - 4.0);
             val += t.offset;
-        } else if (t.type == QLatin1String("锯齿波")) {
+        } else if (t.type == QStringLiteral("锯齿波")) {
             double cyclePos = fmod(currentTime + (t.phase / 360.0) * period, period) / period;
             if (cyclePos < 0.0) cyclePos += 1.0;
             val = t.amplitude * (2.0 * cyclePos - 1.0) + t.offset;
-        } else if (t.type == QLatin1String("随机")) {
+        } else if (t.type == QStringLiteral("随机")) {
             val = (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0) * t.amplitude + t.offset;
-        } else if (t.type == QLatin1String("来回增减")) {
+        } else if (t.type == QStringLiteral("来回增减")) {
             double minVal = t.offset;
             double maxVal = t.amplitude;
             if (minVal > maxVal) qSwap(minVal, maxVal);
@@ -2805,15 +2810,15 @@ void MainWindow::onSimTimerTick()
             target->setRegister(t.addr, regVal);
         }
 
-        // UI ~5Hz
-        if (table && foundRow >= 0 && (nowMs - t.lastUiMs) >= 200) {
-            t.lastUiMs = nowMs;
+        // UI ~5Hz / 日志 ~1Hz：用墙钟，避免与 simWaveClock 重启后时间戳错位
+        const qint64 wallMs = QDateTime::currentMSecsSinceEpoch();
+        if (table && foundRow >= 0 && (t.lastUiMs == 0 || (wallMs - t.lastUiMs) >= 200)) {
+            t.lastUiMs = wallMs;
             refreshSimTableForAddr(table, t.addr);
         }
 
-        // 日志 ~1Hz
-        if (txtSimLog && (nowMs - t.lastLogMs) >= 1000) {
-            t.lastLogMs = nowMs;
+        if (txtSimLog && (t.lastLogMs == 0 || (wallMs - t.lastLogMs) >= 1000)) {
+            t.lastLogMs = wallMs;
             const QString logMsg = QStringLiteral("周期更新: %1 地址[%2] -> %3 (类型:%4, 格式:%5)")
                                        .arg(t.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV"))
                                        .arg(t.addr)
@@ -11995,8 +12000,8 @@ void MainWindow::onSimShowWaveformEditor(int row) {
         t.phase = 0.0;
         t.dutyCycle = 0.5;
         t.elapsedSec = 0.0;
-        t.lastUiMs = -1000;
-        t.lastLogMs = -1000;
+        t.lastUiMs = 0;
+        t.lastLogMs = 0;
         t.active = true;
         t.cacheValid = false;
 
