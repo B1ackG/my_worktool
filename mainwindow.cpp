@@ -299,15 +299,17 @@ constexpr int Direction = 0;
 constexpr int Address = 1;
 constexpr int Comment = 2;
 constexpr int Format = 3;
-constexpr int ColumnCount = 4;
+constexpr int ReadbackAddress = 4;
+constexpr int ColumnCount = 5;
 }
 
 namespace SimRegisterCol {
 constexpr int Direction = 0;
 constexpr int Address = 1;
-constexpr int Description = 2;
-constexpr int Value = 3;
-constexpr int ColumnCount = 4;
+constexpr int ReadbackAddress = 2;
+constexpr int Description = 3;
+constexpr int Value = 4;
+constexpr int ColumnCount = 5;
 }
 
 enum class RegisterMapDirection { Unknown, Read, Write };
@@ -1068,6 +1070,8 @@ void MainWindow::createWidgets()
     lblGitPendingStatus->installEventFilter(this);
     gitPendingStatusTimer = new QTimer(this);
     gitPendingStatusTimer->setInterval(60 * 1000);
+    gitPendingBlinkTimer = new QTimer(this);
+    gitPendingBlinkTimer->setInterval(700);
     lblGitNetworkStatus = new QLabel();
     lblGitNetworkStatus->setVisible(false);
     barGitNetworkBusy = new QProgressBar();
@@ -2187,6 +2191,8 @@ void MainWindow::setupSystemTray()
     trayIcon->setContextMenu(menu);
 
     connect(trayIcon, &QSystemTrayIcon::activated, this, &MainWindow::onTrayActivated);
+    connect(trayIcon, &QSystemTrayIcon::messageClicked, this,
+            &MainWindow::onGitPendingTrayMessageClicked);
     trayIcon->show();
 }
 
@@ -2479,6 +2485,9 @@ void MainWindow::createConnections()
     if (gitPendingStatusTimer) {
         connect(gitPendingStatusTimer, &QTimer::timeout, this, &MainWindow::onGitPendingStatusBarTick);
         gitPendingStatusTimer->start();
+    }
+    if (gitPendingBlinkTimer) {
+        connect(gitPendingBlinkTimer, &QTimer::timeout, this, &MainWindow::onGitPendingBlinkTick);
     }
     connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
     // Stash actions are wired via btnGitStash->menu()
@@ -3813,6 +3822,8 @@ void MainWindow::onSimImportCsvClicked()
 
         if (!table->item(row, SimRegisterCol::Direction))
             table->setItem(row, SimRegisterCol::Direction, new QTableWidgetItem());
+        if (!table->item(row, SimRegisterCol::ReadbackAddress))
+            table->setItem(row, SimRegisterCol::ReadbackAddress, new QTableWidgetItem());
         if (!table->item(row, SimRegisterCol::Description))
             table->setItem(row, SimRegisterCol::Description, new QTableWidgetItem());
         if (!table->item(row, SimRegisterCol::Value))
@@ -4643,6 +4654,98 @@ void MainWindow::onGitPendingStatusBarTick()
     refreshGitPendingStatusBar();
 }
 
+void MainWindow::onGitPendingBlinkTick()
+{
+    if (!gitPendingAlertActive) {
+        return;
+    }
+    gitPendingBlinkOn = !gitPendingBlinkOn;
+    applyGitPendingBlinkStyle();
+}
+
+void MainWindow::onGitPendingTrayMessageClicked()
+{
+    const QList<QPair<QString, QString>> items = collectGitPendingExitItems();
+    if (!items.isEmpty()) {
+        focusGitPendingRepo(items.first().first);
+    }
+    restoreFromTray();
+}
+
+void MainWindow::setGitPendingAlertActive(bool active)
+{
+    if (gitPendingAlertActive == active) {
+        if (active) {
+            applyGitPendingBlinkStyle();
+        }
+        return;
+    }
+    gitPendingAlertActive = active;
+    gitPendingBlinkOn = false;
+    if (active) {
+        applyGitPendingBlinkStyle();
+        if (gitPendingBlinkTimer && !gitPendingBlinkTimer->isActive()) {
+            gitPendingBlinkTimer->start();
+        }
+    } else {
+        if (gitPendingBlinkTimer) {
+            gitPendingBlinkTimer->stop();
+        }
+        if (lblGitPendingStatus) {
+            lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #6b7785;"));
+        }
+    }
+}
+
+void MainWindow::applyGitPendingBlinkStyle()
+{
+    if (!lblGitPendingStatus) {
+        return;
+    }
+    if (gitPendingBlinkOn) {
+        lblGitPendingStatus->setStyleSheet(
+            QStringLiteral("color: #ffffff; background-color: #c0392b; font-weight: 600;"
+                           " padding: 1px 6px; border-radius: 3px;"));
+    } else {
+        lblGitPendingStatus->setStyleSheet(
+            QStringLiteral("color: #c0392b; font-weight: 600;"));
+    }
+}
+
+void MainWindow::maybeNotifyGitPendingTray(bool hasPending, const QString &body)
+{
+    if (!hasPending) {
+        gitPendingLastTraySignature.clear();
+        if (trayIcon) {
+            trayIcon->setToolTip(QApplication::applicationDisplayName());
+        }
+        return;
+    }
+
+    if (trayIcon) {
+        const QString tip =
+            QStringLiteral("%1\n%2")
+                .arg(QApplication::applicationDisplayName(), body);
+        trayIcon->setToolTip(tip);
+    }
+
+    if (body == gitPendingLastTraySignature) {
+        return;
+    }
+    gitPendingLastTraySignature = body;
+
+    if (!trayIcon || !QSystemTrayIcon::isSystemTrayAvailable()
+        || !trayIcon->supportsMessages()) {
+        return;
+    }
+
+    trayIcon->showMessage(
+        QStringLiteral("Git 待处理"),
+        body,
+        QSystemTrayIcon::Warning,
+        8000);
+}
+
 void MainWindow::refreshGitPendingStatusBar()
 {
     if (!lblGitPendingStatus) {
@@ -4678,15 +4781,24 @@ void MainWindow::refreshGitPendingStatusBar()
     }
     lblGitPendingStatus->setToolTip(tipLines.join(QLatin1Char('\n')));
 
+    QStringList trayBodyLines;
+    for (const auto &item : pending) {
+        trayBodyLines << item.second;
+    }
+    const QString trayBody = trayBodyLines.isEmpty()
+                                 ? QString()
+                                 : trayBodyLines.join(QLatin1Char('\n'));
+    maybeNotifyGitPendingTray(!pending.isEmpty(), trayBody);
+
     if (currentName.isEmpty()) {
         if (pending.isEmpty()) {
             lblGitPendingStatus->setText(QStringLiteral("Git: —"));
+            setGitPendingAlertActive(false);
             lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #6b7785;"));
         } else {
             lblGitPendingStatus->setText(
                 QStringLiteral("Git: %1 仓待处理").arg(pending.size()));
-            lblGitPendingStatus->setStyleSheet(
-                QStringLiteral("color: #c0392b; font-weight: 600;"));
+            setGitPendingAlertActive(true);
         }
         return;
     }
@@ -4702,14 +4814,19 @@ void MainWindow::refreshGitPendingStatusBar()
     QString text;
     if (parts.isEmpty()) {
         text = QStringLiteral("Git: %1 · 干净").arg(currentName);
-        lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #1e8449;"));
+        if (otherPending > 0) {
+            text += QStringLiteral(" ｜ 另有 %1 仓").arg(otherPending);
+            setGitPendingAlertActive(true);
+        } else {
+            setGitPendingAlertActive(false);
+            lblGitPendingStatus->setStyleSheet(QStringLiteral("color: #1e8449;"));
+        }
     } else {
         text = QStringLiteral("Git: %1 · %2").arg(currentName, parts.join(QStringLiteral(" · ")));
-        lblGitPendingStatus->setStyleSheet(
-            QStringLiteral("color: #c0392b; font-weight: 600;"));
-    }
-    if (otherPending > 0) {
-        text += QStringLiteral(" ｜ 另有 %1 仓").arg(otherPending);
+        if (otherPending > 0) {
+            text += QStringLiteral(" ｜ 另有 %1 仓").arg(otherPending);
+        }
+        setGitPendingAlertActive(true);
     }
     lblGitPendingStatus->setText(text);
 }
@@ -10616,7 +10733,8 @@ void MainWindow::setupRegisterTable(QTableWidget *table) {
                                      << QStringLiteral("方向")
                                      << QStringLiteral("地址")
                                      << QStringLiteral("注释")
-                                     << QStringLiteral("寄存器格式"));
+                                     << QStringLiteral("寄存器格式")
+                                     << QStringLiteral("回读地址"));
     table->horizontalHeader()->setStretchLastSection(true);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
@@ -10630,6 +10748,7 @@ void MainWindow::setupRegisterTable(QTableWidget *table) {
         table->setItem(i, RegisterMapCol::Address, new QTableWidgetItem(QString::number(i)));
         table->setItem(i, RegisterMapCol::Comment, new QTableWidgetItem(""));
         table->setItem(i, RegisterMapCol::Format, new QTableWidgetItem(QString::number(i)));
+        table->setItem(i, RegisterMapCol::ReadbackAddress, new QTableWidgetItem(""));
         applyRegisterMapRowStyle(table, i);
     }
 
@@ -10638,6 +10757,7 @@ void MainWindow::setupRegisterTable(QTableWidget *table) {
     table->setItem(50, RegisterMapCol::Address, new QTableWidgetItem(""));
     table->setItem(50, RegisterMapCol::Comment, new QTableWidgetItem(""));
     table->setItem(50, RegisterMapCol::Format, new QTableWidgetItem(""));
+    table->setItem(50, RegisterMapCol::ReadbackAddress, new QTableWidgetItem(""));
     applyRegisterMapRowStyle(table, 50);
 }
 
@@ -10686,11 +10806,13 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
     table->setHorizontalHeaderLabels(QStringList()
                                      << QStringLiteral("方向")
                                      << QStringLiteral("地址")
+                                     << QStringLiteral("回读地址")
                                      << QStringLiteral("描述")
                                      << QStringLiteral("值"));
 
     table->setColumnWidth(SimRegisterCol::Direction, 40);
     table->setColumnWidth(SimRegisterCol::Address, 50);
+    table->setColumnWidth(SimRegisterCol::ReadbackAddress, 70);
     table->setColumnWidth(SimRegisterCol::Description, 150);
     table->setColumnWidth(SimRegisterCol::Value, 100);
 
@@ -10707,6 +10829,8 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
             table->setItem(i, SimRegisterCol::Direction, new QTableWidgetItem(""));
         if (!table->item(i, SimRegisterCol::Address))
             table->setItem(i, SimRegisterCol::Address, new QTableWidgetItem(QString::number(i)));
+        if (!table->item(i, SimRegisterCol::ReadbackAddress))
+            table->setItem(i, SimRegisterCol::ReadbackAddress, new QTableWidgetItem(""));
         if (!table->item(i, SimRegisterCol::Description))
             table->setItem(i, SimRegisterCol::Description, new QTableWidgetItem(""));
         if (!table->item(i, SimRegisterCol::Value))
@@ -11328,6 +11452,8 @@ void MainWindow::syncSimulatorTablesFromMaps() {
                 dst->setItem(row, SimRegisterCol::Direction, new QTableWidgetItem());
             if (!dst->item(row, SimRegisterCol::Address))
                 dst->setItem(row, SimRegisterCol::Address, new QTableWidgetItem());
+            if (!dst->item(row, SimRegisterCol::ReadbackAddress))
+                dst->setItem(row, SimRegisterCol::ReadbackAddress, new QTableWidgetItem());
             if (!dst->item(row, SimRegisterCol::Description))
                 dst->setItem(row, SimRegisterCol::Description, new QTableWidgetItem());
             if (!dst->item(row, SimRegisterCol::Value))
@@ -11337,8 +11463,10 @@ void MainWindow::syncSimulatorTablesFromMaps() {
             QTableWidgetItem *srcAddr = src->item(row, RegisterMapCol::Address);
             QTableWidgetItem *srcCmt = src->item(row, RegisterMapCol::Comment);
             QTableWidgetItem *srcFmt = src->item(row, RegisterMapCol::Format);
+            QTableWidgetItem *srcRb = src->item(row, RegisterMapCol::ReadbackAddress);
             dst->item(row, SimRegisterCol::Direction)->setText(srcDir ? srcDir->text() : "");
             dst->item(row, SimRegisterCol::Address)->setText(srcAddr ? srcAddr->text() : "");
+            dst->item(row, SimRegisterCol::ReadbackAddress)->setText(srcRb ? srcRb->text() : "");
             dst->item(row, SimRegisterCol::Description)->setText(srcCmt ? srcCmt->text() : "");
 
             const QString regFmt = srcFmt ? srcFmt->text() : QString();
@@ -11349,7 +11477,8 @@ void MainWindow::syncSimulatorTablesFromMaps() {
                 }
             }
 
-            for (int col : {SimRegisterCol::Direction, SimRegisterCol::Address, SimRegisterCol::Description}) {
+            for (int col : {SimRegisterCol::Direction, SimRegisterCol::Address,
+                            SimRegisterCol::ReadbackAddress, SimRegisterCol::Description}) {
                 Qt::ItemFlags flags = dst->item(row, col)->flags();
                 dst->item(row, col)->setFlags(flags & ~Qt::ItemIsEditable);
             }
@@ -11362,6 +11491,114 @@ void MainWindow::syncSimulatorTablesFromMaps() {
 
     syncOne(tblAGV, tblSimAGV);
     syncOne(tblRobot, tblSimMain);
+    rebuildSlaveReadbackMaps();
+}
+
+void MainWindow::setRegisterMapReadbackForWriteAddr(QTableWidget *mapTable, quint16 writeAddr, quint16 readbackAddr)
+{
+    if (!mapTable) return;
+
+    int writeRow = -1;
+    for (int row = 0; row < mapTable->rowCount(); ++row) {
+        const QTableWidgetItem *addrItem = mapTable->item(row, RegisterMapCol::Address);
+        if (!addrItem) continue;
+        bool ok = false;
+        const int addr = addrItem->text().trimmed().toInt(&ok);
+        if (!ok || addr != static_cast<int>(writeAddr)) continue;
+
+        const QTableWidgetItem *dirItem = mapTable->item(row, RegisterMapCol::Direction);
+        const RegisterMapDirection dir = parseRegisterMapDirection(dirItem ? dirItem->text() : QString());
+        if (dir == RegisterMapDirection::Write || dir == RegisterMapDirection::Unknown) {
+            writeRow = row;
+            if (dir == RegisterMapDirection::Write) {
+                break;
+            }
+        }
+    }
+
+    mapTable->blockSignals(true);
+    if (writeRow < 0) {
+        writeRow = mapTable->rowCount();
+        // Prefer inserting before trailing empty row
+        if (writeRow > 0 && isRegisterMapRowEmpty(mapTable, writeRow - 1)) {
+            writeRow = writeRow - 1;
+        } else {
+            mapTable->insertRow(writeRow);
+            for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+                mapTable->setItem(writeRow, col, new QTableWidgetItem());
+            }
+        }
+        if (!mapTable->item(writeRow, RegisterMapCol::Direction))
+            mapTable->setItem(writeRow, RegisterMapCol::Direction, new QTableWidgetItem());
+        if (!mapTable->item(writeRow, RegisterMapCol::Address))
+            mapTable->setItem(writeRow, RegisterMapCol::Address, new QTableWidgetItem());
+        mapTable->item(writeRow, RegisterMapCol::Direction)->setText(QStringLiteral("写"));
+        mapTable->item(writeRow, RegisterMapCol::Address)->setText(QString::number(writeAddr));
+    }
+
+    for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
+        if (!mapTable->item(writeRow, col)) {
+            mapTable->setItem(writeRow, col, new QTableWidgetItem());
+        }
+    }
+    mapTable->item(writeRow, RegisterMapCol::ReadbackAddress)->setText(QString::number(readbackAddr));
+    applyRegisterMapRowStyle(mapTable, writeRow);
+    mapTable->blockSignals(false);
+    ensureRegisterMapEditableTailRow(mapTable);
+}
+
+void MainWindow::rebuildSlaveReadbackMaps()
+{
+    auto buildMap = [this](QTableWidget *mapTable) -> QHash<quint16, quint16> {
+        QHash<quint16, quint16> result;
+        if (!mapTable) return result;
+
+        for (int row = 0; row < mapTable->rowCount(); ++row) {
+            const QTableWidgetItem *dirItem = mapTable->item(row, RegisterMapCol::Direction);
+            if (parseRegisterMapDirection(dirItem ? dirItem->text() : QString()) != RegisterMapDirection::Write) {
+                continue;
+            }
+
+            const QTableWidgetItem *addrItem = mapTable->item(row, RegisterMapCol::Address);
+            const QTableWidgetItem *rbItem = mapTable->item(row, RegisterMapCol::ReadbackAddress);
+            if (!addrItem || !rbItem) continue;
+
+            bool okW = false;
+            bool okR = false;
+            const int writeAddr = addrItem->text().trimmed().toInt(&okW);
+            const int readbackAddr = rbItem->text().trimmed().toInt(&okR);
+            if (!okW || !okR) continue;
+            if (writeAddr < 0 || writeAddr > ModbusSlave::MaxHoldingRegisterAddress) continue;
+            if (readbackAddr < 0 || readbackAddr > ModbusSlave::MaxHoldingRegisterAddress) continue;
+            if (writeAddr == readbackAddr) continue;
+
+            const QTableWidgetItem *fmtItem = mapTable->item(row, RegisterMapCol::Format);
+            const QString regFmt = fmtItem ? fmtItem->text() : QString();
+            const QString simFmt = mapRegisterFormatToSimFormat(regFmt);
+            const int stringCount = parseStringRegisterCount(regFmt, kDefaultStringRegisterCount);
+            const int wordCount = qMax(1, simFormatWordCount(simFmt,
+                stringCount > 0 ? stringCount : kDefaultStringRegisterCount));
+
+            for (int i = 0; i < wordCount; ++i) {
+                const int w = writeAddr + i;
+                const int r = readbackAddr + i;
+                if (w > ModbusSlave::MaxHoldingRegisterAddress || r > ModbusSlave::MaxHoldingRegisterAddress) {
+                    break;
+                }
+                if (w == r) continue;
+                // Later write mapping wins if the same write addr is configured twice
+                result.insert(static_cast<quint16>(w), static_cast<quint16>(r));
+            }
+        }
+        return result;
+    };
+
+    if (simAGVDevice) {
+        simAGVDevice->setReadbackMap(buildMap(tblAGV));
+    }
+    if (simMainDevice) {
+        simMainDevice->setReadbackMap(buildMap(tblRobot));
+    }
 }
 
 void MainWindow::onRegisterTableCellClicked(int row, int column) {
@@ -11468,7 +11705,9 @@ bool MainWindow::isRegisterMapRowEmpty(const QTableWidget *table, int row) const
     QString addr = table->item(row, RegisterMapCol::Address) ? table->item(row, RegisterMapCol::Address)->text().trimmed() : "";
     QString cmt = table->item(row, RegisterMapCol::Comment) ? table->item(row, RegisterMapCol::Comment)->text().trimmed() : "";
     QString regFmt = table->item(row, RegisterMapCol::Format) ? table->item(row, RegisterMapCol::Format)->text().trimmed() : "";
-    return direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty();
+    QString readback = table->item(row, RegisterMapCol::ReadbackAddress)
+                           ? table->item(row, RegisterMapCol::ReadbackAddress)->text().trimmed() : "";
+    return direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty() && readback.isEmpty();
 }
 
 void MainWindow::ensureRegisterMapEditableTailRow(QTableWidget *table) {
@@ -11578,14 +11817,42 @@ void MainWindow::onRegisterMapContextMenu(const QPoint &pos) {
     QMenu menu(this);
     QAction *copyAction = menu.addAction("复制");
     QAction *pasteAction = menu.addAction("粘贴");
-
     copyAction->setEnabled(!table->selectedRanges().isEmpty());
+
+    QAction *setReadbackAction = nullptr;
+    const QTableWidgetItem *dirItem = table->item(targetRow, RegisterMapCol::Direction);
+    const RegisterMapDirection dir = parseRegisterMapDirection(dirItem ? dirItem->text() : QString());
+    const QTableWidgetItem *addrItem = table->item(targetRow, RegisterMapCol::Address);
+    bool okReadAddr = false;
+    const int readAddr = addrItem ? addrItem->text().trimmed().toInt(&okReadAddr) : 0;
+    if (dir == RegisterMapDirection::Read && okReadAddr
+        && readAddr >= 0 && readAddr <= ModbusSlave::MaxHoldingRegisterAddress) {
+        setReadbackAction = menu.addAction(QStringLiteral("设为回读寄存器…"));
+    }
 
     QAction *selected = menu.exec(table->viewport()->mapToGlobal(pos));
     if (selected == copyAction) {
         copyRegisterMapSelection(table);
     } else if (selected == pasteAction) {
         pasteRegisterMapFromClipboard(table, targetRow, targetCol);
+    } else if (setReadbackAction && selected == setReadbackAction) {
+        bool ok = false;
+        const int writeAddr = QInputDialog::getInt(
+            this,
+            QStringLiteral("设为回读寄存器"),
+            QStringLiteral("将该读地址 %1 设为哪个写寄存器的回读？\n请输入写寄存器地址:").arg(readAddr),
+            0,
+            0,
+            ModbusSlave::MaxHoldingRegisterAddress,
+            1,
+            &ok);
+        if (ok) {
+            setRegisterMapReadbackForWriteAddr(table,
+                                              static_cast<quint16>(writeAddr),
+                                              static_cast<quint16>(readAddr));
+            saveRegisterTables();
+            syncSimulatorTablesFromMaps();
+        }
     }
 }
 
@@ -11613,10 +11880,12 @@ void MainWindow::saveRegisterTables() {
             QTableWidgetItem *addrItem = table->item(i, RegisterMapCol::Address);
             QTableWidgetItem *cmtItem = table->item(i, RegisterMapCol::Comment);
             QTableWidgetItem *regFmtItem = table->item(i, RegisterMapCol::Format);
+            QTableWidgetItem *readbackItem = table->item(i, RegisterMapCol::ReadbackAddress);
             settings.setValue("direction", dirItem ? dirItem->text() : "");
             settings.setValue("addr", addrItem ? addrItem->text() : "");
             settings.setValue("cmt", cmtItem ? cmtItem->text() : "");
             settings.setValue("regfmt", regFmtItem ? regFmtItem->text() : "");
+            settings.setValue("readback", readbackItem ? readbackItem->text() : "");
         }
         settings.endArray();
     };
@@ -11641,6 +11910,7 @@ void MainWindow::loadRegisterTables() {
                 QString addr = settings.value("addr").toString();
                 QString cmt = settings.value("cmt").toString();
                 QString regfmt = settings.value("regfmt").toString();
+                QString readback = settings.value("readback").toString();
                 
                 for (int col = 0; col < RegisterMapCol::ColumnCount; ++col) {
                     if (!table->item(i, col)) {
@@ -11652,6 +11922,7 @@ void MainWindow::loadRegisterTables() {
                 table->item(i, RegisterMapCol::Address)->setText(addr);
                 table->item(i, RegisterMapCol::Comment)->setText(cmt);
                 table->item(i, RegisterMapCol::Format)->setText(regfmt);
+                table->item(i, RegisterMapCol::ReadbackAddress)->setText(readback);
             }
 
             table->blockSignals(false);
@@ -11679,7 +11950,7 @@ void MainWindow::onExportRegisterMapClicked() {
 
     QTextStream out(&f);
     out.setGenerateByteOrderMark(true); // 保证 Excel 正常打开中文
-    out << "Tab,Direction,Address,Comment,RegisterFormat\n";
+    out << "Tab,Direction,Address,Comment,RegisterFormat,ReadbackAddress\n";
 
     auto exportTable = [&](QTableWidget *table, const QString &tabName) {
         if (!table) return;
@@ -11688,14 +11959,17 @@ void MainWindow::onExportRegisterMapClicked() {
             QString addr = table->item(i, RegisterMapCol::Address) ? table->item(i, RegisterMapCol::Address)->text() : "";
             QString cmt = table->item(i, RegisterMapCol::Comment) ? table->item(i, RegisterMapCol::Comment)->text() : "";
             QString regFmt = table->item(i, RegisterMapCol::Format) ? table->item(i, RegisterMapCol::Format)->text() : "";
+            QString readback = table->item(i, RegisterMapCol::ReadbackAddress)
+                                   ? table->item(i, RegisterMapCol::ReadbackAddress)->text() : "";
             
-            if (direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty()) continue;
+            if (direction.isEmpty() && addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty() && readback.isEmpty()) continue;
             
             out << tabName << ","
                 << escapeRegisterMapCsvField(direction) << ","
                 << escapeRegisterMapCsvField(addr) << ","
                 << escapeRegisterMapCsvField(cmt) << ","
-                << escapeRegisterMapCsvField(regFmt) << "\n";
+                << escapeRegisterMapCsvField(regFmt) << ","
+                << escapeRegisterMapCsvField(readback) << "\n";
         }
     };
 
@@ -11726,6 +12000,7 @@ void MainWindow::onImportRegisterMapClicked() {
     int addrCol = 1;
     int cmtCol = 2;
     int fmtCol = 3;
+    int readbackCol = -1;
     bool hasHeader = false;
 
     for (int i = 0; i < headerParts.size(); ++i) {
@@ -11745,6 +12020,10 @@ void MainWindow::onImportRegisterMapClicked() {
         } else if (h == QStringLiteral("registerformat") || h == QStringLiteral("寄存器格式")) {
             fmtCol = i;
             hasHeader = true;
+        } else if (h == QStringLiteral("readbackaddress") || h == QStringLiteral("readback")
+                   || h == QStringLiteral("回读地址")) {
+            readbackCol = i;
+            hasHeader = true;
         }
     }
 
@@ -11755,6 +12034,7 @@ void MainWindow::onImportRegisterMapClicked() {
         addrCol = 1;
         cmtCol = 2;
         fmtCol = 3;
+        readbackCol = -1;
     }
     
     auto clearTable = [&](QTableWidget* table) {
@@ -11781,10 +12061,11 @@ void MainWindow::onImportRegisterMapClicked() {
         const QString addr = parts.value(addrCol).trimmed();
         const QString cmt = parts.value(cmtCol).trimmed();
         QString regFmt = parts.value(fmtCol).trimmed();
+        const QString readback = readbackCol >= 0 ? parts.value(readbackCol).trimmed() : QString();
         if (regFmt.isEmpty()) {
             regFmt = addr;
         }
-        if (addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty() && direction.isEmpty()) {
+        if (addr.isEmpty() && cmt.isEmpty() && regFmt.isEmpty() && direction.isEmpty() && readback.isEmpty()) {
             return;
         }
 
@@ -11806,6 +12087,7 @@ void MainWindow::onImportRegisterMapClicked() {
         table->item(row, RegisterMapCol::Address)->setText(addr);
         table->item(row, RegisterMapCol::Comment)->setText(cmt);
         table->item(row, RegisterMapCol::Format)->setText(regFmt);
+        table->item(row, RegisterMapCol::ReadbackAddress)->setText(readback);
         table->blockSignals(false);
         applyRegisterMapRowStyle(table, row);
     };

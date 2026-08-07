@@ -8,6 +8,7 @@
 #include <QPair>
 #include <QMutex>
 #include <QMap>
+#include <QHash>
 #include <QTimer>
 
 class ModbusSlave : public QObject
@@ -32,6 +33,11 @@ public:
     bool setRegisterBit(quint16 addr, int bitIndex, bool value);
     bool setFloat(quint16 addr, float value);
     float getFloat(quint16 addr) const;
+
+    // Write address -> readback address (one hop; writing readback does not reverse-sync)
+    void setReadbackMap(const QHash<quint16, quint16> &map);
+    void clearReadbackMap();
+    QHash<quint16, quint16> readbackMapSnapshot() const;
 
     // Export / Import full holding register snapshot
     QVector<quint16> exportHolding() const;
@@ -64,6 +70,7 @@ private:
     QVector<quint16> holding;
     mutable QMutex mutex;
     quint8 unit;
+    QHash<quint16, quint16> readbackMap; // write addr -> readback addr
 
     // Fault injection / network simulation
     int fixedDelayMs;
@@ -72,6 +79,10 @@ private:
     QMap<quint16, quint8> addrExceptions;
 
     bool shouldDrop() const;
+
+    // Caller must hold mutex. Copies holding[addr] to mapped readback if configured.
+    void applyReadbackUnlocked(quint16 addr, quint16 value,
+                               QVector<QPair<quint16, quint16>> *extraOps);
 
     void processRequest(QTcpSocket *sock, const QByteArray &data);
     QByteArray buildResponse(quint16 transactionId, quint8 unitId, const QByteArray &pdu);

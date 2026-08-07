@@ -191,6 +191,8 @@ private slots:
     void onGitAutoFetchToggled(bool checked);
     void onGitAutoPushAfterCommitToggled(bool checked);
     void onGitPendingStatusBarTick();
+    void onGitPendingBlinkTick();
+    void onGitPendingTrayMessageClicked();
     void onGitCheckoutClicked();
     void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
@@ -471,6 +473,10 @@ private:
     QCheckBox *chkGitAutoPushAfterCommit = nullptr;
     QLabel *lblGitPendingStatus = nullptr;
     QTimer *gitPendingStatusTimer = nullptr;
+    QTimer *gitPendingBlinkTimer = nullptr;
+    bool gitPendingBlinkOn = false;
+    bool gitPendingAlertActive = false;
+    QString gitPendingLastTraySignature;
     QLabel *lblGitNetworkStatus = nullptr;
     QProgressBar *barGitNetworkBusy = nullptr;
     QPushButton *btnGitCancelNetwork = nullptr;
@@ -651,6 +657,9 @@ private:
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();
     void refreshGitPendingStatusBar();
+    void setGitPendingAlertActive(bool active);
+    void applyGitPendingBlinkStyle();
+    void maybeNotifyGitPendingTray(bool hasPending, const QString &body);
     void maybeAutoPushAfterCommit();
     bool gitHasUncommittedChanges(const QString &workDir) const;
     /** Staging review gate: dialog + selective git add. Returns false if cancelled/refused. */
@@ -773,6 +782,8 @@ private:
     void pasteRegisterMapFromClipboard(QTableWidget *table, int startRow, int startColumn);
     void setupSimulatorRegisterTable(QTableWidget *table);
     void syncSimulatorTablesFromMaps();
+    void rebuildSlaveReadbackMaps();
+    void setRegisterMapReadbackForWriteAddr(QTableWidget *mapTable, quint16 writeAddr, quint16 readbackAddr);
     int findSimRowByAddress(QTableWidget *table, quint16 addr) const;
     void rebuildSimAddrIndex(QTableWidget *table);
     void rebuildSimRowStates(QTableWidget *table);

@@ -86,14 +86,56 @@ void ModbusSlave::stop()
 
 bool ModbusSlave::isRunning() const { return server->isListening(); }
 
+void ModbusSlave::applyReadbackUnlocked(quint16 addr, quint16 value,
+                                        QVector<QPair<quint16, quint16>> *extraOps)
+{
+    const auto it = readbackMap.constFind(addr);
+    if (it == readbackMap.cend()) {
+        return;
+    }
+    const quint16 readback = it.value();
+    if (readback == addr || readback >= static_cast<quint16>(holding.size())) {
+        return;
+    }
+    holding[readback] = value;
+    if (extraOps) {
+        extraOps->append(qMakePair(readback, value));
+    }
+}
+
+void ModbusSlave::setReadbackMap(const QHash<quint16, quint16> &map)
+{
+    QMutexLocker locker(&mutex);
+    readbackMap = map;
+}
+
+void ModbusSlave::clearReadbackMap()
+{
+    QMutexLocker locker(&mutex);
+    readbackMap.clear();
+}
+
+QHash<quint16, quint16> ModbusSlave::readbackMapSnapshot() const
+{
+    QMutexLocker locker(&mutex);
+    return readbackMap;
+}
+
 bool ModbusSlave::setRegister(quint16 addr, quint16 value)
 {
+    QVector<QPair<quint16, quint16>> ops;
     {
         QMutexLocker locker(&mutex);
         if (addr >= (quint16)holding.size()) return false;
         holding[addr] = value;
+        ops.append(qMakePair(addr, value));
+        applyReadbackUnlocked(addr, value, &ops);
     }
-    emit registerOperation(addr, value, QString("write"));
+    if (ops.size() == 1) {
+        emit registerOperation(addr, value, QStringLiteral("write"));
+    } else {
+        emit registersChanged(ops, QStringLiteral("write"));
+    }
     return true;
 }
 
@@ -101,7 +143,7 @@ bool ModbusSlave::setRegisters(quint16 start, const QVector<quint16> &values)
 {
     if (values.isEmpty()) return true;
     QVector<QPair<quint16, quint16>> ops;
-    ops.reserve(values.size());
+    ops.reserve(values.size() * 2);
     {
         QMutexLocker locker(&mutex);
         for (int i = 0; i < values.size(); ++i) {
@@ -112,6 +154,7 @@ bool ModbusSlave::setRegisters(quint16 start, const QVector<quint16> &values)
             }
             holding[addr] = values.at(i);
             ops.append(qMakePair(addr, values.at(i)));
+            applyReadbackUnlocked(addr, values.at(i), &ops);
         }
     }
     if (ops.isEmpty()) return false;
@@ -130,14 +173,21 @@ bool ModbusSlave::setRegisterBit(quint16 addr, int bitIndex, bool value)
 {
     if (bitIndex < 0 || bitIndex > 15) return false;
     quint16 v = 0;
+    QVector<QPair<quint16, quint16>> ops;
     {
         QMutexLocker locker(&mutex);
         if (addr >= (quint16)holding.size()) return false;
         v = holding[addr];
         if (value) v |= (1 << bitIndex); else v &= ~(1 << bitIndex);
         holding[addr] = v;
+        ops.append(qMakePair(addr, v));
+        applyReadbackUnlocked(addr, v, &ops);
     }
-    emit registerOperation(addr, v, QString("write_bit"));
+    if (ops.size() == 1) {
+        emit registerOperation(addr, v, QStringLiteral("write_bit"));
+    } else {
+        emit registersChanged(ops, QStringLiteral("write_bit"));
+    }
     return true;
 }
 
@@ -321,7 +371,7 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
         quint8 byteCount = d[12];
         if (data.size() < 13 + byteCount) return;
         QVector<QPair<quint16, quint16>> writeOps;
-        writeOps.reserve(qty);
+        writeOps.reserve(qty * 2);
         {
             QMutexLocker locker(&mutex);
             for (int i = 0; i < qty; ++i) {
@@ -332,6 +382,7 @@ void ModbusSlave::processRequest(QTcpSocket *sock, const QByteArray &data)
                 if (addr < (quint16)holding.size()) {
                     holding[addr] = v;
                     writeOps.append(qMakePair(addr, v));
+                    applyReadbackUnlocked(addr, v, &writeOps);
                 }
             }
         }
