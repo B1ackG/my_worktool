@@ -548,27 +548,33 @@ class InputQuickerDaemon:
 
     def open_device(self) -> None:
         self.close_device()
+        # Empty path+name =「自动选择（按能力评分）」. Do not pin the resolved
+        # device back into config, or the UI would leave auto mode after first run.
+        was_auto = (
+            not str(self.config.get("devicePath", "")).strip()
+            and not str(self.config.get("deviceName", "")).strip()
+        )
         path = resolve_device_path(self.config)
         self.device = InputDevice(path)
         self.listening_path = path
-        # Remember stable identity so reboot / reconnect can find the mouse again.
-        # Persist stable identity + current event node so reconnects stay on
-        # the same mouse (e.g. Logitech MX Master 3S) instead of auto-picking
-        # a laptop pointer after Bluetooth renumbers /dev/input/eventN.
-        live_name = (self.device.name or "").strip()
-        changed = False
-        if live_name and str(self.config.get("deviceName", "")).strip() != live_name:
-            self.config["deviceName"] = live_name
-            changed = True
-        if path and str(self.config.get("devicePath", "")).strip() != path:
-            self.config["devicePath"] = path
-            changed = True
-        if changed:
-            try:
-                save_config(self.config)
-                log(f"INFO: persisted device {path} ({live_name})")
-            except OSError as exc:
-                log(f"WARN: could not persist device identity: {exc}")
+        # When the user pinned a device (path and/or name), remember stable
+        # identity + current event node so reboot / Bluetooth reconnect stays
+        # on the same mouse instead of falling back to a laptop pointer.
+        if not was_auto:
+            live_name = (self.device.name or "").strip()
+            changed = False
+            if live_name and str(self.config.get("deviceName", "")).strip() != live_name:
+                self.config["deviceName"] = live_name
+                changed = True
+            if path and str(self.config.get("devicePath", "")).strip() != path:
+                self.config["devicePath"] = path
+                changed = True
+            if changed:
+                try:
+                    save_config(self.config)
+                    log(f"INFO: persisted device {path} ({live_name})")
+                except OSError as exc:
+                    log(f"WARN: could not persist device identity: {exc}")
 
         prefer_hi_res = device_hi_res_wheel_axes(self.device)
         self.wheel_normalizer.set_prefer_hi_res(prefer_hi_res)
