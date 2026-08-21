@@ -967,20 +967,14 @@ void MainWindow::createWidgets()
     btnGitRemoveHistory = new QPushButton("删除记忆");
     btnGitRemoveHistory->setToolTip("从记忆列表中移除当前选中的仓库路径（不删除磁盘目录）");
 
-    tblGitRepoMeta = new QTableWidget();
-    tblGitRepoMeta->setColumnCount(3);
-    tblGitRepoMeta->setHorizontalHeaderLabels(
-        QStringList() << QStringLiteral("路径") << QStringLiteral("中文名") << QStringLiteral("主项目"));
-    tblGitRepoMeta->horizontalHeader()->setStretchLastSection(false);
-    tblGitRepoMeta->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    tblGitRepoMeta->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    tblGitRepoMeta->setColumnWidth(2, 64);
-    tblGitRepoMeta->setSelectionBehavior(QAbstractItemView::SelectRows);
-    tblGitRepoMeta->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
-    tblGitRepoMeta->verticalHeader()->setVisible(false);
-    tblGitRepoMeta->setMinimumHeight(48);
-    tblGitRepoMeta->setMaximumHeight(120);
-    tblGitRepoMeta->setToolTip(QStringLiteral("为各记忆路径设置日报中文名；勾选「主项目」后复制到日报时填入该仓库的工作目标与完成度"));
+    cmbGitRepoMain = new QComboBox();
+    cmbGitRepoMain->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    cmbGitRepoMain->setToolTip(QStringLiteral("复制到日报时使用此仓库的工作目标标题和完成度"));
+
+    txtGitRepoAlias = new QLineEdit();
+    txtGitRepoAlias->setPlaceholderText(QStringLiteral("日报中文名（可选）"));
+    txtGitRepoAlias->setClearButtonEnabled(true);
+    txtGitRepoAlias->setToolTip(QStringLiteral("该主项目在日报中显示的中文名"));
 
     tblGitGoals = new QTableWidget();
     tblGitGoals->setColumnCount(10);
@@ -993,9 +987,8 @@ void MainWindow::createWidgets()
     tblGitGoals->setSelectionMode(QAbstractItemView::SingleSelection);
     tblGitGoals->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tblGitGoals->verticalHeader()->setVisible(false);
-    tblGitGoals->setMinimumHeight(80);
-    tblGitGoals->setMaximumHeight(220);
-    tblGitGoals->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    tblGitGoals->setMinimumHeight(180);
+    tblGitGoals->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     tblGitGoals->setToolTip(QStringLiteral("双击行可将目标分支下拉框切换到该目标绑定的分支"));
 
     btnGitGoalAdd = new QPushButton("添加目标");
@@ -1389,14 +1382,19 @@ QWidget* MainWindow::createGitPage()
     layRepoVBox->addLayout(layRepo);
     layRepoVBox->addWidget(chkGitAutoFetch);
     layRepoVBox->addWidget(chkGitAutoPushAfterCommit);
-    layRepoVBox->addWidget(new QLabel(QStringLiteral("日报路径配置:")));
-    layRepoVBox->addWidget(tblGitRepoMeta);
+    QHBoxLayout *layRepoMeta = new QHBoxLayout();
+    layRepoMeta->addWidget(new QLabel(QStringLiteral("日报主项目:")));
+    layRepoMeta->addWidget(cmbGitRepoMain, 1);
+    layRepoMeta->addWidget(new QLabel(QStringLiteral("中文名:")));
+    layRepoMeta->addWidget(txtGitRepoAlias, 1);
+    layRepoVBox->addLayout(layRepoMeta);
     grpRepo->setLayout(layRepoVBox);
     layout->addWidget(grpRepo);
 
     QGroupBox *grpGoals = new QGroupBox("工作目标（按当前仓库目录分开保存）");
+    grpGoals->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     QVBoxLayout *layGoals = new QVBoxLayout();
-    layGoals->addWidget(tblGitGoals);
+    layGoals->addWidget(tblGitGoals, 1);
     QHBoxLayout *layGoalBtns = new QHBoxLayout();
     layGoalBtns->addWidget(btnGitGoalAdd);
     layGoalBtns->addWidget(btnGitGoalEdit);
@@ -1405,7 +1403,7 @@ QWidget* MainWindow::createGitPage()
     layGoalBtns->addStretch();
     layGoals->addLayout(layGoalBtns);
     grpGoals->setLayout(layGoals);
-    layout->addWidget(grpGoals);
+    layout->addWidget(grpGoals, 1);
     
     // 2. Branch & Actions
     QGroupBox *grpOps = new QGroupBox("Git 操作");
@@ -2440,13 +2438,25 @@ void MainWindow::createConnections()
     // Git Connections
     connect(btnGitSelectDir, &QPushButton::clicked, this, &MainWindow::onGitSelectDirClicked);
     connect(btnGitRemoveHistory, &QPushButton::clicked, this, &MainWindow::onGitRemoveHistoryClicked);
-    connect(tblGitRepoMeta, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *item) {
-        if (gitRepoMetaRefreshing || !item || item->column() != 1)
+    connect(cmbGitRepoMain, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        if (gitRepoMetaRefreshing || !cmbGitRepoMain)
             return;
-        const QTableWidgetItem *pathItem = tblGitRepoMeta->item(item->row(), 0);
-        if (!pathItem)
+        const QString path = cmbGitRepoMain->currentData().toString();
+        setGitRepoMainProject(path);
+        gitRepoMetaRefreshing = true;
+        if (txtGitRepoAlias) {
+            txtGitRepoAlias->setText(gitRepoAlias(path));
+            txtGitRepoAlias->setEnabled(!path.isEmpty());
+        }
+        gitRepoMetaRefreshing = false;
+    });
+    connect(txtGitRepoAlias, &QLineEdit::editingFinished, this, [this]() {
+        if (gitRepoMetaRefreshing || !cmbGitRepoMain || !txtGitRepoAlias)
             return;
-        saveGitRepoAlias(pathItem->data(Qt::UserRole).toString(), item->text());
+        const QString path = cmbGitRepoMain->currentData().toString();
+        if (path.isEmpty())
+            return;
+        saveGitRepoAlias(path, txtGitRepoAlias->text());
     });
     connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
     connect(cmbGitBranches, &QComboBox::currentTextChanged, this, &MainWindow::onGitBranchSelectionChanged);
@@ -8916,74 +8926,45 @@ QStringList MainWindow::fetchTodayCommitSubjects(const QString &workDir) const {
 }
 
 void MainWindow::refreshGitRepoMetaTable() {
-    if (!tblGitRepoMeta)
+    if (!cmbGitRepoMain || !txtGitRepoAlias)
         return;
 
     gitRepoMetaRefreshing = true;
-    tblGitRepoMeta->blockSignals(true);
-    tblGitRepoMeta->setRowCount(0);
+    cmbGitRepoMain->blockSignals(true);
+    txtGitRepoAlias->blockSignals(true);
+
+    cmbGitRepoMain->clear();
+    cmbGitRepoMain->addItem(QStringLiteral("（无）"), QString());
 
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
     const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
     const QString mainPath = gitRepoMainProjectPath();
 
+    int selectIndex = 0;
+    bool foundMain = false;
     for (const QString &rawPath : history) {
         const QString absPath = gitGoalsRepoKey(rawPath);
         if (absPath.isEmpty())
             continue;
 
-        const int row = tblGitRepoMeta->rowCount();
-        tblGitRepoMeta->insertRow(row);
-
-        QTableWidgetItem *pathItem = new QTableWidgetItem(absPath);
-        pathItem->setFlags(pathItem->flags() & ~Qt::ItemIsEditable);
-        pathItem->setToolTip(absPath);
-        pathItem->setData(Qt::UserRole, absPath);
-        tblGitRepoMeta->setItem(row, 0, pathItem);
-
-        QTableWidgetItem *aliasItem = new QTableWidgetItem(gitRepoAlias(absPath));
-        aliasItem->setData(Qt::UserRole, absPath);
-        tblGitRepoMeta->setItem(row, 1, aliasItem);
-
-        QCheckBox *mainCb = new QCheckBox();
-        mainCb->setChecked(absPath == mainPath);
-        mainCb->setToolTip(QStringLiteral("勾选后，复制到日报时使用此仓库的工作目标标题和完成度"));
-
-        QWidget *centerWidget = new QWidget();
-        QHBoxLayout *lay = new QHBoxLayout(centerWidget);
-        lay->addWidget(mainCb);
-        lay->setAlignment(Qt::AlignCenter);
-        lay->setContentsMargins(0, 0, 0, 0);
-        tblGitRepoMeta->setCellWidget(row, 2, centerWidget);
-
-        connect(mainCb, &QCheckBox::toggled, this, [this, absPath](bool checked) {
-            if (gitRepoMetaRefreshing)
-                return;
-
-            if (checked) {
-                setGitRepoMainProject(absPath);
-                for (int r = 0; r < tblGitRepoMeta->rowCount(); ++r) {
-                    QWidget *widget = tblGitRepoMeta->cellWidget(r, 2);
-                    if (!widget)
-                        continue;
-                    QCheckBox *cb = widget->findChild<QCheckBox *>();
-                    if (!cb)
-                        continue;
-                    const QTableWidgetItem *pathItem = tblGitRepoMeta->item(r, 0);
-                    const QString rowPath = pathItem ? pathItem->data(Qt::UserRole).toString() : QString();
-                    if (rowPath != absPath && cb->isChecked()) {
-                        gitRepoMetaRefreshing = true;
-                        cb->setChecked(false);
-                        gitRepoMetaRefreshing = false;
-                    }
-                }
-            } else if (gitRepoMainProjectPath() == absPath) {
-                setGitRepoMainProject(QString());
-            }
-        });
+        cmbGitRepoMain->addItem(absPath, absPath);
+        if (!mainPath.isEmpty() && absPath == mainPath) {
+            selectIndex = cmbGitRepoMain->count() - 1;
+            foundMain = true;
+        }
+    }
+    if (!mainPath.isEmpty() && !foundMain) {
+        cmbGitRepoMain->addItem(mainPath, mainPath);
+        selectIndex = cmbGitRepoMain->count() - 1;
     }
 
-    tblGitRepoMeta->blockSignals(false);
+    cmbGitRepoMain->setCurrentIndex(selectIndex);
+    const QString selectedPath = cmbGitRepoMain->currentData().toString();
+    txtGitRepoAlias->setText(gitRepoAlias(selectedPath));
+    txtGitRepoAlias->setEnabled(!selectedPath.isEmpty());
+
+    cmbGitRepoMain->blockSignals(false);
+    txtGitRepoAlias->blockSignals(false);
     gitRepoMetaRefreshing = false;
 }
 

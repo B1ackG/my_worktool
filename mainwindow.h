@@ -438,7 +438,8 @@ private:
     QComboBox *cmbGitDir;  // Changed from QLineEdit
     QPushButton *btnGitSelectDir;
     QPushButton *btnGitRemoveHistory;
-    QTableWidget *tblGitRepoMeta;
+    QComboBox *cmbGitRepoMain = nullptr;
+    QLineEdit *txtGitRepoAlias = nullptr;
     QTableWidget *tblGitGoals;
     QPushButton *btnGitGoalAdd;
     QPushButton *btnGitGoalEdit;
