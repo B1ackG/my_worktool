@@ -694,6 +694,8 @@ private:
     QString gitRepoDisplayName(const QString &repoDir) const;
     QString gitRepoMainProjectPath() const;
     void setGitRepoMainProject(const QString &repoDir);
+    QString gitRepoMainGoalId() const;
+    void setGitRepoMainGoalId(const QString &goalId);
     QStringList fetchTodayCommitSubjects(const QString &workDir) const;
     bool isGitRepository(const QString &workDir) const;
     QString buildDailyReportContent(QString *errorOut = nullptr, bool showUiWarnings = true);

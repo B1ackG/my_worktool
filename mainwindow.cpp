@@ -969,12 +969,14 @@ void MainWindow::createWidgets()
 
     cmbGitRepoMain = new QComboBox();
     cmbGitRepoMain->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    cmbGitRepoMain->setToolTip(QStringLiteral("复制到日报时使用此仓库的工作目标标题和完成度"));
+    cmbGitRepoMain->setFocusPolicy(Qt::StrongFocus);
+    cmbGitRepoMain->setMaxVisibleItems(12);
+    cmbGitRepoMain->setToolTip(QStringLiteral("复制到日报时使用该根目标的标题和完成度；同一仓库有多个根目标时需指定一个"));
 
     txtGitRepoAlias = new QLineEdit();
     txtGitRepoAlias->setPlaceholderText(QStringLiteral("日报中文名（可选）"));
     txtGitRepoAlias->setClearButtonEnabled(true);
-    txtGitRepoAlias->setToolTip(QStringLiteral("该主项目在日报中显示的中文名"));
+    txtGitRepoAlias->setToolTip(QStringLiteral("该仓库在日报提交前缀中显示的中文名"));
 
     tblGitGoals = new QTableWidget();
     tblGitGoals->setColumnCount(10);
@@ -2441,8 +2443,11 @@ void MainWindow::createConnections()
     connect(cmbGitRepoMain, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         if (gitRepoMetaRefreshing || !cmbGitRepoMain)
             return;
-        const QString path = cmbGitRepoMain->currentData().toString();
+        const QString path = cmbGitRepoMain->currentData(Qt::UserRole).toString();
+        const QString goalId = cmbGitRepoMain->currentData(Qt::UserRole + 1).toString();
         setGitRepoMainProject(path);
+        if (!path.isEmpty())
+            setGitRepoMainGoalId(goalId);
         gitRepoMetaRefreshing = true;
         if (txtGitRepoAlias) {
             txtGitRepoAlias->setText(gitRepoAlias(path));
@@ -2453,10 +2458,11 @@ void MainWindow::createConnections()
     connect(txtGitRepoAlias, &QLineEdit::editingFinished, this, [this]() {
         if (gitRepoMetaRefreshing || !cmbGitRepoMain || !txtGitRepoAlias)
             return;
-        const QString path = cmbGitRepoMain->currentData().toString();
+        const QString path = cmbGitRepoMain->currentData(Qt::UserRole).toString();
         if (path.isEmpty())
             return;
         saveGitRepoAlias(path, txtGitRepoAlias->text());
+        refreshGitRepoMetaTable();
     });
     connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
     connect(cmbGitBranches, &QComboBox::currentTextChanged, this, &MainWindow::onGitBranchSelectionChanged);
@@ -7845,35 +7851,48 @@ QString MainWindow::buildDailyReportContent(QString *errorOut, bool showUiWarnin
 
     QString finalContent = commitsPart;
     const QString mainPath = gitRepoMainProjectPath();
+    const QString mainGoalId = gitRepoMainGoalId();
     if (!mainPath.isEmpty() && QDir(mainPath).exists() && isGitRepository(mainPath)) {
         QList<GitWorkGoal> goals = loadGitGoals(mainPath);
         syncGoalDifficultyFromDiffLines(mainPath, goals);
 
-        QList<const GitWorkGoal *> rootGoals;
-        for (const GitWorkGoal &g : goals) {
-            if (g.parentId.isEmpty()) {
-                rootGoals.append(&g);
+        const GitWorkGoal *root = nullptr;
+        if (!mainGoalId.isEmpty()) {
+            root = gitGoalById(goals, mainGoalId);
+            while (root && !root->parentId.isEmpty()) {
+                root = gitGoalById(goals, root->parentId);
             }
         }
 
-        if (rootGoals.size() > 1) {
+        QList<const GitWorkGoal *> rootGoals;
+        if (!root) {
+            for (const GitWorkGoal &g : goals) {
+                if (g.parentId.isEmpty()) {
+                    rootGoals.append(&g);
+                }
+            }
+            if (rootGoals.size() == 1) {
+                root = rootGoals.first();
+            }
+        }
+
+        if (root) {
+            const GitRootProgressInfo progress = calcRootGoalProgress(mainPath, *root, goals);
+            finalContent = root->title + QLatin1Char('\n') + commitsPart
+                           + QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
+        } else if (rootGoals.size() > 1) {
             QStringList titles;
             for (const GitWorkGoal *g : rootGoals) {
                 titles << g->title;
             }
             const QString warnMsg =
-                QStringLiteral("主项目仓库存在 %1 个无父目标（根目标），无法自动填入完成度：\n%2")
+                QStringLiteral("主项目仓库存在 %1 个根目标，请在「日报主项目」中指定一个：\n%2")
                     .arg(rootGoals.size())
                     .arg(titles.join(QStringLiteral("\n")));
             txtGitLog->append(QStringLiteral("<font color='orange'>[日报] %1</font>").arg(warnMsg));
             if (showUiWarnings) {
                 QMessageBox::warning(this, QStringLiteral("复制到日报"), warnMsg);
             }
-        } else if (rootGoals.size() == 1) {
-            const GitWorkGoal *root = rootGoals.first();
-            const GitRootProgressInfo progress = calcRootGoalProgress(mainPath, *root, goals);
-            finalContent = root->title + QLatin1Char('\n') + commitsPart
-                           + QStringLiteral("\n\n完成度：%1%").arg(qRound(progress.totalPercent));
         }
     }
 
@@ -8865,8 +8884,28 @@ void MainWindow::setGitRepoMainProject(const QString &repoDir) {
     const QString key = gitGoalsRepoKey(repoDir);
     if (key.isEmpty()) {
         settings.remove(QStringLiteral("mainProject"));
+        settings.remove(QStringLiteral("mainGoalId"));
     } else {
         settings.setValue(QStringLiteral("mainProject"), key);
+    }
+    settings.endGroup();
+}
+
+QString MainWindow::gitRepoMainGoalId() const {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    const QString goalId = settings.value(QStringLiteral("mainGoalId")).toString().trimmed();
+    settings.endGroup();
+    return goalId;
+}
+
+void MainWindow::setGitRepoMainGoalId(const QString &goalId) {
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("GitRepoMeta"));
+    if (goalId.trimmed().isEmpty()) {
+        settings.remove(QStringLiteral("mainGoalId"));
+    } else {
+        settings.setValue(QStringLiteral("mainGoalId"), goalId.trimmed());
     }
     settings.endGroup();
 }
@@ -8934,32 +8973,51 @@ void MainWindow::refreshGitRepoMetaTable() {
     txtGitRepoAlias->blockSignals(true);
 
     cmbGitRepoMain->clear();
-    cmbGitRepoMain->addItem(QStringLiteral("（无）"), QString());
+    cmbGitRepoMain->addItem(QStringLiteral("（无）"));
 
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
     const QString mainPath = gitRepoMainProjectPath();
+    const QString mainGoalId = gitRepoMainGoalId();
+    if (!mainPath.isEmpty()) {
+        bool inHistory = false;
+        for (const QString &rawPath : history) {
+            if (gitGoalsRepoKey(rawPath) == mainPath) {
+                inHistory = true;
+                break;
+            }
+        }
+        if (!inHistory)
+            history.append(mainPath);
+    }
 
     int selectIndex = 0;
-    bool foundMain = false;
     for (const QString &rawPath : history) {
         const QString absPath = gitGoalsRepoKey(rawPath);
         if (absPath.isEmpty())
             continue;
 
-        cmbGitRepoMain->addItem(absPath, absPath);
-        if (!mainPath.isEmpty() && absPath == mainPath) {
-            selectIndex = cmbGitRepoMain->count() - 1;
-            foundMain = true;
+        const QList<GitWorkGoal> goals = loadGitGoals(absPath);
+        const QString repoName = gitRepoDisplayName(absPath);
+        for (const GitWorkGoal &g : goals) {
+            if (!g.parentId.isEmpty() || g.id.isEmpty() || g.title.isEmpty())
+                continue;
+
+            const QString text = repoName.isEmpty()
+                ? g.title
+                : QStringLiteral("%1 · %2").arg(repoName, g.title);
+            cmbGitRepoMain->addItem(text);
+            const int idx = cmbGitRepoMain->count() - 1;
+            cmbGitRepoMain->setItemData(idx, absPath, Qt::UserRole);
+            cmbGitRepoMain->setItemData(idx, g.id, Qt::UserRole + 1);
+            cmbGitRepoMain->setItemData(idx, absPath, Qt::ToolTipRole);
+            if (!mainGoalId.isEmpty() && g.id == mainGoalId)
+                selectIndex = idx;
         }
-    }
-    if (!mainPath.isEmpty() && !foundMain) {
-        cmbGitRepoMain->addItem(mainPath, mainPath);
-        selectIndex = cmbGitRepoMain->count() - 1;
     }
 
     cmbGitRepoMain->setCurrentIndex(selectIndex);
-    const QString selectedPath = cmbGitRepoMain->currentData().toString();
+    const QString selectedPath = cmbGitRepoMain->currentData(Qt::UserRole).toString();
     txtGitRepoAlias->setText(gitRepoAlias(selectedPath));
     txtGitRepoAlias->setEnabled(!selectedPath.isEmpty());
 
