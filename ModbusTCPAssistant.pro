@@ -48,6 +48,7 @@ HEADERS += \
     gitworktreeapplydialog.h \
     gitworktreewizard.h \
     gitworktreedialog.h \
+    nowheelfilter.h \
     gitstageguard.h \
     gitstagereviewdialog.h \
     cursorskillsdialog.h \

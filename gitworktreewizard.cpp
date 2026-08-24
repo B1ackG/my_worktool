@@ -2,6 +2,7 @@
 
 #include "gitworktreerunner.h"
 #include "gitworktreesetup.h"
+#include "nowheelfilter.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -94,6 +95,7 @@ void GitWorktreeWizard::buildPages()
     m_txtFeatureBranch->setEnabled(false);
 
     m_cmbExistingBranch = new QComboBox(modePage);
+    NoWheelFilter::install(m_cmbExistingBranch);
     m_cmbExistingBranch->setEnabled(false);
 
     QButtonGroup *grp = new QButtonGroup(modePage);

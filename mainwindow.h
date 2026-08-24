@@ -243,6 +243,10 @@ private slots:
     void onGitGoalRowDoubleClicked(int row, int column);
     void onScpTransferClicked();
     void onRebootTargetClicked();
+    void onScpTargetActivated(int index);
+    void saveScpTargetHistory();
+    void loadScpTargetHistory();
+    void applyScpPasswordForCurrentTarget();
     void onMonitorUsageToggled();
     void onMonitorTimer();
     void runDiagnosticCommands(int pid);
@@ -459,6 +463,7 @@ private:
     DeepSeekClient *deepSeekClient = nullptr;
     DeepSeekClient *deepSeekHelpClient = nullptr;
     bool gitAiCommitPendingConfirm = false;
+    bool scpTransferPendingAiCommit = false;
     QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
     QPushButton *btnGitPush;
@@ -497,7 +502,7 @@ private:
     QLabel *lblGitConsoleCwd = nullptr;
     QStringList gitConsoleHistory;
     int gitConsoleHistoryIndex = -1;
-    QLineEdit *txtScpTargetIp;
+    QComboBox *cmbScpTargetIp;
     QLineEdit *txtScpPassword;
     QPushButton *btnScpTransfer;
     QPushButton *btnRebootTarget;
@@ -629,11 +634,14 @@ private:
     void logSerialMessage(const QString &message); // Logs to Serial log or status
     void updateConnectionStatus(bool connected);
     void updateSerialStatus(bool connected);
-    bool runGitCommand(const QStringList &args); // Git helper, returns true on exit 0
+    bool runGitCommand(const QStringList &args, bool allowAutoPush = true); // Git helper, returns true on exit 0
+    /** Run a non-git command in the current Git console cwd. */
+    bool runShellCommand(const QStringList &args);
     /** Absolute path of the currently selected Git repo, or empty on error. */
     QString currentGitWorkDir(QString *errorOut = nullptr) const;
-    /** Parse free-form console line into git args; strips optional leading "git". */
-    QStringList parseGitConsoleCommand(const QString &rawLine, QString *errorOut = nullptr) const;
+    /** Parse console line: git subcommand (optional leading "git") or a raw shell command. */
+    QStringList parseGitConsoleCommand(const QString &rawLine, QString *errorOut = nullptr,
+                                       bool *isGitCommand = nullptr) const;
     /** Capture git stdout (decoded). Returns false on start/timeout/non-zero exit. */
     bool captureGitOutput(const QString &workDir, const QStringList &args, QString *stdoutOut,
                           QString *stderrOut = nullptr, int timeoutMs = 30000) const;
@@ -641,6 +649,12 @@ private:
     QString collectUncommittedContextForAi(const QString &workDir, QString *errorOut = nullptr) const;
     /** System prompt for AI commit message (includes external-report writing rules). */
     QString commitMsgSystemPrompt() const;
+    QString sanitizeAiCommitMessage(const QString &content) const;
+    QString applyAiCommitMessage(const QString &content);
+    QString fallbackScpCommitMessage() const;
+    bool requestAiCommitThenContinueScp(const QString &workDir);
+    void commitThenContinueScpTransfer(const QString &commitMsg);
+    void continueScpSearchAndTransfer();
     /** Build Git console + repo snapshot for DeepSeek “what next” help. */
     QString collectGitHelpContextForAi(const QString &workDir) const;
     void setGitAiCommitBusy(bool busy);

@@ -7,6 +7,7 @@
 #include "gitworktreerunner.h"
 #include "lifeassistantwidget.h"
 #include "inputquickerwidget.h"
+#include "nowheelfilter.h"
 #include "platformprefs.h"
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -80,6 +81,102 @@ namespace {
 
 constexpr int kGitGoalLinesPerStar = 5000;
 constexpr int kGitGoalMaxAutoStars = 10;
+
+bool isKnownGitSubcommand(const QString &token)
+{
+    static const QSet<QString> kSubs = {
+        QStringLiteral("add"),          QStringLiteral("am"),
+        QStringLiteral("apply"),        QStringLiteral("archive"),
+        QStringLiteral("bisect"),       QStringLiteral("blame"),
+        QStringLiteral("branch"),       QStringLiteral("bundle"),
+        QStringLiteral("checkout"),     QStringLiteral("cherry"),
+        QStringLiteral("cherry-pick"),  QStringLiteral("clean"),
+        QStringLiteral("clone"),        QStringLiteral("commit"),
+        QStringLiteral("config"),       QStringLiteral("describe"),
+        QStringLiteral("diff"),         QStringLiteral("fetch"),
+        QStringLiteral("format-patch"), QStringLiteral("fsck"),
+        QStringLiteral("gc"),           QStringLiteral("grep"),
+        QStringLiteral("init"),         QStringLiteral("log"),
+        QStringLiteral("ls-files"),     QStringLiteral("ls-remote"),
+        QStringLiteral("merge"),        QStringLiteral("mv"),
+        QStringLiteral("notes"),        QStringLiteral("pull"),
+        QStringLiteral("push"),         QStringLiteral("rebase"),
+        QStringLiteral("reflog"),       QStringLiteral("remote"),
+        QStringLiteral("reset"),        QStringLiteral("restore"),
+        QStringLiteral("revert"),       QStringLiteral("rm"),
+        QStringLiteral("shortlog"),     QStringLiteral("show"),
+        QStringLiteral("stash"),        QStringLiteral("status"),
+        QStringLiteral("submodule"),    QStringLiteral("switch"),
+        QStringLiteral("tag"),          QStringLiteral("worktree")};
+    return kSubs.contains(token.toLower());
+}
+
+bool isInteractiveShellCommand(const QString &token)
+{
+    static const QSet<QString> kInteractive = {
+        QStringLiteral("ssh"), QStringLiteral("sftp"), QStringLiteral("telnet")};
+    return kInteractive.contains(token.toLower());
+}
+
+QString shellSingleQuote(const QString &s)
+{
+    QString out = s;
+    out.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    return QLatin1Char('\'') + out + QLatin1Char('\'');
+}
+
+bool startDetachedInTerminal(const QString &workDir, const QStringList &args)
+{
+    if (args.isEmpty()) {
+        return false;
+    }
+
+    const QString gnome = QStandardPaths::findExecutable(QStringLiteral("gnome-terminal"));
+    if (!gnome.isEmpty()) {
+        QStringList targs;
+        targs << QStringLiteral("--working-directory") << workDir << QStringLiteral("--");
+        targs.append(args);
+        return QProcess::startDetached(gnome, targs);
+    }
+
+    const QString konsole = QStandardPaths::findExecutable(QStringLiteral("konsole"));
+    if (!konsole.isEmpty()) {
+        QStringList targs;
+        targs << QStringLiteral("--workdir") << workDir << QStringLiteral("-e");
+        targs.append(args);
+        return QProcess::startDetached(konsole, targs);
+    }
+
+    const QString xfce = QStandardPaths::findExecutable(QStringLiteral("xfce4-terminal"));
+    if (!xfce.isEmpty()) {
+        QStringList targs;
+        targs << QStringLiteral("--working-directory") << workDir << QStringLiteral("-x");
+        targs.append(args);
+        return QProcess::startDetached(xfce, targs);
+    }
+
+    QStringList quoted;
+    quoted.reserve(args.size());
+    for (const QString &a : args) {
+        quoted << shellSingleQuote(a);
+    }
+    const QString script = QStringLiteral("cd %1 && %2")
+                               .arg(shellSingleQuote(workDir), quoted.join(QLatin1Char(' ')));
+
+    const QString xte = QStandardPaths::findExecutable(QStringLiteral("x-terminal-emulator"));
+    if (!xte.isEmpty()) {
+        return QProcess::startDetached(xte, {QStringLiteral("-e"), QStringLiteral("bash"),
+                                             QStringLiteral("-lc"), script});
+    }
+
+    const QString xterm = QStandardPaths::findExecutable(QStringLiteral("xterm"));
+    if (!xterm.isEmpty()) {
+        return QProcess::startDetached(xterm, {QStringLiteral("-e"), QStringLiteral("bash"),
+                                               QStringLiteral("-lc"), script});
+    }
+
+    return false;
+}
 
 /** Convert git remote URL between SSH and HTTPS. Empty if unrecognized. */
 QString convertGitRemoteUrlProtocol(const QString &urlIn)
@@ -634,6 +731,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Load History
     loadConnectionHistory();
+    loadScpTargetHistory();
     loadGitHistory();
     loadGitDiffReminderSettings();
     loadGitNetworkSettings();
@@ -969,7 +1067,6 @@ void MainWindow::createWidgets()
 
     cmbGitRepoMain = new QComboBox();
     cmbGitRepoMain->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    cmbGitRepoMain->setFocusPolicy(Qt::StrongFocus);
     cmbGitRepoMain->setMaxVisibleItems(12);
     cmbGitRepoMain->setToolTip(QStringLiteral("复制到日报时使用该根目标的标题和完成度；同一仓库有多个根目标时需指定一个"));
 
@@ -1118,11 +1215,18 @@ void MainWindow::createWidgets()
     btnGitSoftReset->setStyleSheet("color: #FF8C00; font-weight: bold;");
     btnGitSoftReset->setToolTip("执行 git reset --soft HEAD^ (撤回最后一次提交，保留代码修改)");
 
-    txtScpTargetIp = new QLineEdit("192.168.1.245");
-    txtScpTargetIp->setPlaceholderText("目标设备地址");
+    cmbScpTargetIp = new QComboBox();
+    cmbScpTargetIp->setEditable(true);
+    cmbScpTargetIp->setInsertPolicy(QComboBox::NoInsert);
+    cmbScpTargetIp->setMinimumWidth(140);
+    cmbScpTargetIp->setToolTip(QStringLiteral("最近使用的目标设备，选择后自动填入已记忆的密码"));
+    if (cmbScpTargetIp->lineEdit()) {
+        cmbScpTargetIp->lineEdit()->setPlaceholderText(QStringLiteral("目标设备地址"));
+    }
     txtScpPassword = new QLineEdit();
-    txtScpPassword->setPlaceholderText("SSH 密码");
-    txtScpPassword->setEchoMode(QLineEdit::Password);
+    txtScpPassword->setPlaceholderText(QStringLiteral("SSH 密码（明文）"));
+    txtScpPassword->setEchoMode(QLineEdit::Normal);
+    txtScpPassword->setToolTip(QStringLiteral("明文显示，按目标地址记忆"));
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
     
@@ -1160,7 +1264,7 @@ void MainWindow::createWidgets()
 
     txtGitCmdInput = new QLineEdit();
     txtGitCmdInput->setPlaceholderText(
-        QStringLiteral("在当前 Git 仓库目录下执行，例如 status 或 git log -5（↑↓ 翻历史）"));
+        QStringLiteral("在当前目录执行。git 子命令可省略 git（如 status）；其它命令原样运行（如 ssh user@host）。↑↓ 翻历史"));
     txtGitCmdInput->setStyleSheet(
         QStringLiteral("QLineEdit { background: #1e1e1e; color: #d4d4d4; font-family: Monospace; "
                        "font-size: 12px; border: none; padding: 6px 4px; selection-background-color: #264f78; }"));
@@ -1493,7 +1597,7 @@ QWidget* MainWindow::createGitPage()
     // SCP Transfer Section
     QHBoxLayout *layScp = new QHBoxLayout();
     layScp->addWidget(new QLabel("目标:"));
-    layScp->addWidget(txtScpTargetIp, 1);
+    layScp->addWidget(cmbScpTargetIp, 1);
     layScp->addWidget(new QLabel("密码:"));
     layScp->addWidget(txtScpPassword, 1);
     layOps->addLayout(layScp);
@@ -1991,6 +2095,7 @@ void MainWindow::showPlatformModeDialog()
 
     QFormLayout *form = new QFormLayout();
     QComboBox *cb = new QComboBox(&dlg);
+    NoWheelFilter::install(cb);
     cb->addItem(QStringLiteral("Linux"), static_cast<int>(PlatformPrefs::PlatformMode::Linux));
     cb->addItem(QStringLiteral("Windows"), static_cast<int>(PlatformPrefs::PlatformMode::Windows));
     const int idx = cb->findData(static_cast<int>(PlatformPrefs::mode()));
@@ -2336,6 +2441,7 @@ void MainWindow::createLayouts()
     modbusPageWidget = createModbusPage();
     serialPageWidget = createSerialPage();
     gitPageWidget = createGitPage();
+    NoWheelFilter::installOnComboBoxes(gitPageWidget);
     simulatorPageWidget = createSimulatorPage();
     tcpAssistantPageWidget = createTcpAssistantPage();
     performancePageWidget = createPerformancePage();
@@ -2522,6 +2628,13 @@ void MainWindow::createConnections()
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
     connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
+    connect(cmbScpTargetIp, QOverload<int>::of(&QComboBox::activated),
+            this, &MainWindow::onScpTargetActivated);
+    if (cmbScpTargetIp->lineEdit()) {
+        connect(cmbScpTargetIp->lineEdit(), &QLineEdit::editingFinished, this,
+                [this]() { applyScpPasswordForCurrentTarget(); });
+    }
+    connect(txtScpPassword, &QLineEdit::editingFinished, this, &MainWindow::saveScpTargetHistory);
     connect(btnApplyThreshold, &QPushButton::clicked, this, [this](){
         cpuThresholdValue = spinCpuThreshold->value();
         txtGitLog->append(QString("[Monitor] CPU 阈值已更新为: %1%").arg(cpuThresholdValue));
@@ -4250,6 +4363,105 @@ void MainWindow::loadConnectionHistory() {
     cmbIP->blockSignals(false);
 }
 
+void MainWindow::saveScpTargetHistory()
+{
+    if (!cmbScpTargetIp || !txtScpPassword) {
+        return;
+    }
+
+    const QString ip = cmbScpTargetIp->currentText().trimmed();
+    if (ip.isEmpty()) {
+        return;
+    }
+    const QString password = txtScpPassword->text();
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("scpTargets"));
+    QStringList ips = settings.value(QStringLiteral("ips")).toStringList();
+    QStringList passwords = settings.value(QStringLiteral("passwords")).toStringList();
+    while (passwords.size() < ips.size()) {
+        passwords.append(QString());
+    }
+    if (passwords.size() > ips.size()) {
+        passwords = passwords.mid(0, ips.size());
+    }
+
+    const int existing = ips.indexOf(ip);
+    if (existing >= 0) {
+        ips.removeAt(existing);
+        passwords.removeAt(existing);
+    }
+    ips.prepend(ip);
+    passwords.prepend(password);
+    while (ips.size() > MAX_HISTORY) {
+        ips.removeLast();
+        passwords.removeLast();
+    }
+
+    settings.setValue(QStringLiteral("ips"), ips);
+    settings.setValue(QStringLiteral("passwords"), passwords);
+    settings.endGroup();
+
+    cmbScpTargetIp->blockSignals(true);
+    cmbScpTargetIp->clear();
+    cmbScpTargetIp->addItems(ips);
+    cmbScpTargetIp->setCurrentText(ip);
+    cmbScpTargetIp->blockSignals(false);
+}
+
+void MainWindow::loadScpTargetHistory()
+{
+    if (!cmbScpTargetIp) {
+        return;
+    }
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("scpTargets"));
+    QStringList ips = settings.value(QStringLiteral("ips")).toStringList();
+    settings.endGroup();
+
+    cmbScpTargetIp->blockSignals(true);
+    cmbScpTargetIp->clear();
+    if (ips.isEmpty()) {
+        cmbScpTargetIp->addItem(QStringLiteral("192.168.1.245"));
+    } else {
+        cmbScpTargetIp->addItems(ips);
+    }
+    cmbScpTargetIp->setCurrentIndex(0);
+    cmbScpTargetIp->blockSignals(false);
+    applyScpPasswordForCurrentTarget();
+}
+
+void MainWindow::applyScpPasswordForCurrentTarget()
+{
+    if (!cmbScpTargetIp || !txtScpPassword) {
+        return;
+    }
+
+    const QString ip = cmbScpTargetIp->currentText().trimmed();
+    if (ip.isEmpty()) {
+        return;
+    }
+
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("scpTargets"));
+    const QStringList ips = settings.value(QStringLiteral("ips")).toStringList();
+    QStringList passwords = settings.value(QStringLiteral("passwords")).toStringList();
+    settings.endGroup();
+
+    const int idx = ips.indexOf(ip);
+    if (idx < 0) {
+        return;
+    }
+    txtScpPassword->setText(idx < passwords.size() ? passwords.at(idx) : QString());
+}
+
+void MainWindow::onScpTargetActivated(int index)
+{
+    Q_UNUSED(index);
+    applyScpPasswordForCurrentTarget();
+}
+
 // --- Serial Port Logic ---
 
 void MainWindow::refreshSerialPorts() {
@@ -4358,7 +4570,7 @@ void MainWindow::onGitSelectDirClicked() {
     }
 }
 
-bool MainWindow::runGitCommand(const QStringList &args) {
+bool MainWindow::runGitCommand(const QStringList &args, bool allowAutoPush) {
     QString pathError;
     const QString workDir = currentGitWorkDir(&pathError);
     if (workDir.isEmpty()) {
@@ -4400,7 +4612,7 @@ bool MainWindow::runGitCommand(const QStringList &args) {
     const bool ok = process.exitCode() == 0;
     if (ok && !args.isEmpty()) {
         const QString sub = args.first().toLower();
-        if (sub == QLatin1String("commit")) {
+        if (sub == QLatin1String("commit") && allowAutoPush) {
             maybeAutoPushAfterCommit();
         }
         static const QSet<QString> kRefreshPendingSubs = {
@@ -4414,6 +4626,68 @@ bool MainWindow::runGitCommand(const QStringList &args) {
         }
     }
     return ok;
+}
+
+bool MainWindow::runShellCommand(const QStringList &args)
+{
+    if (args.isEmpty()) {
+        return false;
+    }
+
+    QString pathError;
+    const QString workDir = currentGitWorkDir(&pathError);
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: %1</font>")
+                              .arg(pathError.isEmpty() ? QStringLiteral("请先选择Git仓库目录!") : pathError));
+        return false;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='cyan'>$ %1</font>")
+                          .arg(args.join(QLatin1Char(' ')).toHtmlEscaped()));
+
+    if (isInteractiveShellCommand(args.first())) {
+        if (startDetachedInTerminal(workDir, args)) {
+            txtGitLog->append(QStringLiteral("<font color='gray'>已在外部终端启动（交互式命令无法在此面板输入）。</font>"));
+            txtGitLog->moveCursor(QTextCursor::End);
+            return true;
+        }
+        txtGitLog->append(QStringLiteral(
+            "<font color='orange'>未找到可用终端（gnome-terminal / konsole / xfce4-terminal / xterm），"
+            "改为在本面板执行（无 TTY，ssh 可能无法交互）。</font>"));
+    }
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+    process.setProgram(args.first());
+    process.setArguments(args.mid(1));
+
+    process.start();
+    if (!process.waitForStarted()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 无法启动命令 %1，请检查是否已安装且在 PATH 中</font>")
+                              .arg(args.first().toHtmlEscaped()));
+        txtGitLog->moveCursor(QTextCursor::End);
+        return false;
+    }
+
+    if (!finishGitProcess(process, 30000)) {
+        txtGitLog->append(QStringLiteral("<font color='red'>部分超时或后台运行...</font>"));
+        txtGitLog->moveCursor(QTextCursor::End);
+        return false;
+    }
+
+    const QByteArray stdoutData = process.readAllStandardOutput();
+    const QByteArray stderrData = process.readAllStandardError();
+
+    if (!stdoutData.isEmpty()) {
+        txtGitLog->append(PlatformPrefs::decodeProcessOutput(stdoutData));
+    }
+    if (!stderrData.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>")
+                              .arg(PlatformPrefs::decodeProcessOutput(stderrData).toHtmlEscaped()));
+    }
+
+    txtGitLog->moveCursor(QTextCursor::End);
+    return process.exitCode() == 0;
 }
 
 QString MainWindow::currentGitWorkDir(QString *errorOut) const
@@ -4457,34 +4731,48 @@ void MainWindow::updateGitConsoleCwdLabel()
                        "padding: 2px 4px;"));
 }
 
-QStringList MainWindow::parseGitConsoleCommand(const QString &rawLine, QString *errorOut) const
+QStringList MainWindow::parseGitConsoleCommand(const QString &rawLine, QString *errorOut,
+                                               bool *isGitCommand) const
 {
-    QString line = rawLine.trimmed();
+    if (isGitCommand) {
+        *isGitCommand = false;
+    }
+
+    const QString line = rawLine.trimmed();
     if (line.isEmpty()) {
         return {};
     }
 
-    if (line.startsWith(QLatin1String("git "), Qt::CaseInsensitive)) {
-        line = line.mid(4).trimmed();
-    } else if (line.compare(QLatin1String("git"), Qt::CaseInsensitive) == 0) {
+    const QStringList tokens = QProcess::splitCommand(line);
+    if (tokens.isEmpty()) {
         if (errorOut) {
-            *errorOut = QStringLiteral("请补全子命令，例如: status / git log -5");
+            *errorOut = QStringLiteral("无法解析命令");
         }
         return {};
     }
 
-    if (line.isEmpty()) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("空命令");
+    const QString first = tokens.first();
+    if (first.compare(QLatin1String("git"), Qt::CaseInsensitive) == 0) {
+        if (tokens.size() < 2) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("请补全子命令，例如: status / git log -5");
+            }
+            return {};
         }
-        return {};
+        if (isGitCommand) {
+            *isGitCommand = true;
+        }
+        return tokens.mid(1);
     }
 
-    const QStringList args = QProcess::splitCommand(line);
-    if (args.isEmpty() && errorOut) {
-        *errorOut = QStringLiteral("无法解析命令");
+    if (isKnownGitSubcommand(first)) {
+        if (isGitCommand) {
+            *isGitCommand = true;
+        }
+        return tokens;
     }
-    return args;
+
+    return tokens;
 }
 
 void MainWindow::onGitConsoleCommandSubmitted()
@@ -4521,7 +4809,8 @@ void MainWindow::onGitConsoleCommandSubmitted()
     }
 
     QString parseError;
-    const QStringList args = parseGitConsoleCommand(raw, &parseError);
+    bool isGitCommand = false;
+    const QStringList args = parseGitConsoleCommand(raw, &parseError, &isGitCommand);
     if (args.isEmpty()) {
         txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>")
                               .arg(parseError.isEmpty() ? QStringLiteral("无效命令") : parseError));
@@ -4531,6 +4820,11 @@ void MainWindow::onGitConsoleCommandSubmitted()
 
     txtGitLog->append(QStringLiteral("<font color='gray'>cwd: %1</font>")
                           .arg(QDir::toNativeSeparators(workDir).toHtmlEscaped()));
+
+    if (!isGitCommand) {
+        runShellCommand(args);
+        return;
+    }
 
     const QString sub = args.first().toLower();
     const bool isNetwork = (sub == QLatin1String("push") || sub == QLatin1String("pull")
@@ -7032,6 +7326,8 @@ void MainWindow::setGitAiCommitBusy(bool busy)
         btnGitAiCommitMsg->setText(busy ? QStringLiteral("AI 生成中…")
                                         : QStringLiteral("AI 整理提交说明"));
     }
+    if (btnScpTransfer)
+        btnScpTransfer->setEnabled(!busy);
 }
 
 void MainWindow::setGitAskDeepSeekBusy(bool busy)
@@ -7148,7 +7444,7 @@ void MainWindow::onGitAskDeepSeekClicked()
         "1) 【现在是什么情况】用 1～3 句说明成功/失败/冲突/卡住等原因；\n"
         "2) 【接下来怎么做】给出分步建议，优先安全、可逆的操作；\n"
         "3) 【可复制命令】如需命令，每行一条，尽量写成可在本应用 Git 控制台直接粘贴的形式"
-        "（可带或不带开头的 git）；\n"
+        "（git 子命令可带或不带开头的 git；其它命令如 ssh 请写完整，不要加 git 前缀）；\n"
         "危险操作（如 reset --hard、push --force、clean -fd）必须明确标出风险，并给出更安全的替代方案。"
         "若信息不足，说明还缺什么，并建议先运行哪些查看命令（如 status、diff、log）。"
         "不要编造仓库里并不存在的分支或提交。");
@@ -7262,6 +7558,92 @@ void MainWindow::onGitAiCommitMsgClicked()
     deepSeekClient->chat(systemPrompt, context);
 }
 
+QString MainWindow::sanitizeAiCommitMessage(const QString &content) const
+{
+    QString msg = content.trimmed();
+    const QStringList lines = msg.split(QRegularExpression(QStringLiteral("[\r\n]+")),
+                                        Qt::SkipEmptyParts);
+    if (!lines.isEmpty()) {
+        if (lines.size() == 1) {
+            msg = lines.first().trimmed();
+        } else {
+            msg = lines.first().trimmed();
+            const QString second = lines.at(1).trimmed();
+            if (!second.isEmpty() && msg.size() + second.size() < 200)
+                msg += QLatin1Char('\n') + second;
+        }
+    }
+    if ((msg.startsWith(QLatin1Char('"')) && msg.endsWith(QLatin1Char('"')))
+        || (msg.startsWith(QStringLiteral("「")) && msg.endsWith(QStringLiteral("」")))) {
+        msg = msg.mid(1, msg.size() - 2).trimmed();
+    }
+    return msg;
+}
+
+QString MainWindow::applyAiCommitMessage(const QString &content)
+{
+    const QString msg = sanitizeAiCommitMessage(content);
+    if (txtGitCommitMsg)
+        txtGitCommitMsg->setText(msg.contains(QLatin1Char('\n')) ? msg.split(QLatin1Char('\n')).first()
+                                                                  : msg);
+    txtGitLog->append(QStringLiteral("<font color='green'>[DeepSeek] 生成提交说明：</font>%1")
+                          .arg(msg.toHtmlEscaped()));
+    return msg;
+}
+
+QString MainWindow::fallbackScpCommitMessage() const
+{
+    const QString existing = txtGitCommitMsg ? txtGitCommitMsg->text().trimmed() : QString();
+    if (!existing.isEmpty())
+        return existing;
+    return QStringLiteral("传输前自动提交");
+}
+
+bool MainWindow::requestAiCommitThenContinueScp(const QString &workDir)
+{
+    if (!deepSeekClient || DeepSeekClient::apiKey().isEmpty() || deepSeekClient->isBusy()) {
+        if (DeepSeekClient::apiKey().isEmpty()) {
+            txtGitLog->append(QStringLiteral(
+                "<font color='orange'>[传输] 未配置 DeepSeek，使用已有或默认提交说明。</font>"));
+        } else if (deepSeekClient && deepSeekClient->isBusy()) {
+            txtGitLog->append(QStringLiteral(
+                "<font color='orange'>[传输] AI 忙，使用已有或默认提交说明。</font>"));
+        }
+        return false;
+    }
+
+    QString err;
+    const QString context = collectUncommittedContextForAi(workDir, &err);
+    if (context.isEmpty()) {
+        txtGitLog->append(QStringLiteral(
+            "<font color='orange'>[传输] 无法收集改动上下文，使用已有或默认提交说明。%1</font>")
+                              .arg(err.toHtmlEscaped()));
+        return false;
+    }
+
+    scpTransferPendingAiCommit = true;
+    gitAiCommitPendingConfirm = false;
+    setGitAiCommitBusy(true);
+    txtGitLog->append(QStringLiteral(
+        "<font color='gray'>[传输] 正在用 AI 生成提交说明，随后自动提交并传输…</font>"));
+    deepSeekClient->chat(commitMsgSystemPrompt(), context);
+    return true;
+}
+
+void MainWindow::commitThenContinueScpTransfer(const QString &commitMsg)
+{
+    QString msg = commitMsg.trimmed();
+    if (msg.isEmpty())
+        msg = fallbackScpCommitMessage();
+    if (txtGitCommitMsg)
+        txtGitCommitMsg->setText(msg.contains(QLatin1Char('\n')) ? msg.split(QLatin1Char('\n')).first()
+                                                                  : msg);
+    txtGitLog->append(QStringLiteral("<font color='cyan'>[传输] 自动提交：%1</font>")
+                          .arg(msg.toHtmlEscaped()));
+    runGitCommand(QStringList() << QStringLiteral("commit") << QStringLiteral("-m") << msg, false);
+    continueScpSearchAndTransfer();
+}
+
 QString MainWindow::commitMsgSystemPrompt() const
 {
     return QStringLiteral(
@@ -7288,34 +7670,13 @@ QString MainWindow::commitMsgSystemPrompt() const
 void MainWindow::onDeepSeekCommitMsgReady(const QString &content)
 {
     setGitAiCommitBusy(false);
+    const QString msg = applyAiCommitMessage(content);
 
-    QString msg = content.trimmed();
-    // Keep first paragraph / first two non-empty lines as the commit subject(+body)
-    const QStringList lines = msg.split(QRegularExpression(QStringLiteral("[\r\n]+")),
-                                        Qt::SkipEmptyParts);
-    if (!lines.isEmpty()) {
-        if (lines.size() == 1) {
-            msg = lines.first().trimmed();
-        } else {
-            msg = lines.first().trimmed();
-            const QString second = lines.at(1).trimmed();
-            if (!second.isEmpty() && msg.size() + second.size() < 200)
-                msg += QLatin1Char('\n') + second;
-        }
+    if (scpTransferPendingAiCommit) {
+        scpTransferPendingAiCommit = false;
+        commitThenContinueScpTransfer(msg);
+        return;
     }
-    // Strip surrounding quotes the model sometimes adds
-    if ((msg.startsWith(QLatin1Char('"')) && msg.endsWith(QLatin1Char('"')))
-        || (msg.startsWith(QStringLiteral("「")) && msg.endsWith(QStringLiteral("」")))) {
-        msg = msg.mid(1, msg.size() - 2).trimmed();
-    }
-
-    if (txtGitCommitMsg)
-        txtGitCommitMsg->setText(msg.contains(QLatin1Char('\n')) ? msg.split(QLatin1Char('\n')).first()
-                                                                  : msg);
-    // Prefer single-line in QLineEdit; if model returned two lines, keep first in the box
-    // and show full text in log / confirm dialog.
-    txtGitLog->append(QStringLiteral("<font color='green'>[DeepSeek] 生成提交说明：</font>%1")
-                          .arg(msg.toHtmlEscaped()));
 
     if (!gitAiCommitPendingConfirm)
         return;
@@ -7368,6 +7729,15 @@ void MainWindow::onDeepSeekCommitMsgFailed(const QString &error)
     gitAiCommitPendingConfirm = false;
     txtGitLog->append(QStringLiteral("<font color='red'>[DeepSeek] 失败：%1</font>")
                           .arg(error.toHtmlEscaped()));
+
+    if (scpTransferPendingAiCommit) {
+        scpTransferPendingAiCommit = false;
+        txtGitLog->append(QStringLiteral(
+            "<font color='orange'>[传输] AI 生成失败，改用已有或默认提交说明，继续传输。</font>"));
+        commitThenContinueScpTransfer(fallbackScpCommitMessage());
+        return;
+    }
+
     QMessageBox::warning(this, QStringLiteral("DeepSeek"),
                          QStringLiteral("生成提交说明失败：\n%1").arg(error));
 }
@@ -8010,13 +8380,14 @@ void MainWindow::onScpTransferClicked() {
         return;
     }
 
-    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString targetIp = cmbScpTargetIp->currentText().trimmed();
     if (targetIp.isEmpty()) {
         txtGitLog->append("错误: 请输入目标设备地址");
         return;
     }
 
     QString password = txtScpPassword->text();
+    saveScpTargetHistory();
 
     // 有未提交改动时才执行 add + commit，确保代码状态可追溯。
     if (gitHasUncommittedChanges(dir)) {
@@ -8049,34 +8420,25 @@ void MainWindow::onScpTransferClicked() {
             }
         }
 
-        bool ok = false;
-        QString defaultMsg = txtGitCommitMsg->text().trimmed();
-        QString commitMsg = QInputDialog::getText(
-            this,
-            "Git 提交信息",
-            "请输入本次传输前的提交信息:",
-            QLineEdit::Normal,
-            defaultMsg,
-            &ok
-        ).trimmed();
-
-        if (!ok || commitMsg.isEmpty()) {
-            txtGitLog->append("已取消传输：未提供提交信息，未执行 git commit。");
+        if (requestAiCommitThenContinueScp(dir)) {
             return;
         }
+        commitThenContinueScpTransfer(fallbackScpCommitMessage());
+        return;
+    }
 
-        if (QMessageBox::question(this,
-                                  "确认提交",
-                                  QString("确认执行 git commit -m \"%1\" 并继续传输吗？").arg(commitMsg),
-                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
-            txtGitLog->append("已取消传输：用户取消 git commit。");
-            return;
-        }
+    txtGitLog->append("工作区无未提交改动，跳过 git add / commit，继续搜索可执行文件...");
+    continueScpSearchAndTransfer();
+}
 
-        txtGitCommitMsg->setText(commitMsg);
-        runGitCommand(QStringList() << "commit" << "-m" << commitMsg);
-    } else {
-        txtGitLog->append("工作区无未提交改动，跳过 git add / commit，继续搜索可执行文件...");
+void MainWindow::continueScpSearchAndTransfer()
+{
+    const QString dir = cmbGitDir ? cmbGitDir->currentText() : QString();
+    const QString targetIp = cmbScpTargetIp ? cmbScpTargetIp->currentText().trimmed() : QString();
+    const QString password = txtScpPassword ? txtScpPassword->text() : QString();
+    if (targetIp.isEmpty()) {
+        txtGitLog->append(QStringLiteral("错误: 请输入目标设备地址"));
+        return;
     }
 
     // 递归查找目录下最新的可执行文件（与可执行文件提醒共用规则）
@@ -8170,13 +8532,14 @@ void MainWindow::onScpTransferClicked() {
 }
 
 void MainWindow::onRebootTargetClicked() {
-    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString targetIp = cmbScpTargetIp->currentText().trimmed();
     if (targetIp.isEmpty()) {
         txtGitLog->append("错误: 请输入目标设备地址");
         return;
     }
 
     QString password = txtScpPassword->text();
+    saveScpTargetHistory();
 
     QMessageBox::StandardButton reply;
     reply = QMessageBox::question(this, "重启确认", 
@@ -8224,7 +8587,7 @@ void MainWindow::onMonitorUsageToggled() {
     if (btnMonitorUsage->isChecked()) {
         ulimitSet = false; // 每次开启监测重新标记需要设置 ulimit
         lastKnownPid = -1; // 重置最近 PID
-        QString targetIp = txtScpTargetIp->text().trimmed();
+        QString targetIp = cmbScpTargetIp->currentText().trimmed();
         if (targetIp.isEmpty()) {
             txtGitLog->append("错误: 请先在脚本传输中输入目标设备 IP");
             btnMonitorUsage->setChecked(false);
@@ -8303,7 +8666,7 @@ void MainWindow::onMonitorUsageToggled() {
 }
 
 void MainWindow::onMonitorTimer() {
-    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString targetIp = cmbScpTargetIp->currentText().trimmed();
     QString password = txtScpPassword->text();
     
     if (targetIp.isEmpty() || currentMonitoringProcess.isEmpty()) return;
@@ -8501,7 +8864,7 @@ void MainWindow::onMonitorTimer() {
 }
 
 void MainWindow::runDiagnosticCommands(int pid) {
-    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString targetIp = cmbScpTargetIp->currentText().trimmed();
     QString password = txtScpPassword->text();
     if (targetIp.isEmpty() || pid <= 0) return;
 
@@ -8552,7 +8915,7 @@ void MainWindow::runDiagnosticCommands(int pid) {
 }
 
 void MainWindow::runCrashDiagnostics() {
-    QString targetIp = txtScpTargetIp->text().trimmed();
+    QString targetIp = cmbScpTargetIp->currentText().trimmed();
     QString password = txtScpPassword->text();
     QString processName = currentMonitoringProcess;
     if (targetIp.isEmpty() || processName.isEmpty()) return;
@@ -10372,6 +10735,7 @@ bool MainWindow::editGitWorkGoalDialog(GitWorkGoal &goal, const QList<GitWorkGoa
 
     QLineEdit *txtTitle = new QLineEdit(goal.title);
     QComboBox *cmbParent = new QComboBox();
+    NoWheelFilter::install(cmbParent);
     cmbParent->addItem(QStringLiteral("(无)"), QString());
     for (const GitWorkGoal &g : allGoals) {
         if (g.id == excludeGoalId) continue;
