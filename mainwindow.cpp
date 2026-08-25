@@ -718,6 +718,7 @@ MainWindow::MainWindow(QWidget *parent)
     simWriteRefreshTimer->setInterval(33);
     connect(simWriteRefreshTimer, &QTimer::timeout, this, &MainWindow::flushPendingSimWriteRefresh);
     monitorTimer = new QTimer(this);
+    monitorTimer->setInterval(60 * 1000);
     tcpServer = new QTcpServer(this);
     tcpAssistantSocket = nullptr; // Initialize in connect/onNewConnection
     tcpCyclicTimer = new QTimer(this);
@@ -1614,6 +1615,11 @@ QWidget* MainWindow::createGitPage()
     btnMonitorUsage->setCheckable(true);
     
     layMon->addWidget(btnMonitorUsage);
+    layMon->addWidget(new QLabel("进程:"));
+    txtMonitorProcess = new QLineEdit("180");
+    txtMonitorProcess->setMaximumWidth(90);
+    txtMonitorProcess->setPlaceholderText("进程名");
+    layMon->addWidget(txtMonitorProcess);
     
     layMon->addWidget(new QLabel("阈值:"));
     spinCpuThreshold = new QSpinBox();
@@ -1624,11 +1630,21 @@ QWidget* MainWindow::createGitPage()
     
     btnApplyThreshold = new QPushButton("确认");
     layMon->addWidget(btnApplyThreshold);
+
+    layMon->addWidget(new QLabel("采样:"));
+    spinMonitorInterval = new QSpinBox();
+    spinMonitorInterval->setRange(5, 300);
+    spinMonitorInterval->setValue(60);
+    spinMonitorInterval->setSuffix(" 秒");
+    spinMonitorInterval->setToolTip("长稳测试建议每 60 秒采集一次，避免 SSH 监测本身造成负载");
+    layMon->addWidget(spinMonitorInterval);
     
     lblCpuUsage = new QLabel("CPU: 0%");
     chartCpu = new MonitorChart();
     lblMemUsage = new QLabel("MEM: 0%");
     chartMem = new MonitorChart();
+    lblFdUsage = new QLabel("FD: 0");
+    lblMalitlUsage = new QLabel("Mali: 0");
     gitDiffReminderTimer = new QTimer(this);
     gitDiffReminderTimer->setInterval(5 * 60 * 1000);
     
@@ -1636,6 +1652,8 @@ QWidget* MainWindow::createGitPage()
     layMon->addWidget(chartCpu);
     layMon->addWidget(lblMemUsage);
     layMon->addWidget(chartMem);
+    layMon->addWidget(lblFdUsage);
+    layMon->addWidget(lblMalitlUsage);
     layMon->addStretch();
     layOps->addLayout(layMon);
     
@@ -8594,6 +8612,11 @@ void MainWindow::onMonitorUsageToggled() {
             return;
         }
 
+        const QString requestedProcess = txtMonitorProcess->text().trimmed();
+        if (!requestedProcess.isEmpty()) {
+            currentMonitoringProcess = requestedProcess;
+        }
+
         // 如果没有当前传输记录，尝试从路径历史中推测
         if (currentMonitoringProcess.isEmpty()) {
             QString dir = cmbGitDir->currentText();
@@ -8619,14 +8642,17 @@ void MainWindow::onMonitorUsageToggled() {
         // 初始化文件记录
         QString logDir = QCoreApplication::applicationDirPath() + "/monitor_logs";
         QDir().mkpath(logDir);
+        QString safeProcessName = currentMonitoringProcess;
+        safeProcessName.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_.-]")), QStringLiteral("_"));
         QString fileName = QString("%1/monitor_%2_%3.csv")
                                .arg(logDir)
-                               .arg(currentMonitoringProcess)
+                               .arg(safeProcessName)
                                .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
         monitorFile = new QFile(fileName, this);
         if (monitorFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
             monitorStream = new QTextStream(monitorFile);
-            *monitorStream << "Timestamp,CPU_Usage(%),Mem_Usage(%)\n";
+            *monitorStream << "Timestamp,PID,CPU_Usage(%),Mem_Usage(%),RSS_KB,"
+                              "FD_Total,Malitl_FD,Log_Bytes,Main_13_502,AGV_88_502\n";
             txtGitLog->append(QString("[Monitor] 记录已开启, 保存至: %1").arg(fileName));
         } else {
             txtGitLog->append("[Monitor] 无法创建日志文件: " + fileName);
@@ -8639,7 +8665,13 @@ void MainWindow::onMonitorUsageToggled() {
         prevProcJiffies = 0;
         prevTotalJiffies = 0;
         hasPrevCpuSample = false;
+        monitorSampleInFlight = false;
+        baselineFdCount = -1;
+        lastFdCount = -1;
+        lastMalitlCount = -1;
+        monitorTimer->setInterval(spinMonitorInterval->value() * 1000);
         monitorTimer->start();
+        QTimer::singleShot(0, this, &MainWindow::onMonitorTimer);
     } else {
         txtGitLog->append("停止资源占用监测");
         
@@ -8658,8 +8690,14 @@ void MainWindow::onMonitorUsageToggled() {
         prevProcJiffies = 0;
         prevTotalJiffies = 0;
         hasPrevCpuSample = false;
+        monitorSampleInFlight = false;
+        baselineFdCount = -1;
+        lastFdCount = -1;
+        lastMalitlCount = -1;
         lblCpuUsage->setText("CPU: 0%");
         lblMemUsage->setText("MEM: 0%");
+        lblFdUsage->setText("FD: 0");
+        lblMalitlUsage->setText("Mali: 0");
         chartCpu->clear();
         chartMem->clear();
     }
@@ -8669,7 +8707,8 @@ void MainWindow::onMonitorTimer() {
     QString targetIp = cmbScpTargetIp->currentText().trimmed();
     QString password = txtScpPassword->text();
     
-    if (targetIp.isEmpty() || currentMonitoringProcess.isEmpty()) return;
+    if (targetIp.isEmpty() || currentMonitoringProcess.isEmpty() || monitorSampleInFlight) return;
+    monitorSampleInFlight = true;
 
     // 首先获取 PID (如果未知)
     if (currentMonitoringPid <= 0) {
@@ -8686,6 +8725,7 @@ void MainWindow::onMonitorTimer() {
         connect(pidProc, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, pidProc, targetIp, password](int exitCode, QProcess::ExitStatus) {
             QString out = pidProc->readAllStandardOutput().trimmed();
             QString err = pidProc->readAllStandardError().trimmed();
+            bool processFound = false;
             if (exitCode == 0 && !out.isEmpty()) {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
                 QStringList pids = out.split(' ', Qt::SkipEmptyParts);
@@ -8701,6 +8741,7 @@ void MainWindow::onMonitorTimer() {
                         prevProcJiffies = 0;
                         prevTotalJiffies = 0;
                         hasPrevCpuSample = false;
+                        processFound = true;
 
                         // 执行 ulimit 配置
                         if (!ulimitSet) {
@@ -8731,7 +8772,11 @@ void MainWindow::onMonitorTimer() {
                 lblMemUsage->setText("MEM: 未找到");
                 if (!err.isEmpty()) txtGitLog->append("[Monitor] pidof 错误: " + err);
             }
+            monitorSampleInFlight = false;
             pidProc->deleteLater();
+            if (processFound && btnMonitorUsage->isChecked()) {
+                QTimer::singleShot(0, this, &MainWindow::onMonitorTimer);
+            }
         });
         if (!password.isEmpty()) {
             pidProc->start("sshpass", sshArgs);
@@ -8742,12 +8787,20 @@ void MainWindow::onMonitorTimer() {
     }
 
     // 使用更基础、更通用的 sh/awk 指令，避免 dash 兼容性问题和变量转义干扰
+    const QString logSizeCommand = currentMonitoringProcess == QStringLiteral("180")
+        ? QStringLiteral("stat -c %s /userfs/app/180.log 2>/dev/null || echo 0; ")
+        : QStringLiteral("echo 0; ");
     QString checkCmd = QString(
         "cat /proc/%1/stat | awk '{print $14+$15}'; "
         "grep '^cpu ' /proc/stat | awk '{s=0; for(i=2;i<=NF;i++) s+=$i; print s}'; "
         "grep -c '^cpu[0-9]' /proc/stat; "
-        "grep -E '^(MemTotal|VmRSS):' /proc/meminfo /proc/%1/status | awk '{print $2}' | xargs echo"
-    ).arg(currentMonitoringPid);
+        "grep -E '^(MemTotal|VmRSS):' /proc/meminfo /proc/%1/status | awk '{print $2}' | xargs echo; "
+        "ls /proc/%1/fd 2>/dev/null | wc -l; "
+        "find /proc/%1/fd -maxdepth 1 -type l -lname '*malitl*' 2>/dev/null | wc -l; "
+        "%2"
+        "netstat -tn 2>/dev/null | grep -c '192.168.1.13:502.*ESTABLISHED' || true; "
+        "netstat -tn 2>/dev/null | grep -c '192.168.1.88:502.*ESTABLISHED' || true"
+    ).arg(currentMonitoringPid).arg(logSizeCommand);
 
     QString sshTarget = QString("root@%1").arg(targetIp);
     QStringList sshArgs;
@@ -8769,10 +8822,15 @@ void MainWindow::onMonitorTimer() {
             QStringList lines = stdoutData.split('\n', QString::SkipEmptyParts);
 #endif
 
-            if (lines.size() >= 4) {
+            if (lines.size() >= 9) {
                 quint64 procJiffies = lines[0].trimmed().toULongLong();
                 quint64 totalJiffies = lines[1].trimmed().toULongLong();
                 int cpuCores = qMax(1, lines[2].trimmed().toInt());
+                const int fdCount = lines[4].trimmed().toInt();
+                const int malitlCount = lines[5].trimmed().toInt();
+                const qint64 logBytes = lines[6].trimmed().toLongLong();
+                const int mainConnected = lines[7].trimmed().toInt();
+                const int agvConnected = lines[8].trimmed().toInt();
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
                 QStringList memParts = lines[3].split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
@@ -8781,11 +8839,12 @@ void MainWindow::onMonitorTimer() {
 #endif
 
                 double memPercent = 0.0;
+                qint64 vmRssKb = 0;
                 if (memParts.size() >= 2) {
                     double memTotalKb = memParts[0].toDouble();
-                    double vmRssKb = memParts[1].toDouble();
+                    vmRssKb = memParts[1].toLongLong();
                     if (memTotalKb > 0.0) {
-                        memPercent = (vmRssKb * 100.0) / memTotalKb;
+                        memPercent = (static_cast<double>(vmRssKb) * 100.0) / memTotalKb;
                     }
                 }
 
@@ -8804,15 +8863,39 @@ void MainWindow::onMonitorTimer() {
 
                 lblCpuUsage->setText(QString("CPU: %1%").arg(QString::number(qMax(0.0, cpuPercent), 'f', 1)));
                 lblMemUsage->setText(QString("MEM: %1%").arg(QString::number(qMax(0.0, memPercent), 'f', 1)));
+                lblFdUsage->setText(QString("FD: %1").arg(fdCount));
+                lblMalitlUsage->setText(QString("Mali: %1").arg(malitlCount));
                 chartCpu->addValue(qBound(0.0, cpuPercent, 100.0));
                 chartMem->addValue(qBound(0.0, memPercent, 100.0));
 
                 if (monitorStream) {
                     *monitorStream << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << ","
+                                   << currentMonitoringPid << ","
                                    << QString::number(cpuPercent, 'f', 2) << ","
-                                   << QString::number(memPercent, 'f', 2) << "\n";
+                                   << QString::number(memPercent, 'f', 2) << ","
+                                   << vmRssKb << ","
+                                   << fdCount << ","
+                                   << malitlCount << ","
+                                   << logBytes << ","
+                                   << mainConnected << ","
+                                   << agvConnected << "\n";
                     monitorStream->flush(); // 实时写入文件
                 }
+
+                if (baselineFdCount < 0) {
+                    baselineFdCount = fdCount;
+                    txtGitLog->append(QString("[Monitor] FD 基线=%1, Mali=%2, RSS=%3 KB")
+                                          .arg(fdCount).arg(malitlCount).arg(vmRssKb));
+                } else if (fdCount != lastFdCount && fdCount > baselineFdCount + 5) {
+                    txtGitLog->append(QString("<font color='red'>[Monitor] FD 从基线 %1 增至 %2，超过 +5 验收阈值。</font>")
+                                          .arg(baselineFdCount).arg(fdCount));
+                }
+                if (lastMalitlCount >= 0 && malitlCount != lastMalitlCount) {
+                    txtGitLog->append(QString("[Monitor] Mali FD: %1 -> %2（总 FD=%3）")
+                                          .arg(lastMalitlCount).arg(malitlCount).arg(fdCount));
+                }
+                lastFdCount = fdCount;
+                lastMalitlCount = malitlCount;
 
                 // 检测 CPU 使用率是否超过设定阈值
                 if (cpuPercent > cpuThresholdValue) {
@@ -8854,6 +8937,7 @@ void MainWindow::onMonitorTimer() {
             chartCpu->addValue(0);
             chartMem->addValue(0);
         }
+        monitorSampleInFlight = false;
         proc->deleteLater();
     });
     if (!password.isEmpty()) {

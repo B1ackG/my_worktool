@@ -507,7 +507,9 @@ private:
     QPushButton *btnScpTransfer;
     QPushButton *btnRebootTarget;
     QPushButton *btnMonitorUsage;
+    QLineEdit *txtMonitorProcess;
     QSpinBox *spinCpuThreshold;
+    QSpinBox *spinMonitorInterval;
     QPushButton *btnApplyThreshold;
     double cpuThresholdValue;
     int lastKnownPid = -1; 
@@ -518,11 +520,17 @@ private:
     QTimer *monitorTimer;
     QLabel *lblCpuUsage;
     QLabel *lblMemUsage;
+    QLabel *lblFdUsage;
+    QLabel *lblMalitlUsage;
     QString currentMonitoringProcess;
     int currentMonitoringPid;
     quint64 prevProcJiffies;
     quint64 prevTotalJiffies;
     bool hasPrevCpuSample;
+    bool monitorSampleInFlight = false;
+    int baselineFdCount = -1;
+    int lastFdCount = -1;
+    int lastMalitlCount = -1;
     QFile *monitorFile;
     QTextStream *monitorStream;
     QTimer *gitDiffReminderTimer;
