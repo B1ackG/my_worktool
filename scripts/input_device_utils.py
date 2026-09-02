@@ -24,6 +24,8 @@ NAME_HINTS = ("mouse", "logitech", "razer", "steelseries", "pointer", "trackball
 KEYBOARD_ONLY_HINTS = ("keyboard", "kbd", "keypad")
 PROC_DEVICES_PATH = "/proc/bus/input/devices"
 EVENT_RE = re.compile(r"\bevent(\d+)\b")
+REQUIRED_POINTER_HINT = "mx master 3s"
+REQUIRED_POINTER_LABEL = "Logitech MX Master 3S"
 
 
 @dataclass
@@ -363,6 +365,60 @@ def scan_devices() -> list[DeviceInfo]:
     return devices
 
 
+def is_required_pointer_name(name: str) -> bool:
+    return REQUIRED_POINTER_HINT in (name or "").casefold()
+
+
+def find_required_pointer() -> DeviceInfo | None:
+    """Return the Logitech MX Master 3S pointer node, if present."""
+    matches = [d for d in scan_devices() if is_required_pointer_name(d.name)]
+    if not matches:
+        return None
+    matches.sort(key=lambda d: (-int(d.accessible), -d.score, d.path))
+    return matches[0]
+
+
+def find_required_pointer_path_fast() -> str | None:
+    """Locate MX Master 3S from /proc without opening every evdev node."""
+    best_path: str | None = None
+    best_rank = -1
+    for proc_dev in _parse_proc_devices():
+        if not is_required_pointer_name(proc_dev.name):
+            continue
+        rank = 10 if "mouse" in (proc_dev.handlers or "").lower() else 0
+        if os.access(proc_dev.path, os.R_OK):
+            rank += 5
+        if rank > best_rank:
+            best_rank = rank
+            best_path = proc_dev.path
+    return best_path
+
+
+def _choose_fallback_pointer(preferred_path: str = "") -> str:
+    preferred = preferred_path.strip()
+    if preferred and os.path.exists(preferred) and os.access(preferred, os.R_OK):
+        info = _probe_device(preferred)
+        if info.score > 0 and not is_required_pointer_name(info.name):
+            return preferred
+
+    devices = scan_devices()
+    if not devices:
+        raise DeviceSelectionError(
+            "no_device",
+            "未找到鼠标/指针输入设备。请连接鼠标或触摸板后点击「刷新设备」。",
+        )
+
+    accessible = [d for d in devices if d.accessible]
+    if not accessible:
+        names = ", ".join(d.name for d in devices[:3])
+        raise DeviceSelectionError(
+            "permission_denied",
+            f"已识别到输入设备（{names}），但当前用户无 /dev/input 读取权限。"
+            "请执行: sudo usermod -aG input $USER，然后注销并重新登录。",
+        )
+    return accessible[0].path
+
+
 def find_device_path_by_name(device_name: str) -> str | None:
     """Resolve a stable device name to the current /dev/input/eventN path."""
     wanted = device_name.strip().casefold()
@@ -389,75 +445,36 @@ def find_device_path_by_name(device_name: str) -> str | None:
 
 
 def choose_device(preferred_path: str = "", preferred_name: str = "") -> str:
-    """Pick an input device.
+    """Prefer Logitech MX Master 3S; otherwise pick the best remaining pointer.
 
-    Preferred path is used when it still exists. If the event node was renumbered
-    (common after reboot / Bluetooth reconnect), fall back to preferred_name,
-    then to automatic scoring. Never treat a stale event path as fatal when a
-    name or auto fallback is available.
+    Fallback is used so side-button workspace bindings still work when the
+    MX Master is asleep or disconnected.
     """
     _require_evdev()
     preferred = preferred_path.strip()
-    preferred_name = preferred_name.strip()
+    _ = preferred_name
 
-    if preferred and os.path.exists(preferred):
-        if not os.access(preferred, os.R_OK):
+    found = find_required_pointer()
+    if found is not None:
+        if not found.accessible:
             raise DeviceSelectionError(
                 "permission_denied",
-                f"无法读取设备 {preferred}。请将用户加入 input 组: sudo usermod -aG input $USER，然后重新登录。",
+                f"已找到 {REQUIRED_POINTER_LABEL}（{found.path}），但当前用户无 /dev/input 读取权限。"
+                "请执行: sudo usermod -aG input $USER，然后注销并重新登录。",
             )
+        return found.path
+
+    if preferred and os.path.exists(preferred):
         info = _probe_device(preferred)
-        if info.score <= 0:
-            proc_match = next((d for d in _parse_proc_devices() if d.path == preferred), None)
-            if proc_match:
-                score, _summary = _score_from_proc(
-                    proc_match.name, proc_match.handlers, proc_match.has_key, proc_match.has_rel
-                )
-                info.score = score
-            if info.score <= 0:
+        if is_required_pointer_name(info.name):
+            if not os.access(preferred, os.R_OK):
                 raise DeviceSelectionError(
-                    "not_pointer",
-                    f"所选设备不像鼠标/指针设备: {preferred}",
+                    "permission_denied",
+                    f"无法读取设备 {preferred}。请将用户加入 input 组: sudo usermod -aG input $USER，然后重新登录。",
                 )
-        return preferred
+            return preferred
 
-    if preferred and not os.path.exists(preferred):
-        by_name = find_device_path_by_name(preferred_name)
-        if by_name:
-            return by_name
-
-    if preferred_name:
-        by_name = find_device_path_by_name(preferred_name)
-        if by_name:
-            return by_name
-        # Name configured but device not present yet (boot / sleep).
-        if not preferred:
-            raise DeviceSelectionError(
-                "device_missing",
-                f"尚未找到输入设备: {preferred_name}",
-            )
-
-    if preferred and not os.path.exists(preferred):
-        # Stale event path and no usable name — try auto rather than dying forever.
-        pass
-
-    devices = scan_devices()
-    if not devices:
-        raise DeviceSelectionError(
-            "no_device",
-            "未找到鼠标/指针输入设备。请连接鼠标或触摸板后点击「刷新设备」。",
-        )
-
-    accessible = [d for d in devices if d.accessible]
-    if not accessible:
-        names = ", ".join(d.name for d in devices[:3])
-        raise DeviceSelectionError(
-            "permission_denied",
-            f"已识别到输入设备（{names}），但当前用户无 /dev/input 读取权限。"
-            "请执行: sudo usermod -aG input $USER，然后注销并重新登录。",
-        )
-
-    return accessible[0].path
+    return _choose_fallback_pointer(preferred)
 
 
 # --- Trigger parsing and matching (shared by daemon / monitor / capture) ---

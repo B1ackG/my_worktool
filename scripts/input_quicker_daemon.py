@@ -31,6 +31,8 @@ from input_device_utils import (
     choose_device,
     device_hi_res_wheel_axes,
     event_to_trigger,
+    find_required_pointer_path_fast,
+    is_required_pointer_name,
     triggers_match,
 )
 
@@ -165,8 +167,8 @@ def ensure_single_instance() -> None:
 def default_config() -> dict[str, Any]:
     return {
         "devicePath": "",
-        "deviceName": "",
-        "wheel2Axis": "REL_HWHEEL",
+        "deviceName": "Logitech MX Master 3S",
+        "wheel2Axis": "REL_HWHEEL_HI_RES",
         "enabled": True,
         "grabDevice": False,
         "daemonAutostart": True,
@@ -183,6 +185,28 @@ def default_config() -> dict[str, Any]:
                 "name": "侧键下一工作区",
                 "enabled": True,
                 "trigger": {"type": "mouse_button", "code": "BTN_EXTRA"},
+                "action": {"type": "preset", "preset": "workspace_next"},
+            },
+            {
+                "id": "default-hwheel-prev",
+                "name": "横向滚轮上一工作区",
+                "enabled": False,
+                "trigger": {
+                    "type": "wheel",
+                    "axis": "REL_HWHEEL_HI_RES",
+                    "direction": "negative",
+                },
+                "action": {"type": "preset", "preset": "workspace_prev"},
+            },
+            {
+                "id": "default-hwheel-next",
+                "name": "横向滚轮下一工作区",
+                "enabled": False,
+                "trigger": {
+                    "type": "wheel",
+                    "axis": "REL_HWHEEL_HI_RES",
+                    "direction": "positive",
+                },
                 "action": {"type": "preset", "preset": "workspace_next"},
             },
         ],
@@ -261,6 +285,64 @@ def save_config(config: dict[str, Any]) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
         f.write("\n")
+
+
+SIDE_PROFILE_IDS = frozenset({"default-side-prev", "default-side-next"})
+HWHEEL_PROFILE_IDS = frozenset({"default-hwheel-prev", "default-hwheel-next"})
+
+
+def ensure_profile_bindings(config: dict[str, Any]) -> bool:
+    bindings = config.get("bindings")
+    if not isinstance(bindings, list):
+        bindings = []
+        config["bindings"] = bindings
+
+    by_id = {
+        str(item.get("id", "")): index
+        for index, item in enumerate(bindings)
+        if isinstance(item, dict)
+    }
+    changed = False
+    for spec in default_config()["bindings"]:
+        spec_id = str(spec.get("id", ""))
+        index = by_id.get(spec_id)
+        if index is None:
+            bindings.append(json.loads(json.dumps(spec)))
+            by_id[spec_id] = len(bindings) - 1
+            changed = True
+            continue
+        if spec_id not in HWHEEL_PROFILE_IDS:
+            continue
+        trigger = bindings[index].setdefault("trigger", {})
+        if not isinstance(trigger, dict):
+            bindings[index]["trigger"] = dict(spec["trigger"])
+            changed = True
+            continue
+        if trigger.get("axis") != "REL_HWHEEL_HI_RES" or trigger.get("type") != "wheel":
+            trigger["type"] = "wheel"
+            trigger["axis"] = "REL_HWHEEL_HI_RES"
+            trigger["direction"] = spec["trigger"]["direction"]
+            changed = True
+    return changed
+
+
+def apply_required_pointer_profile(config: dict[str, Any], mx_present: bool) -> bool:
+    changed = ensure_profile_bindings(config)
+    want_side = not mx_present
+    want_hwheel = mx_present
+    for binding in config.get("bindings", []):
+        if not isinstance(binding, dict):
+            continue
+        binding_id = str(binding.get("id", ""))
+        if binding_id in SIDE_PROFILE_IDS:
+            if bool(binding.get("enabled", True)) != want_side:
+                binding["enabled"] = want_side
+                changed = True
+        elif binding_id in HWHEEL_PROFILE_IDS:
+            if bool(binding.get("enabled", True)) != want_hwheel:
+                binding["enabled"] = want_hwheel
+                changed = True
+    return changed
 
 
 def send_key(combo: str) -> None:
@@ -483,6 +565,16 @@ class InputQuickerDaemon:
 
     def reload_bindings(self) -> None:
         self.config = load_config()
+        mx_path = find_required_pointer_path_fast()
+        mx_present = bool(mx_path and os.access(mx_path, os.R_OK))
+        if apply_required_pointer_profile(self.config, mx_present):
+            try:
+                save_config(self.config)
+            except OSError as exc:
+                log(f"WARN: could not save pointer profile: {exc}")
+        self._rebuild_active_bindings()
+
+    def _rebuild_active_bindings(self) -> None:
         self.active_bindings = [
             b for b in self.config.get("bindings", [])
             if isinstance(b, dict) and b.get("enabled", True)
@@ -548,20 +640,13 @@ class InputQuickerDaemon:
 
     def open_device(self) -> None:
         self.close_device()
-        # Empty path+name =「自动选择（按能力评分）」. Do not pin the resolved
-        # device back into config, or the UI would leave auto mode after first run.
-        was_auto = (
-            not str(self.config.get("devicePath", "")).strip()
-            and not str(self.config.get("deviceName", "")).strip()
-        )
         path = resolve_device_path(self.config)
         self.device = InputDevice(path)
         self.listening_path = path
-        # When the user pinned a device (path and/or name), remember stable
-        # identity + current event node so reboot / Bluetooth reconnect stays
-        # on the same mouse instead of falling back to a laptop pointer.
-        if not was_auto:
-            live_name = (self.device.name or "").strip()
+        live_name = (self.device.name or "").strip()
+        # Only pin Logitech MX Master 3S. Fallback pointers must not overwrite
+        # the preferred name, or reconnect would stay on the laptop touchpad.
+        if is_required_pointer_name(live_name):
             changed = False
             if live_name and str(self.config.get("deviceName", "")).strip() != live_name:
                 self.config["deviceName"] = live_name
@@ -616,8 +701,40 @@ class InputQuickerDaemon:
         self.hold_session = None
         self.wheel_normalizer.reset()
 
+    def refresh_required_pointer_profile(self) -> None:
+        mx_path = find_required_pointer_path_fast()
+        present = bool(mx_path and os.access(mx_path, os.R_OK))
+        if apply_required_pointer_profile(self.config, present):
+            try:
+                save_config(self.config)
+            except OSError as exc:
+                log(f"WARN: could not save pointer profile: {exc}")
+            self._rebuild_active_bindings()
+            log(
+                "INFO: profile -> "
+                + (
+                    "MX Master 3S REL_HWHEEL_HI_RES"
+                    if present
+                    else "side-button workspaces"
+                )
+            )
+
+        listening_is_mx = bool(
+            self.device is not None and is_required_pointer_name(self.device.name or "")
+        )
+        if present and mx_path and self.listening_path != mx_path:
+            try:
+                self.open_device()
+            except (DeviceSelectionError, OSError) as exc:
+                log(f"WARN: switch to MX Master 3S failed: {exc}")
+        elif not present and listening_is_mx:
+            try:
+                self.open_device()
+            except (DeviceSelectionError, OSError) as exc:
+                log(f"WARN: fallback pointer failed: {exc}")
+
     def open_device_with_retry(self, reason: str = "device unavailable") -> bool:
-        """Keep daemon alive while mouse is missing (boot / sleep / reconnect)."""
+        """Keep daemon alive while any pointer is missing (boot / sleep / reconnect)."""
         delay = 1.0
         while RUNNING:
             try:
@@ -629,7 +746,6 @@ class InputQuickerDaemon:
                 log(f"WARN: {reason}: {exc}; retrying in {delay:.0f}s")
             self.close_device()
             time.sleep(delay)
-            delay = min(delay * 1.5, 10.0)
             # Config may change (SIGHUP) while we wait.
             if RELOAD_REQUESTED:
                 return False
@@ -733,10 +849,16 @@ class InputQuickerDaemon:
                 return 0
         log("INFO: input quicker daemon started")
 
+        last_profile_check = 0.0
         while RUNNING:
             if RELOAD_REQUESTED:
                 RELOAD_REQUESTED = False
                 self.reload()
+
+            now = time.monotonic()
+            if now - last_profile_check >= 1.0:
+                last_profile_check = now
+                self.refresh_required_pointer_profile()
 
             if self.device is None:
                 if not self.open_device_with_retry("device lost"):

@@ -194,6 +194,7 @@ private slots:
     void onGitPendingBlinkTick();
     void onGitPendingTrayMessageClicked();
     void onGitCheckoutClicked();
+    void onGitApplyMainOntoFeatureClicked();
     void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
     void onGitDeleteBranchClicked(); // 新增：删除分支
@@ -450,9 +451,11 @@ private:
     QPushButton *btnGitGoalDelete;
     QPushButton *btnGitGoalStart;
     QLabel *lblGitCurrentBranch;
+    QLabel *lblGitMainAheadHint = nullptr;
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
     QPushButton *btnGitCheckout;
+    QPushButton *btnGitApplyMainOntoFeature = nullptr;
     QPushButton *btnGitQuickBranchSwitch = nullptr;
     QPushButton *btnGitSyncRemote;   // 同步远程分支
     QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
@@ -674,6 +677,16 @@ private:
     void finishGitNetworkCommand(bool ok, const QString &stdoutText, const QString &stderrText);
     void offerGitNetworkRetry(const QString &reason);
     void refreshGitBranchesLocal();
+    bool runGitLoggedInDir(const QString &workDir, const QStringList &args, int timeoutMs = 30000);
+    bool gitRebaseInProgress(const QString &workDir) const;
+    int gitMainUniqueCommitCount(const QString &repoDir, const QString &featureBranch) const;
+    QStringList gitMainUniqueCommitLines(const QString &repoDir, const QString &featureBranch,
+                                         int maxLines = 8) const;
+    QString comboSelectedLocalBranch() const;
+    QString gitFeatureBranchForMainSync(const QString &repoDir) const;
+    void updateGitApplyMainFromMainUi();
+    void maybePromptApplyMainAfterCheckout(const QString &featureBranch);
+    bool applyMainChangesOntoFeatureBranch(const QString &featureBranch, bool skipConfirm = false);
     void updateGitConsoleCwdLabel();
     bool isGitAutoFetchEnabled() const;
     bool isGitAutoPushAfterCommitEnabled() const;

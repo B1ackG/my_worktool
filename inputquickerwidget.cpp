@@ -1,6 +1,7 @@
 #include "inputquickerwidget.h"
 #include "quickerbindingdialog.h"
 
+#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -14,6 +15,7 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     : QWidget(parent)
     , manager(new InputQuickerManager(this))
     , statusTimer(new QTimer(this))
+    , requiredDeviceTimer(new QTimer(this))
 {
     QLabel *header = new QLabel(QStringLiteral("快捷助手"), this);
     header->setStyleSheet(QStringLiteral(
@@ -26,7 +28,8 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
         this);
 #else
     QLabel *hint = new QLabel(
-        QStringLiteral("本页管理映射规则与守护进程；实际按键由开机自启的守护脚本执行，主窗口关闭后仍生效。"),
+        QStringLiteral("本页管理映射规则与守护进程。未连接 Logitech MX Master 3S 时用侧键切工作区；"
+                       "连接后改用横向滚轮 REL_HWHEEL_HI_RES。实际按键由开机自启的守护脚本执行。"),
         this);
 #endif
     hint->setWordWrap(true);
@@ -41,10 +44,11 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
 
     cmbDevice = new QComboBox(this);
     cmbDevice->setMinimumWidth(360);
-    cmbDevice->setToolTip(QStringLiteral("选择要映射的输入设备；「自动选择」按能力评分挑选。"));
+    cmbDevice->setToolTip(
+        QStringLiteral("输入设备固定为 Logitech MX Master 3S；未连接时每秒扫描直到找到。"));
 
     btnRefreshDevices = new QPushButton(QStringLiteral("刷新设备"), this);
-    btnRefreshDevices->setToolTip(QStringLiteral("重新扫描输入设备列表。"));
+    btnRefreshDevices->setToolTip(QStringLiteral("重新扫描输入设备列表。未找到 MX Master 3S 时会每秒自动刷新。"));
 
     lblStatus = new QLabel(QStringLiteral("状态: 未加载"), this);
     lblStatus->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
@@ -120,8 +124,10 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
     connect(manager, &InputQuickerManager::bindingsChanged, this, &InputQuickerWidget::refreshBindingsTable);
     connect(manager, &InputQuickerManager::statusChanged, this, &InputQuickerWidget::updateStatus);
     connect(statusTimer, &QTimer::timeout, this, &InputQuickerWidget::pollStatus);
+    connect(requiredDeviceTimer, &QTimer::timeout, this, &InputQuickerWidget::pollRequiredPointer);
 
     manager->loadSettings();
+    pinRequiredPointerIfMissing();
 
 #ifdef Q_OS_WIN
     chkEnabled->setEnabled(false);
@@ -149,10 +155,13 @@ InputQuickerWidget::InputQuickerWidget(QWidget *parent)
 
     ensureDefaultsIfEmpty();
     refreshBindingsTable();
-    updateStatus(manager->statusText());
+    requiredDeviceTimer->start(1000);
+    pollRequiredPointer();
     statusTimer->start(1500);
     // Do not stop/restart a boot-started daemon just because the UI opened.
-    ensureDaemonManaged();
+    if (!requiredPointerReady) {
+        ensureDaemonManaged();
+    }
 #endif
 }
 
@@ -199,8 +208,11 @@ void InputQuickerWidget::populateDevices()
         }
     }
 
+    const int requiredIndex = requiredPointerComboIndex();
     const int index = cmbDevice->findData(selectedPath);
-    if (index >= 0) {
+    if (requiredIndex >= 0) {
+        cmbDevice->setCurrentIndex(requiredIndex);
+    } else if (index >= 0) {
         cmbDevice->setCurrentIndex(index);
     } else if (matchByNameIndex >= 0) {
         // eventN renumbered after reboot — keep the same mouse by name.
@@ -209,9 +221,12 @@ void InputQuickerWidget::populateDevices()
         cmbDevice->addItem(QStringLiteral("手动设备: %1").arg(selectedPath), selectedPath);
         cmbDevice->setItemData(cmbDevice->count() - 1, selectedName, Qt::UserRole + 1);
         cmbDevice->setCurrentIndex(cmbDevice->count() - 1);
-    } else if (!selectedName.isEmpty()) {
-        cmbDevice->addItem(QStringLiteral("按名称: %1（当前未连接）").arg(selectedName), QString());
-        cmbDevice->setItemData(cmbDevice->count() - 1, selectedName, Qt::UserRole + 1);
+    } else {
+        const QString waitingName = selectedName.isEmpty()
+            ? InputQuickerManager::requiredPointerDisplayName()
+            : selectedName;
+        cmbDevice->addItem(QStringLiteral("按名称: %1（当前未连接）").arg(waitingName), QString());
+        cmbDevice->setItemData(cmbDevice->count() - 1, waitingName, Qt::UserRole + 1);
         cmbDevice->setCurrentIndex(cmbDevice->count() - 1);
     }
 }
@@ -263,7 +278,16 @@ void InputQuickerWidget::onEnabledToggled(bool checked)
 
 void InputQuickerWidget::onDeviceChanged()
 {
-    applyChanges();
+    if (InputQuickerManager::nameMatchesRequiredPointer(selectedDeviceName())
+        && !selectedDevicePath().isEmpty()) {
+        manager->syncRequiredPointerProfile(true);
+        if (applyChanges(false)) {
+            requiredPointerReady = true;
+            updateStatus(manager->statusText());
+        }
+        return;
+    }
+    pollRequiredPointer();
 }
 
 void InputQuickerWidget::onAddBindingClicked()
@@ -383,7 +407,129 @@ void InputQuickerWidget::updateStatus(const QString &status)
 
 void InputQuickerWidget::pollStatus()
 {
+    if (liveRequiredPointer().path.isEmpty()) {
+        requiredPointerReady = false;
+        updateStatus(QStringLiteral("未连接 MX Master 3S，已启用侧键切工作区"));
+        return;
+    }
+    if (!requiredPointerReady) {
+        updateStatus(QStringLiteral("已找到 Logitech MX Master 3S，正在应用横向滚轮…"));
+        return;
+    }
     updateStatus(manager->statusText());
+}
+
+void InputQuickerWidget::pinRequiredPointerIfMissing()
+{
+    if (InputQuickerManager::nameMatchesRequiredPointer(manager->deviceName())) {
+        return;
+    }
+    manager->setDeviceName(InputQuickerManager::requiredPointerDisplayName());
+    manager->setDevicePath(QString());
+}
+
+int InputQuickerWidget::requiredPointerComboIndex() const
+{
+    int bestIndex = -1;
+    int bestRank = -1;
+    for (int i = 0; i < cmbDevice->count(); ++i) {
+        const QString name = cmbDevice->itemData(i, Qt::UserRole + 1).toString();
+        const QString path = cmbDevice->itemData(i).toString();
+        if (path.isEmpty() || !InputQuickerManager::nameMatchesRequiredPointer(name)) {
+            continue;
+        }
+        int rank = 0;
+        const QString label = cmbDevice->itemText(i);
+        if (label.contains(QLatin1String("pointer"), Qt::CaseInsensitive)
+            || label.contains(QLatin1String("mouse"), Qt::CaseInsensitive)) {
+            rank += 20;
+        }
+        if (!label.contains(QLatin1String("无权限"))) {
+            rank += 10;
+        }
+        if (rank > bestRank) {
+            bestRank = rank;
+            bestIndex = i;
+        }
+    }
+    return bestIndex;
+}
+
+InputQuickerManager::DeviceInfo InputQuickerWidget::liveRequiredPointer() const
+{
+    InputQuickerManager::DeviceInfo device = manager->findRequiredPointerDevice();
+    if (!device.path.isEmpty()) {
+        return device;
+    }
+
+    device.path = selectedDevicePath();
+    device.name = selectedDeviceName();
+    if (!device.path.isEmpty()
+        && InputQuickerManager::nameMatchesRequiredPointer(device.name)
+        && QFileInfo::exists(device.path)) {
+        return device;
+    }
+
+    device.path.clear();
+    device.name.clear();
+    return device;
+}
+
+bool InputQuickerWidget::applyRequiredPointer(const InputQuickerManager::DeviceInfo &device,
+                                              bool forceApply)
+{
+    const QSignalBlocker blocker(cmbDevice);
+    if (cmbDevice->findData(device.path) < 0) {
+        populateDevices();
+    }
+    int index = cmbDevice->findData(device.path);
+    if (index < 0) {
+        cmbDevice->addItem(
+            QStringLiteral("%1  (%2)").arg(device.name, device.path), device.path);
+        cmbDevice->setItemData(cmbDevice->count() - 1, device.name, Qt::UserRole + 1);
+        index = cmbDevice->count() - 1;
+    }
+    cmbDevice->setCurrentIndex(index);
+
+    const bool sameDevice = manager->devicePath() == device.path
+        && InputQuickerManager::nameMatchesRequiredPointer(manager->deviceName());
+    if (sameDevice && requiredPointerReady && !forceApply) {
+        return true;
+    }
+    return applyChanges(false);
+}
+
+void InputQuickerWidget::pollRequiredPointer()
+{
+    const InputQuickerManager::DeviceInfo device = liveRequiredPointer();
+    const bool present = !device.path.isEmpty();
+    const bool profileChanged = manager->syncRequiredPointerProfile(present);
+
+    if (present) {
+        if (!applyRequiredPointer(device, profileChanged)) {
+            requiredPointerReady = false;
+            updateStatus(QStringLiteral("已找到 Logitech MX Master 3S，正在应用横向滚轮…"));
+            return;
+        }
+        requiredPointerReady = true;
+        updateStatus(manager->statusText());
+        return;
+    }
+
+    requiredPointerReady = false;
+    bool deviceChanged = false;
+    if (!manager->devicePath().isEmpty() && !QFileInfo::exists(manager->devicePath())) {
+        manager->setDevicePath(QString());
+        deviceChanged = true;
+    }
+    if (!InputQuickerManager::nameMatchesRequiredPointer(manager->deviceName())) {
+        manager->setDeviceName(InputQuickerManager::requiredPointerDisplayName());
+        deviceChanged = true;
+    }
+    if (profileChanged || deviceChanged) {
+        applyChanges(false);
+    }
+    updateStatus(QStringLiteral("未连接 MX Master 3S，已启用侧键切工作区"));
 }
 
 QString InputQuickerWidget::triggerDisplayText(const QJsonObject &trigger) const

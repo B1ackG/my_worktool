@@ -30,6 +30,7 @@ private slots:
     void onBindingEnabledToggled();
     void updateStatus(const QString &status);
     void pollStatus();
+    void pollRequiredPointer();
 
 private:
     QString triggerDisplayText(const QJsonObject &trigger) const;
@@ -41,6 +42,10 @@ private:
     void ensureDaemonManaged();
     void ensureDefaultsIfEmpty();
     void reportApplyFailure();
+    void pinRequiredPointerIfMissing();
+    int requiredPointerComboIndex() const;
+    InputQuickerManager::DeviceInfo liveRequiredPointer() const;
+    bool applyRequiredPointer(const InputQuickerManager::DeviceInfo &device, bool forceApply = false);
 
     InputQuickerManager *manager;
     QCheckBox *chkEnabled;
@@ -50,6 +55,8 @@ private:
     QTableWidget *tblBindings;
     QPushButton *btnAddBinding;
     QTimer *statusTimer;
+    QTimer *requiredDeviceTimer;
+    bool requiredPointerReady = false;
 };
 
 #endif // INPUTQUICKERWIDGET_H

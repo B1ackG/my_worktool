@@ -1101,10 +1101,16 @@ void MainWindow::createWidgets()
     lblGitCurrentBranch = new QLabel(QStringLiteral("(未知)"));
     lblGitCurrentBranch->setStyleSheet(QStringLiteral("font-weight: bold;"));
     lblGitCurrentBranch->setMinimumWidth(120);
+    lblGitMainAheadHint = new QLabel();
+    lblGitMainAheadHint->setStyleSheet(QStringLiteral("color: #e65100; font-weight: bold;"));
 
     cmbGitBranches = new QComboBox();
     btnGitRefreshBranches = new QPushButton("刷新分支");
     btnGitCheckout = new QPushButton("切换分支");
+    btnGitApplyMainOntoFeature = new QPushButton(QStringLiteral("同步主分支修改"));
+    btnGitApplyMainOntoFeature->setToolTip(
+        QStringLiteral("检测主分支相对所选功能分支多出来的提交，一键 rebase 到该功能分支（单人仓库）"));
+    btnGitApplyMainOntoFeature->setEnabled(false);
     btnGitQuickBranchSwitch = new QPushButton(QStringLiteral("快速切换…"));
     btnGitQuickBranchSwitch->setToolTip(
         QStringLiteral("可搜索本地/远程分支，并显示最近提交信息，一键切换"));
@@ -1520,6 +1526,7 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layCurrentBranch = new QHBoxLayout();
     layCurrentBranch->addWidget(new QLabel(QStringLiteral("当前分支:")));
     layCurrentBranch->addWidget(lblGitCurrentBranch, 1);
+    layCurrentBranch->addWidget(lblGitMainAheadHint);
     layCurrentBranch->addStretch();
     layOps->addLayout(layCurrentBranch);
 
@@ -1532,6 +1539,7 @@ QWidget* MainWindow::createGitPage()
     layBranchBtns->addWidget(btnGitRefreshBranches);
     layBranchBtns->addWidget(btnGitQuickBranchSwitch);
     layBranchBtns->addWidget(btnGitCheckout);
+    layBranchBtns->addWidget(btnGitApplyMainOntoFeature);
     layBranchBtns->addWidget(btnGitSyncRemote);
     layBranchBtns->addWidget(btnGitCreateBranch);
     layBranchBtns->addWidget(btnGitDeleteBranch);
@@ -2600,6 +2608,8 @@ void MainWindow::createConnections()
     });
     connect(btnGitQuickBranchSwitch, &QPushButton::clicked, this, &MainWindow::onGitQuickBranchSwitchClicked);
     connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
+    connect(btnGitApplyMainOntoFeature, &QPushButton::clicked, this,
+            &MainWindow::onGitApplyMainOntoFeatureClicked);
     connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
     connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
     connect(btnGitDeleteBranch, &QPushButton::clicked, this, &MainWindow::onGitDeleteBranchClicked);
@@ -4646,6 +4656,364 @@ bool MainWindow::runGitCommand(const QStringList &args, bool allowAutoPush) {
     return ok;
 }
 
+bool MainWindow::runGitLoggedInDir(const QString &workDir, const QStringList &args, int timeoutMs)
+{
+    if (workDir.trimmed().isEmpty() || args.isEmpty()) {
+        return false;
+    }
+    if (txtGitLog) {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>$ git %1</font>").arg(args.join(QLatin1Char(' '))));
+        if (QDir(workDir).absolutePath() != QDir(currentGitWorkDir()).absolutePath()) {
+            txtGitLog->append(QStringLiteral("<font color='gray'>cwd: %1</font>")
+                                  .arg(QDir::toNativeSeparators(workDir).toHtmlEscaped()));
+        }
+    }
+
+    QString stdoutText;
+    QString stderrText;
+    const bool ok = GitWorktreeRunner::runInRepo(workDir, args, &stdoutText, &stderrText, timeoutMs);
+    if (txtGitLog) {
+        if (!stdoutText.trimmed().isEmpty()) {
+            txtGitLog->append(stdoutText);
+        }
+        if (!stderrText.trimmed().isEmpty()) {
+            txtGitLog->append(QStringLiteral("<font color='orange'>%1</font>")
+                                  .arg(stderrText.toHtmlEscaped()));
+        }
+        txtGitLog->moveCursor(QTextCursor::End);
+    }
+    return ok;
+}
+
+bool MainWindow::gitRebaseInProgress(const QString &workDir) const
+{
+    if (workDir.trimmed().isEmpty()) {
+        return false;
+    }
+    QString out;
+    return GitWorktreeRunner::runInRepo(
+        workDir,
+        QStringList() << QStringLiteral("rev-parse") << QStringLiteral("--verify")
+                      << QStringLiteral("REBASE_HEAD"),
+        &out, nullptr, 5000);
+}
+
+int MainWindow::gitMainUniqueCommitCount(const QString &repoDir, const QString &featureBranch) const
+{
+    const QString feature = normalizeLocalBranchRef(featureBranch);
+    const QString main = resolveGitMainBranch(repoDir);
+    if (repoDir.trimmed().isEmpty() || feature.isEmpty() || main.isEmpty() || feature == main) {
+        return 0;
+    }
+    // feature..main：主分支有、功能分支没有的提交
+    return GitWorktreeRunner::countCommitsAhead(repoDir, feature, main);
+}
+
+QStringList MainWindow::gitMainUniqueCommitLines(const QString &repoDir, const QString &featureBranch,
+                                                 int maxLines) const
+{
+    const QString feature = normalizeLocalBranchRef(featureBranch);
+    const QString main = resolveGitMainBranch(repoDir);
+    QStringList lines;
+    if (repoDir.trimmed().isEmpty() || feature.isEmpty() || main.isEmpty() || feature == main) {
+        return lines;
+    }
+    lines = GitWorktreeRunner::listCommitsAhead(repoDir, feature, main);
+    if (maxLines > 0 && lines.size() > maxLines) {
+        const int extra = lines.size() - maxLines;
+        lines = lines.mid(0, maxLines);
+        lines.append(QStringLiteral("… 还有 %1 个提交").arg(extra));
+    }
+    return lines;
+}
+
+QString MainWindow::comboSelectedLocalBranch() const
+{
+    if (!cmbGitBranches) {
+        return QString();
+    }
+    return normalizeLocalBranchRef(cmbGitBranches->currentText());
+}
+
+QString MainWindow::gitFeatureBranchForMainSync(const QString &repoDir) const
+{
+    const QString main = resolveGitMainBranch(repoDir);
+    if (repoDir.trimmed().isEmpty() || main.isEmpty()) {
+        return QString();
+    }
+
+    const QString selected = comboSelectedLocalBranch();
+    if (!selected.isEmpty() && selected != main && gitBranchExists(repoDir, selected)) {
+        return selected;
+    }
+
+    const QString current = gitCheckedOutBranch(repoDir);
+    if (!current.isEmpty() && current != main) {
+        return current;
+    }
+    return QString();
+}
+
+void MainWindow::updateGitApplyMainFromMainUi()
+{
+    if (!btnGitApplyMainOntoFeature) {
+        return;
+    }
+
+    const QString repoDir = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    const QString main = repoDir.isEmpty() ? QString() : resolveGitMainBranch(repoDir);
+    const QString feature = gitFeatureBranchForMainSync(repoDir);
+    const int count = (feature.isEmpty() || main.isEmpty())
+                          ? 0
+                          : gitMainUniqueCommitCount(repoDir, feature);
+
+    const QString current = repoDir.isEmpty() ? QString() : gitCheckedOutBranch(repoDir);
+    if (lblGitMainAheadHint) {
+        if (!current.isEmpty() && !main.isEmpty() && current != main) {
+            const int currentBehind = gitMainUniqueCommitCount(repoDir, current);
+            if (currentBehind > 0) {
+                lblGitMainAheadHint->setText(
+                    QStringLiteral("主分支领先 %1 个提交").arg(currentBehind));
+                lblGitMainAheadHint->setToolTip(
+                    QStringLiteral("主分支 [%1] 有 %2 个提交尚未包含在当前分支 [%3] 中，可用「同步主分支修改」。")
+                        .arg(main, QString::number(currentBehind), current));
+            } else {
+                lblGitMainAheadHint->clear();
+                lblGitMainAheadHint->setToolTip(QString());
+            }
+        } else {
+            lblGitMainAheadHint->clear();
+            lblGitMainAheadHint->setToolTip(QString());
+        }
+    }
+
+    if (count <= 0 || feature.isEmpty() || main.isEmpty()) {
+        btnGitApplyMainOntoFeature->setEnabled(false);
+        btnGitApplyMainOntoFeature->setText(QStringLiteral("同步主分支修改"));
+        btnGitApplyMainOntoFeature->setStyleSheet(QString());
+        if (feature.isEmpty() || main.isEmpty() || feature == main) {
+            btnGitApplyMainOntoFeature->setToolTip(
+                QStringLiteral("请先选中或切换到非主分支。主分支上多出来的提交会一键 rebase 到该功能分支。"));
+        } else {
+            btnGitApplyMainOntoFeature->setToolTip(
+                QStringLiteral("功能分支 [%1] 已包含主分支 [%2] 的全部提交。").arg(feature, main));
+        }
+        return;
+    }
+
+    btnGitApplyMainOntoFeature->setEnabled(true);
+    btnGitApplyMainOntoFeature->setText(QStringLiteral("同步主分支修改 (%1)").arg(count));
+    btnGitApplyMainOntoFeature->setStyleSheet(
+        QStringLiteral("background-color: #c8e6c9; font-weight: bold;"));
+    btnGitApplyMainOntoFeature->setToolTip(
+        QStringLiteral("主分支 [%1] 有 %2 个提交尚未包含在功能分支 [%3] 中。"
+                       "点击后将该分支 rebase 到最新主分支（单人仓库，会改写该分支历史）。")
+            .arg(main, QString::number(count), feature));
+}
+
+void MainWindow::maybePromptApplyMainAfterCheckout(const QString &featureBranch)
+{
+    const QString repoDir = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    const QString feature = normalizeLocalBranchRef(featureBranch);
+    const QString main = resolveGitMainBranch(repoDir);
+    if (repoDir.isEmpty() || feature.isEmpty() || main.isEmpty() || feature == main
+        || feature.startsWith(QLatin1Char('('))) {
+        updateGitApplyMainFromMainUi();
+        return;
+    }
+    if (!gitBranchExists(repoDir, feature)) {
+        updateGitApplyMainFromMainUi();
+        return;
+    }
+
+    const int count = gitMainUniqueCommitCount(repoDir, feature);
+    updateGitApplyMainFromMainUi();
+    if (count <= 0) {
+        return;
+    }
+
+    const QStringList lines = gitMainUniqueCommitLines(repoDir, feature, 8);
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QStringLiteral("同步主分支修改"));
+    box.setText(QStringLiteral("主分支 [%1] 有 %2 个提交尚未包含在当前分支 [%3] 中。\n\n"
+                               "是否一键应用到该功能分支？\n"
+                               "（将把主分支提交 rebase 到该功能分支；若工作区有未提交改动会先自动储藏）")
+                    .arg(main, QString::number(count), feature));
+    if (!lines.isEmpty()) {
+        box.setInformativeText(lines.join(QLatin1Char('\n')));
+    }
+    auto *btnApply = box.addButton(QStringLiteral("立即应用"), QMessageBox::AcceptRole);
+    box.addButton(QStringLiteral("稍后再说"), QMessageBox::RejectRole);
+    box.setDefaultButton(btnApply);
+    box.exec();
+    if (box.clickedButton() != btnApply) {
+        return;
+    }
+    applyMainChangesOntoFeatureBranch(feature, true);
+}
+
+bool MainWindow::applyMainChangesOntoFeatureBranch(const QString &featureBranch, bool skipConfirm)
+{
+    QString pathError;
+    const QString repoDir = currentGitWorkDir(&pathError);
+    if (repoDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("同步主分支修改"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return false;
+    }
+
+    const QString feature = normalizeLocalBranchRef(featureBranch);
+    const QString main = resolveGitMainBranch(repoDir);
+    if (feature.isEmpty() || main.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("同步主分支修改"),
+                                 QStringLiteral("请先选中一个非主分支，并确认已配置主分支。"));
+        return false;
+    }
+    if (feature == main) {
+        QMessageBox::information(this, QStringLiteral("同步主分支修改"),
+                                 QStringLiteral("当前目标就是主分支 [%1]，无需同步。").arg(main));
+        return false;
+    }
+    if (!gitBranchExists(repoDir, feature) || !gitBranchExists(repoDir, main)) {
+        QMessageBox::warning(this, QStringLiteral("同步主分支修改"),
+                             QStringLiteral("本地不存在分支 [%1] 或主分支 [%2]。").arg(feature, main));
+        return false;
+    }
+
+    const int count = gitMainUniqueCommitCount(repoDir, feature);
+    if (count <= 0) {
+        QMessageBox::information(this, QStringLiteral("同步主分支修改"),
+                                 QStringLiteral("功能分支 [%1] 已包含主分支 [%2] 的全部提交。")
+                                     .arg(feature, main));
+        updateGitApplyMainFromMainUi();
+        return true;
+    }
+
+    if (!skipConfirm) {
+        const QStringList lines = gitMainUniqueCommitLines(repoDir, feature, 8);
+        const QString body =
+            QStringLiteral("确定要把主分支 [%1] 上的 %2 个独有提交应用到功能分支 [%3] 吗？\n\n"
+                           "将把主分支提交 rebase 到该功能分支（单人仓库，会改写功能分支历史）。\n"
+                           "若工作区有未提交改动，会先自动储藏，成功后再恢复。\n"
+                           "若该分支已推送过远程，之后需要 git push --force-with-lease。")
+                .arg(main, QString::number(count), feature);
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Question);
+        box.setWindowTitle(QStringLiteral("同步主分支修改"));
+        box.setText(body);
+        if (!lines.isEmpty()) {
+            box.setInformativeText(lines.join(QLatin1Char('\n')));
+        }
+        auto *btnYes = box.addButton(QStringLiteral("立即应用"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(btnYes);
+        box.exec();
+        if (box.clickedButton() != btnYes) {
+            return false;
+        }
+    }
+
+    const QString current = gitCheckedOutBranch(repoDir);
+    const QString wtPath = gitWorktreePathUsingBranch(repoDir, feature);
+    const QString repoAbs = QDir(repoDir).absolutePath();
+    QString rebaseDir = repoDir;
+    if (current != feature) {
+        if (!wtPath.isEmpty() && QDir(wtPath).absolutePath() != repoAbs) {
+            rebaseDir = QDir(wtPath).absolutePath();
+            txtGitLog->append(QStringLiteral("<font color='gray'>[同步主分支] 分支 %1 在其它工作树，将在该目录变基: %2</font>")
+                                  .arg(feature, QDir::toNativeSeparators(rebaseDir)));
+        } else {
+            if (GitWorktreeRunner::isDirty(repoDir)) {
+                QMessageBox::warning(
+                    this, QStringLiteral("同步主分支修改"),
+                    QStringLiteral("当前仓库有未提交改动，无法切换到 [%1]。请先提交、储藏或丢弃后再试。")
+                        .arg(feature));
+                return false;
+            }
+            if (!runGitLoggedInDir(repoDir, QStringList() << QStringLiteral("checkout") << feature)) {
+                QMessageBox::warning(this, QStringLiteral("同步主分支修改"),
+                                     QStringLiteral("切换到功能分支 [%1] 失败，请查看日志。").arg(feature));
+                return false;
+            }
+            rebaseDir = repoDir;
+        }
+    }
+
+    if (gitRebaseInProgress(rebaseDir)) {
+        QMessageBox::warning(this, QStringLiteral("同步主分支修改"),
+                             QStringLiteral("该工作区已有变基进行中。请先 git rebase --continue 或 --abort。"));
+        return false;
+    }
+
+    bool didStash = false;
+    if (GitWorktreeRunner::isDirty(rebaseDir)) {
+        const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        const QString stashMsg = QStringLiteral("同步主分支自动储藏 %1").arg(stamp);
+        txtGitLog->append(QStringLiteral("<font color='cyan'>[同步主分支] 检测到未提交改动，先 stash…</font>"));
+        if (!runGitLoggedInDir(rebaseDir,
+                               QStringList() << QStringLiteral("stash") << QStringLiteral("push")
+                                             << QStringLiteral("-u") << QStringLiteral("-m") << stashMsg)) {
+            QMessageBox::critical(this, QStringLiteral("同步主分支修改"),
+                                  QStringLiteral("自动储藏失败，已中止。请先手动处理未提交改动。"));
+            return false;
+        }
+        didStash = true;
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='cyan'>[同步主分支] rebase %1 onto %2 …</font>")
+                          .arg(feature, main));
+    if (!runGitLoggedInDir(rebaseDir, QStringList() << QStringLiteral("rebase") << main, 60000)) {
+        QString detail = QStringLiteral("变基出现冲突或失败。请在工作区解决冲突后执行：\n"
+                                        "  git add …\n  git rebase --continue\n"
+                                        "或放弃本次变基：\n  git rebase --abort");
+        if (didStash) {
+            detail += QStringLiteral("\n\n未提交改动仍在 stash 中，可用「Stash 操作 → 恢复最近」取回。");
+        }
+        QMessageBox::warning(this, QStringLiteral("同步主分支修改失败"), detail);
+        refreshGitBranchesLocal();
+        refreshGitPendingStatusBar();
+        return false;
+    }
+
+    if (didStash) {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>[同步主分支] stash pop …</font>"));
+        if (!runGitLoggedInDir(rebaseDir, QStringList() << QStringLiteral("stash") << QStringLiteral("pop"))) {
+            QMessageBox::warning(this, QStringLiteral("同步主分支部分成功"),
+                                 QStringLiteral("变基已完成，但 stash pop 失败（可能有冲突）。\n"
+                                                "请先解决冲突。功能分支已包含主分支提交。"));
+            refreshGitBranchesLocal();
+            refreshGitPendingStatusBar();
+            return false;
+        }
+    }
+
+    txtGitLog->append(QStringLiteral("<font color='green'>[同步主分支] 已将 %1 的 %2 个提交应用到 %3。</font>")
+                          .arg(main, QString::number(count), feature));
+    refreshGitBranchesLocal();
+    refreshGitPendingStatusBar();
+    updateGitApplyMainFromMainUi();
+    return true;
+}
+
+void MainWindow::onGitApplyMainOntoFeatureClicked()
+{
+    QString pathError;
+    const QString repoDir = currentGitWorkDir(&pathError);
+    if (repoDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("同步主分支修改"),
+                             pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
+        return;
+    }
+    const QString feature = gitFeatureBranchForMainSync(repoDir);
+    if (feature.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("同步主分支修改"),
+                                 QStringLiteral("请先选中或切换到一个非主分支。"));
+        return;
+    }
+    applyMainChangesOntoFeatureBranch(feature, false);
+}
+
 bool MainWindow::runShellCommand(const QStringList &args)
 {
     if (args.isEmpty()) {
@@ -4860,7 +5228,7 @@ void MainWindow::onGitConsoleCommandSubmitted()
         return;
     }
 
-    runGitCommand(args);
+    const bool gitOk = runGitCommand(args);
 
     if (sub == QLatin1String("checkout") || sub == QLatin1String("switch")
         || sub == QLatin1String("branch") || sub == QLatin1String("commit")
@@ -4868,6 +5236,9 @@ void MainWindow::onGitConsoleCommandSubmitted()
         || sub == QLatin1String("stash") || sub == QLatin1String("reset")) {
         refreshGitBranchesLocal();
         onGitRefreshLogClicked();
+        if (gitOk && (sub == QLatin1String("checkout") || sub == QLatin1String("switch"))) {
+            maybePromptApplyMainAfterCheckout(gitCheckedOutBranch(workDir));
+        }
     }
 }
 
@@ -6165,6 +6536,7 @@ void MainWindow::refreshGitBranchesLocal() {
     syncGitMainBranchSetting(workDir);
     onGitRefreshLogClicked();
     updateGitGoalBranchHighlights();
+    updateGitApplyMainFromMainUi();
 }
 
 void MainWindow::onGitDiffClicked() {
@@ -6578,6 +6950,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
                 return;
             }
             refreshGitBranchesLocal();
+            maybePromptApplyMainAfterCheckout(localName);
             return;
         }
     }
@@ -6588,6 +6961,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
         return;
     }
     refreshGitBranchesLocal();
+    maybePromptApplyMainAfterCheckout(branch);
 }
 
 QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool allowRunningApp) const
@@ -6904,8 +7278,10 @@ void MainWindow::onGitSyncRemoteClicked() {
     if (reply == QMessageBox::Yes) {
         // 执行 git checkout -b branch-name --track remotes/origin/branch-name
         // 或者简单的 git checkout branch-name (如果 fetch 过，git 会自动建立追踪)
-        runGitCommand(QStringList() << "checkout" << "-b" << branchName << "--track" << branch);
-        onGitRefreshBranchesClicked(); // 刷新列表以变为黑色
+        if (runGitCommand(QStringList() << "checkout" << "-b" << branchName << "--track" << branch)) {
+            onGitRefreshBranchesClicked(); // 刷新列表以变为黑色
+            maybePromptApplyMainAfterCheckout(branchName);
+        }
     }
 }
 
@@ -6919,10 +7295,11 @@ void MainWindow::onGitCheckoutClicked() {
        txtGitLog->append("<font color='red'>错误: 请先选择要切换的分支</font>");
        return;
     }
-    runGitCommand(QStringList() << "checkout" << branch);
-    // Refresh to show updated status (though current logic doesn't mark active branch in combobox explicitly other than selection)
-    onGitRefreshBranchesClicked();
-    onGitRefreshLogClicked();
+    if (runGitCommand(QStringList() << "checkout" << branch)) {
+        onGitRefreshBranchesClicked();
+        onGitRefreshLogClicked();
+        maybePromptApplyMainAfterCheckout(branch);
+    }
 }
 
 void MainWindow::onGitCreateBranchClicked() {
@@ -6936,16 +7313,14 @@ void MainWindow::onGitCreateBranchClicked() {
 
     branchName = branchName.trimmed();
     // 执行 git checkout -b <branchName>
-    runGitCommand(QStringList() << "checkout" << "-b" << branchName);
-    
-    // 刷新 UI
-    onGitRefreshBranchesClicked();
-    onGitRefreshLogClicked();
-    
-    // 将新分支设置为下拉框当前项
-    int index = cmbGitBranches->findText(branchName);
-    if (index >= 0) {
-        cmbGitBranches->setCurrentIndex(index);
+    if (runGitCommand(QStringList() << "checkout" << "-b" << branchName)) {
+        onGitRefreshBranchesClicked();
+        onGitRefreshLogClicked();
+        int index = cmbGitBranches->findText(branchName);
+        if (index >= 0) {
+            cmbGitBranches->setCurrentIndex(index);
+        }
+        maybePromptApplyMainAfterCheckout(branchName);
     }
 }
 
@@ -9250,6 +9625,7 @@ void MainWindow::onGitDirChanged() {
 void MainWindow::activateGitRepo(const QString &repoDir, bool fetchRemote) {
     if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
         refreshGitPendingStatusBar();
+        updateGitApplyMainFromMainUi();
         return;
     }
 
@@ -9265,10 +9641,12 @@ void MainWindow::activateGitRepo(const QString &repoDir, bool fetchRemote) {
 void MainWindow::onGitBranchSelectionChanged() {
     const QString repoDir = cmbGitDir->currentText().trimmed();
     if (repoDir.isEmpty() || !QDir(repoDir).exists()) {
+        updateGitApplyMainFromMainUi();
         return;
     }
     onGitRefreshLogClicked();
     updateGitGoalBranchHighlights();
+    updateGitApplyMainFromMainUi();
 }
 
 QString MainWindow::gitRepoAlias(const QString &repoDir) const {

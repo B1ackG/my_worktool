@@ -50,6 +50,16 @@ public:
     bool startDaemon();
     void stopDaemon();
     QList<DeviceInfo> refreshDeviceList() const;
+    DeviceInfo findRequiredPointerDevice() const;
+
+    static QString requiredPointerDisplayName();
+    static QString requiredPointerNameHint();
+    static bool nameMatchesRequiredPointer(const QString &name);
+    static bool isSideProfileBindingId(const QString &id);
+    static bool isHwheelProfileBindingId(const QString &id);
+
+    void ensureRequiredPointerProfileBindings();
+    bool syncRequiredPointerProfile(bool mxMasterPresent);
 
     bool isDaemonRunning() const;
     qint64 daemonPid() const;

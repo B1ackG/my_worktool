@@ -28,7 +28,7 @@ InputQuickerManager::InputQuickerManager(QObject *parent)
     , monitorProcess(new QProcess(this))
     , enabledValue(true)
     , daemonAutostartValue(true)
-    , wheel2AxisValue(QStringLiteral("REL_HWHEEL"))
+    , wheel2AxisValue(QStringLiteral("REL_HWHEEL_HI_RES"))
     , grabDeviceValue(false)
     , lastAppliedGrabDevice(false)
     , ownDaemonProcess(false)
@@ -63,6 +63,7 @@ void InputQuickerManager::loadSettings()
 {
     migrateLegacyConfigIfNeeded();
     readJsonConfig();
+    ensureRequiredPointerProfileBindings();
     // Treat loaded config as already applied so opening the UI does not
     // unnecessarily stop/restart a boot-started daemon.
     lastAppliedDevicePath = devicePathValue;
@@ -373,9 +374,9 @@ QList<InputQuickerManager::DeviceInfo> InputQuickerManager::refreshDeviceListFro
         DeviceInfo info;
         info.path = QStringLiteral("/dev/input/%1").arg(eventMatch.captured(0));
         info.name = name.isEmpty() ? info.path : name;
-        info.score = 1;
         info.accessible = QFileInfo::exists(info.path);
-        info.recommended = false;
+        info.recommended = handlers.contains(QLatin1String("mouse"));
+        info.score = info.recommended ? 50 : 1;
         devices.append(info);
         name.clear();
         handlers.clear();
@@ -397,6 +398,112 @@ QList<InputQuickerManager::DeviceInfo> InputQuickerManager::refreshDeviceListFro
     }
     flushDevice();
     return devices;
+}
+
+QString InputQuickerManager::requiredPointerDisplayName()
+{
+    return QStringLiteral("Logitech MX Master 3S");
+}
+
+QString InputQuickerManager::requiredPointerNameHint()
+{
+    return QStringLiteral("MX Master 3S");
+}
+
+bool InputQuickerManager::nameMatchesRequiredPointer(const QString &name)
+{
+    return name.contains(requiredPointerNameHint(), Qt::CaseInsensitive);
+}
+
+bool InputQuickerManager::isSideProfileBindingId(const QString &id)
+{
+    return id == QStringLiteral("default-side-prev")
+        || id == QStringLiteral("default-side-next");
+}
+
+bool InputQuickerManager::isHwheelProfileBindingId(const QString &id)
+{
+    return id == QStringLiteral("default-hwheel-prev")
+        || id == QStringLiteral("default-hwheel-next");
+}
+
+void InputQuickerManager::ensureRequiredPointerProfileBindings()
+{
+    const QList<QuickerBinding> defaults = defaultWorkspaceBindings();
+    bool changed = false;
+    for (const QuickerBinding &def : defaults) {
+        bool found = false;
+        for (int i = 0; i < bindingsValue.size(); ++i) {
+            if (bindingsValue.at(i).id != def.id) {
+                continue;
+            }
+            found = true;
+            if (isHwheelProfileBindingId(def.id)) {
+                const QString axis = bindingsValue.at(i).trigger.value(QStringLiteral("axis")).toString();
+                if (axis != QStringLiteral("REL_HWHEEL_HI_RES")) {
+                    bindingsValue[i].trigger = def.trigger;
+                    bindingsValue[i].action = def.action;
+                    changed = true;
+                }
+            }
+            break;
+        }
+        if (!found && !isTriggerUsed(def.trigger)) {
+            bindingsValue.append(def);
+            changed = true;
+        }
+    }
+    if (changed) {
+        emit bindingsChanged();
+    }
+}
+
+bool InputQuickerManager::syncRequiredPointerProfile(bool mxMasterPresent)
+{
+    ensureRequiredPointerProfileBindings();
+    bool changed = false;
+    for (QuickerBinding &binding : bindingsValue) {
+        if (isSideProfileBindingId(binding.id)) {
+            const bool want = !mxMasterPresent;
+            if (binding.enabled != want) {
+                binding.enabled = want;
+                changed = true;
+            }
+        } else if (isHwheelProfileBindingId(binding.id)) {
+            const bool want = mxMasterPresent;
+            if (binding.enabled != want) {
+                binding.enabled = want;
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        emit bindingsChanged();
+    }
+    return changed;
+}
+
+InputQuickerManager::DeviceInfo InputQuickerManager::findRequiredPointerDevice() const
+{
+    DeviceInfo best;
+    int bestRank = -1;
+    for (const DeviceInfo &info : refreshDeviceListFromProc()) {
+        if (!nameMatchesRequiredPointer(info.name)) {
+            continue;
+        }
+        int rank = info.score;
+        if (info.recommended) {
+            rank += 100;
+        }
+        if (info.accessible) {
+            rank += 10;
+        }
+        if (rank > bestRank) {
+            bestRank = rank;
+            best = info;
+        }
+    }
+    return best;
 }
 
 QList<InputQuickerManager::DeviceInfo> InputQuickerManager::refreshDeviceList() const
@@ -698,7 +805,7 @@ void InputQuickerManager::setDeviceName(const QString &name)
 
 void InputQuickerManager::setWheel2Axis(const QString &axis)
 {
-    wheel2AxisValue = axis.isEmpty() ? QStringLiteral("REL_HWHEEL") : axis;
+    wheel2AxisValue = axis.isEmpty() ? QStringLiteral("REL_HWHEEL_HI_RES") : axis;
 }
 
 void InputQuickerManager::setGrabDevice(bool grab)
@@ -792,11 +899,11 @@ QList<QuickerBinding> InputQuickerManager::defaultWorkspaceBindings() const
     QList<QuickerBinding> defaults;
 
     auto makeBinding = [](const QString &id, const QString &name, const QJsonObject &trigger,
-                          const QString &preset) {
+                          const QString &preset, bool enabled) {
         QuickerBinding binding;
         binding.id = id;
         binding.name = name;
-        binding.enabled = true;
+        binding.enabled = enabled;
         binding.trigger = trigger;
         binding.action = QJsonObject{
             {QStringLiteral("type"), QStringLiteral("preset")},
@@ -807,33 +914,37 @@ QList<QuickerBinding> InputQuickerManager::defaultWorkspaceBindings() const
 
     defaults.append(makeBinding(
         QStringLiteral("default-side-prev"),
-        QStringLiteral("上一工作区"),
+        QStringLiteral("侧键上一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
                     {QStringLiteral("code"), QStringLiteral("BTN_SIDE")}},
-        QStringLiteral("workspace_prev")));
+        QStringLiteral("workspace_prev"),
+        true));
 
     defaults.append(makeBinding(
         QStringLiteral("default-side-next"),
-        QStringLiteral("下一工作区"),
+        QStringLiteral("侧键下一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
                     {QStringLiteral("code"), QStringLiteral("BTN_EXTRA")}},
-        QStringLiteral("workspace_next")));
+        QStringLiteral("workspace_next"),
+        true));
 
     defaults.append(makeBinding(
         QStringLiteral("default-hwheel-prev"),
-        QStringLiteral("第二滚轮上一工作区"),
+        QStringLiteral("横向滚轮上一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("wheel")},
-                    {QStringLiteral("axis"), wheel2AxisValue},
+                    {QStringLiteral("axis"), QStringLiteral("REL_HWHEEL_HI_RES")},
                     {QStringLiteral("direction"), QStringLiteral("negative")}},
-        QStringLiteral("workspace_prev")));
+        QStringLiteral("workspace_prev"),
+        false));
 
     defaults.append(makeBinding(
         QStringLiteral("default-hwheel-next"),
-        QStringLiteral("第二滚轮下一工作区"),
+        QStringLiteral("横向滚轮下一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("wheel")},
-                    {QStringLiteral("axis"), wheel2AxisValue},
+                    {QStringLiteral("axis"), QStringLiteral("REL_HWHEEL_HI_RES")},
                     {QStringLiteral("direction"), QStringLiteral("positive")}},
-        QStringLiteral("workspace_next")));
+        QStringLiteral("workspace_next"),
+        false));
 
     return defaults;
 }
@@ -1038,18 +1149,26 @@ void InputQuickerManager::readJsonConfig()
     QFile file(configFilePath());
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         bindingsValue = defaultWorkspaceBindings();
+        deviceNameValue = requiredPointerDisplayName();
+        devicePathValue.clear();
         return;
     }
 
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
     if (!doc.isObject()) {
         bindingsValue = defaultWorkspaceBindings();
+        deviceNameValue = requiredPointerDisplayName();
+        devicePathValue.clear();
         return;
     }
 
     const QJsonObject root = doc.object();
     devicePathValue = root.value(QStringLiteral("devicePath")).toString();
     deviceNameValue = root.value(QStringLiteral("deviceName")).toString();
+    if (!nameMatchesRequiredPointer(deviceNameValue)) {
+        deviceNameValue = requiredPointerDisplayName();
+        devicePathValue.clear();
+    }
     wheel2AxisValue = root.value(QStringLiteral("wheel2Axis")).toString(QStringLiteral("REL_HWHEEL"));
     enabledValue = root.value(QStringLiteral("enabled")).toBool(true);
     daemonAutostartValue = root.value(QStringLiteral("daemonAutostart")).toBool(true);
