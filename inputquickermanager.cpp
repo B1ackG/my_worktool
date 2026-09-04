@@ -438,13 +438,13 @@ void InputQuickerManager::ensureRequiredPointerProfileBindings()
                 continue;
             }
             found = true;
-            if (isHwheelProfileBindingId(def.id)) {
-                const QString axis = bindingsValue.at(i).trigger.value(QStringLiteral("axis")).toString();
-                if (axis != QStringLiteral("REL_HWHEEL_HI_RES")) {
-                    bindingsValue[i].trigger = def.trigger;
-                    bindingsValue[i].action = def.action;
-                    changed = true;
-                }
+            if (bindingsValue.at(i).trigger != def.trigger
+                || bindingsValue.at(i).action != def.action
+                || bindingsValue.at(i).name != def.name) {
+                bindingsValue[i].trigger = def.trigger;
+                bindingsValue[i].action = def.action;
+                bindingsValue[i].name = def.name;
+                changed = true;
             }
             break;
         }
@@ -916,7 +916,7 @@ QList<QuickerBinding> InputQuickerManager::defaultWorkspaceBindings() const
         QStringLiteral("default-side-prev"),
         QStringLiteral("侧键上一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
-                    {QStringLiteral("code"), QStringLiteral("BTN_SIDE")}},
+                    {QStringLiteral("code"), QStringLiteral("BTN_EXTRA")}},
         QStringLiteral("workspace_prev"),
         true));
 
@@ -924,7 +924,7 @@ QList<QuickerBinding> InputQuickerManager::defaultWorkspaceBindings() const
         QStringLiteral("default-side-next"),
         QStringLiteral("侧键下一工作区"),
         QJsonObject{{QStringLiteral("type"), QStringLiteral("mouse_button")},
-                    {QStringLiteral("code"), QStringLiteral("BTN_EXTRA")}},
+                    {QStringLiteral("code"), QStringLiteral("BTN_SIDE")}},
         QStringLiteral("workspace_next"),
         true));
 

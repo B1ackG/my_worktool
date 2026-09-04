@@ -177,14 +177,14 @@ def default_config() -> dict[str, Any]:
                 "id": "default-side-prev",
                 "name": "侧键上一工作区",
                 "enabled": True,
-                "trigger": {"type": "mouse_button", "code": "BTN_SIDE"},
+                "trigger": {"type": "mouse_button", "code": "BTN_EXTRA"},
                 "action": {"type": "preset", "preset": "workspace_prev"},
             },
             {
                 "id": "default-side-next",
                 "name": "侧键下一工作区",
                 "enabled": True,
-                "trigger": {"type": "mouse_button", "code": "BTN_EXTRA"},
+                "trigger": {"type": "mouse_button", "code": "BTN_SIDE"},
                 "action": {"type": "preset", "preset": "workspace_next"},
             },
             {
@@ -311,17 +311,15 @@ def ensure_profile_bindings(config: dict[str, Any]) -> bool:
             by_id[spec_id] = len(bindings) - 1
             changed = True
             continue
-        if spec_id not in HWHEEL_PROFILE_IDS:
-            continue
-        trigger = bindings[index].setdefault("trigger", {})
-        if not isinstance(trigger, dict):
-            bindings[index]["trigger"] = dict(spec["trigger"])
+        item = bindings[index]
+        if item.get("trigger") != spec["trigger"]:
+            item["trigger"] = json.loads(json.dumps(spec["trigger"]))
             changed = True
-            continue
-        if trigger.get("axis") != "REL_HWHEEL_HI_RES" or trigger.get("type") != "wheel":
-            trigger["type"] = "wheel"
-            trigger["axis"] = "REL_HWHEEL_HI_RES"
-            trigger["direction"] = spec["trigger"]["direction"]
+        if item.get("action") != spec["action"]:
+            item["action"] = json.loads(json.dumps(spec["action"]))
+            changed = True
+        if item.get("name") != spec["name"]:
+            item["name"] = spec["name"]
             changed = True
     return changed
 
