@@ -16,6 +16,7 @@
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QAbstractItemView>
 #include <QEvent>
 #include <QFrame>
 #include <QInputDialog>
@@ -43,6 +44,7 @@
 #include <QAction>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QSessionManager>
 #include <QNetworkInterface>
 #include <QDateEdit>
 #include <QDialog>
@@ -729,6 +731,9 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     createConnections();
     setupSystemTray();
+    connect(qApp, &QGuiApplication::commitDataRequest,
+            this, &MainWindow::onCommitDataRequest,
+            Qt::DirectConnection);
 
     // Load History
     loadConnectionHistory();
@@ -1105,19 +1110,19 @@ void MainWindow::createWidgets()
     lblGitMainAheadHint->setStyleSheet(QStringLiteral("color: #e65100; font-weight: bold;"));
 
     cmbGitBranches = new QComboBox();
+    cmbGitBranches->setToolTip(
+        QStringLiteral("用于 merge / rebase / 删除的目标分支。双击可切换到该分支；远程分支会跟踪签出。"));
     btnGitRefreshBranches = new QPushButton("刷新分支");
-    btnGitCheckout = new QPushButton("切换分支");
     btnGitApplyMainOntoFeature = new QPushButton(QStringLiteral("同步主分支修改"));
     btnGitApplyMainOntoFeature->setToolTip(
-        QStringLiteral("检测主分支相对所选功能分支多出来的提交，一键 rebase 到该功能分支（单人仓库）"));
+        QStringLiteral("把主分支上尚未包含的提交 rebase 进所选功能分支（单人仓库）。"
+                       "与「智能同步」（跟 origin 对齐）不是同一操作。"));
     btnGitApplyMainOntoFeature->setEnabled(false);
-    btnGitQuickBranchSwitch = new QPushButton(QStringLiteral("快速切换…"));
+    btnGitQuickBranchSwitch = new QPushButton(QStringLiteral("切换分支…"));
     btnGitQuickBranchSwitch->setToolTip(
-        QStringLiteral("可搜索本地/远程分支，并显示最近提交信息，一键切换"));
+        QStringLiteral("可搜索本地/远程分支并一键切换；远程分支会自动跟踪签出。"
+                       "目标下拉框用于 merge/rebase/删除，双击也可切换。"));
     btnGitQuickBranchSwitch->setStyleSheet(QStringLiteral("background-color: #e8eaf6; font-weight: bold;"));
-    btnGitSyncRemote = new QPushButton("同步远程");
-    btnGitSyncRemote->setToolTip("将选中的远程分支同步并签出到本地");
-    btnGitSyncRemote->setStyleSheet("background-color: #e3f2fd; font-weight: bold;");
     btnGitCreateBranch = new QPushButton("创建分支");
     btnGitDeleteBranch = new QPushButton("删除分支");
     
@@ -1137,23 +1142,22 @@ void MainWindow::createWidgets()
     cmbGitRemote->addItem("origin");
     cmbGitRemote->setEditable(true); // Allow custom remotes
     
-    btnGitAdd = new QPushButton("git add . (暂存全部)");
-    btnGitCommit = new QPushButton("git commit (提交)");
+    btnGitCommit = new QPushButton(QStringLiteral("暂存并提交"));
+    btnGitCommit->setToolTip(
+        QStringLiteral("有未暂存改动时先打开审查对话框，确认后再 commit；已全部暂存则直接提交。"));
+    btnGitCommit->setStyleSheet(QStringLiteral("background-color: #e8f5e9; font-weight: bold;"));
     btnGitPush = new QPushButton("git push (推送)");
-    btnGitPull = new QPushButton("git pull (拉取)");
     btnGitSmartSync = new QPushButton(QStringLiteral("智能同步"));
     btnGitSmartSync->setToolTip(
-        QStringLiteral("有本地修改时先 stash，再 pull --rebase，然后 stash pop，最后 push。"
+        QStringLiteral("日常跟远程对齐：有本地修改时先 stash，再 pull --rebase，然后 stash pop，最后 push。"
                        "成功只写日志；失败时弹窗。用于处理偏离分支 / non-fast-forward。"));
     btnGitSmartSync->setStyleSheet(QStringLiteral("background-color: #c8e6c9; font-weight: bold;"));
-    btnGitMerge = new QPushButton("git merge (合并)");
-    btnGitRebase = new QPushButton("git rebase (变基)");
-    btnGitRebase->setToolTip("将当前分支的提交重新应用到所选分支之上（会改写当前分支历史）");
-    btnGitRebase->setStyleSheet("background-color: #fff8e1; font-weight: bold;");
     btnGitStatus = new QPushButton("git status (状态)");
     btnGitDiff = new QPushButton("git diff (差异)");
     btnGitDiff->setToolTip("显示工作区与暂存区的差异");
-    btnGitFetch = new QPushButton("git fetch --prune (同步远端)");
+    btnGitFetch = new QPushButton(QStringLiteral("刷新远端"));
+    btnGitFetch->setToolTip(
+        QStringLiteral("git fetch --prune：只更新远程引用，不改工作区。日常跟远程对齐请用「智能同步」。"));
     chkGitAutoFetch = new QCheckBox(QStringLiteral("换仓库时自动 fetch"));
     chkGitAutoFetch->setChecked(false);
     chkGitAutoFetch->setToolTip(QStringLiteral("开启后，切换记忆路径时会自动执行 git fetch。代理异常时建议关闭。"));
@@ -1192,6 +1196,37 @@ void MainWindow::createWidgets()
         btnGitStash->setMenu(stashMenu);
     }
     btnGitStashPop = nullptr; // 已并入 Stash 菜单
+    btnGitMoreOps = new QPushButton(QStringLiteral("更多操作 ▾"));
+    btnGitMoreOps->setToolTip(
+        QStringLiteral("仅暂存、merge-pull、merge/rebase、远程链接与协议"));
+    {
+        auto *moreMenu = new QMenu(btnGitMoreOps);
+        auto *actStageOnly = moreMenu->addAction(QStringLiteral("仅暂存（审查）"),
+                                                 this, &MainWindow::onGitAddClicked);
+        actStageOnly->setToolTip(QStringLiteral("打开暂存审查，只 git add，不 commit。"));
+        actGitPull = moreMenu->addAction(QStringLiteral("git pull（合并拉取）"),
+                                         this, &MainWindow::onGitPullClicked);
+        actGitPull->setToolTip(
+            QStringLiteral("当前分支 merge-pull，不 stash、不 push。日常请用「智能同步」。"));
+        moreMenu->addSeparator();
+        auto *actMerge = moreMenu->addAction(QStringLiteral("git merge（合并目标分支）"),
+                                             this, &MainWindow::onGitMergeClicked);
+        actMerge->setToolTip(
+            QStringLiteral("把目标下拉框中的分支合并进当前分支。"
+                           "日常把主分支改动合进功能分支请用「同步主分支修改」。"));
+        auto *actRebase = moreMenu->addAction(QStringLiteral("git rebase（变基到目标分支）"),
+                                              this, &MainWindow::onGitRebaseClicked);
+        actRebase->setToolTip(
+            QStringLiteral("把当前分支的提交变基到目标分支之上（会改写历史）。"
+                           "日常把主分支合进功能分支请用「同步主分支修改」。"));
+        moreMenu->addSeparator();
+        moreMenu->addAction(QStringLiteral("链接远程仓库"), this, &MainWindow::onGitRemoteAddClicked);
+        actGitRemoteProtocol = moreMenu->addAction(QStringLiteral("切换 SSH/HTTPS"),
+                                                   this, &MainWindow::onGitRemoteProtocolClicked);
+        actGitRemoteProtocol->setToolTip(
+            QStringLiteral("将当前远程 URL 在 SSH 与 HTTPS 之间切换，并可测试连通性"));
+        btnGitMoreOps->setMenu(moreMenu);
+    }
     btnGitAutoDiffReminder = new QPushButton(QStringLiteral("开启可执行文件提醒"));
     btnGitAutoDiffReminder->setCheckable(true);
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
@@ -1204,14 +1239,6 @@ void MainWindow::createWidgets()
     spinGitDiffIntervalMinutes->setValue(5);
     spinGitDiffIntervalMinutes->setSuffix(" 分钟");
     spinGitDiffIntervalMinutes->setToolTip(QStringLiteral("可执行文件更新检查间隔"));
-
-    btnGitRemoteAdd = new QPushButton("链接远程仓库");
-    btnGitRemoteAdd->setToolTip("为本地目录添加远程仓库链接 (git remote add)");
-    btnGitRemoteAdd->setStyleSheet("background-color: #e8f5e9; font-weight: bold;"); // 浅绿色
-    btnGitRemoteProtocol = new QPushButton(QStringLiteral("切换 SSH/HTTPS"));
-    btnGitRemoteProtocol->setToolTip(
-        QStringLiteral("将当前远程 URL 在 SSH 与 HTTPS 之间切换，并可测试连通性"));
-    btnGitRemoteProtocol->setStyleSheet(QStringLiteral("background-color: #e0f7fa; font-weight: bold;"));
 
     cmbGitHistory = new QComboBox();
     btnGitRefreshLog = new QPushButton("刷新历史");
@@ -1538,9 +1565,7 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layBranchBtns = new QHBoxLayout();
     layBranchBtns->addWidget(btnGitRefreshBranches);
     layBranchBtns->addWidget(btnGitQuickBranchSwitch);
-    layBranchBtns->addWidget(btnGitCheckout);
     layBranchBtns->addWidget(btnGitApplyMainOntoFeature);
-    layBranchBtns->addWidget(btnGitSyncRemote);
     layBranchBtns->addWidget(btnGitCreateBranch);
     layBranchBtns->addWidget(btnGitDeleteBranch);
     layBranchBtns->addStretch();
@@ -1557,24 +1582,18 @@ QWidget* MainWindow::createGitPage()
     QGridLayout *layBtns = new QGridLayout();
     layBtns->setHorizontalSpacing(6);
     layBtns->setVerticalSpacing(6);
-    layBtns->addWidget(btnGitAdd, 0, 0);
-    layBtns->addWidget(btnGitCommit, 0, 1);
-    layBtns->addWidget(btnGitStatus, 0, 2);
-    layBtns->addWidget(btnGitDiff, 0, 3);
+    layBtns->addWidget(btnGitCommit, 0, 0);
+    layBtns->addWidget(btnGitStatus, 0, 1);
+    layBtns->addWidget(btnGitDiff, 0, 2);
+    layBtns->addWidget(btnGitMoreOps, 0, 3);
 
     layBtns->addWidget(btnGitFetch, 1, 0);
     layBtns->addWidget(btnGitPush, 1, 1);
-    layBtns->addWidget(btnGitPull, 1, 2);
-    layBtns->addWidget(btnGitSmartSync, 1, 3);
+    layBtns->addWidget(btnGitSmartSync, 1, 2);
 
     layBtns->addWidget(new QLabel("远程仓库:"), 2, 0);
     layBtns->addWidget(cmbGitRemote, 2, 1);
-    layBtns->addWidget(btnGitMerge, 2, 2);
-    layBtns->addWidget(btnGitRebase, 2, 3);
-
-    layBtns->addWidget(btnGitStash, 3, 0);
-    layBtns->addWidget(btnGitRemoteAdd, 3, 1);
-    layBtns->addWidget(btnGitRemoteProtocol, 3, 2);
+    layBtns->addWidget(btnGitStash, 2, 2);
     layOps->addLayout(layBtns);
 
     QHBoxLayout *layReminder = new QHBoxLayout();
@@ -2365,6 +2384,22 @@ void MainWindow::quitApplication()
     close();
 }
 
+bool MainWindow::isSessionEnding() const
+{
+    return sessionShutdown || qApp->isSavingSession();
+}
+
+void MainWindow::onCommitDataRequest(QSessionManager &manager)
+{
+    Q_UNUSED(manager);
+    sessionShutdown = true;
+    tryAutoSaveDailyReport();
+    if (trayIcon)
+        trayIcon->hide();
+    if (!isVisible())
+        QApplication::quit();
+}
+
 bool MainWindow::promptCloseBehavior(CloseBehavior *chosenOut)
 {
     QMessageBox box(this);
@@ -2598,6 +2633,11 @@ void MainWindow::createConnections()
     });
     connect(cmbGitDir, &QComboBox::currentTextChanged, this, &MainWindow::onGitDirChanged);
     connect(cmbGitBranches, &QComboBox::currentTextChanged, this, &MainWindow::onGitBranchSelectionChanged);
+    cmbGitBranches->installEventFilter(this);
+    if (cmbGitBranches->view()) {
+        connect(cmbGitBranches->view(), &QAbstractItemView::doubleClicked, this,
+                [this](const QModelIndex &) { onGitCheckoutClicked(); });
+    }
     connect(btnGitGoalAdd, &QPushButton::clicked, this, &MainWindow::onGitGoalAddClicked);
     connect(btnGitGoalEdit, &QPushButton::clicked, this, &MainWindow::onGitGoalEditClicked);
     connect(btnGitGoalDelete, &QPushButton::clicked, this, &MainWindow::onGitGoalDeleteClicked);
@@ -2607,24 +2647,16 @@ void MainWindow::createConnections()
         onGitRefreshBranchesClicked(false);
     });
     connect(btnGitQuickBranchSwitch, &QPushButton::clicked, this, &MainWindow::onGitQuickBranchSwitchClicked);
-    connect(btnGitCheckout, &QPushButton::clicked, this, &MainWindow::onGitCheckoutClicked);
     connect(btnGitApplyMainOntoFeature, &QPushButton::clicked, this,
             &MainWindow::onGitApplyMainOntoFeatureClicked);
-    connect(btnGitSyncRemote, &QPushButton::clicked, this, &MainWindow::onGitSyncRemoteClicked);
     connect(btnGitCreateBranch, &QPushButton::clicked, this, &MainWindow::onGitCreateBranchClicked);
     connect(btnGitDeleteBranch, &QPushButton::clicked, this, &MainWindow::onGitDeleteBranchClicked);
-    connect(btnGitAdd, &QPushButton::clicked, this, &MainWindow::onGitAddClicked);
     connect(btnGitCommit, &QPushButton::clicked, this, &MainWindow::onGitCommitClicked);
     connect(btnGitAiCommitMsg, &QPushButton::clicked, this, &MainWindow::onGitAiCommitMsgClicked);
     connect(btnGitAskDeepSeek, &QPushButton::clicked, this, &MainWindow::onGitAskDeepSeekClicked);
     connect(btnGitPush, &QPushButton::clicked, this, &MainWindow::onGitPushClicked);
-    connect(btnGitPull, &QPushButton::clicked, this, &MainWindow::onGitPullClicked);
     connect(btnGitSmartSync, &QPushButton::clicked, this, &MainWindow::onGitSmartSyncClicked);
-    connect(btnGitMerge, &QPushButton::clicked, this, &MainWindow::onGitMergeClicked);
-    connect(btnGitRebase, &QPushButton::clicked, this, &MainWindow::onGitRebaseClicked);
     connect(btnGitStatus, &QPushButton::clicked, this, &MainWindow::onGitStatusClicked);
-    connect(btnGitRemoteAdd, &QPushButton::clicked, this, &MainWindow::onGitRemoteAddClicked);
-    connect(btnGitRemoteProtocol, &QPushButton::clicked, this, &MainWindow::onGitRemoteProtocolClicked);
     connect(btnGitRefreshLog, &QPushButton::clicked, this, &MainWindow::onGitRefreshLogClicked);
     connect(btnGitDiff, &QPushButton::clicked, this, &MainWindow::onGitDiffClicked);
     connect(btnGitFetch, &QPushButton::clicked, this, &MainWindow::onGitFetchClicked);
@@ -2640,7 +2672,7 @@ void MainWindow::createConnections()
         connect(gitPendingBlinkTimer, &QTimer::timeout, this, &MainWindow::onGitPendingBlinkTick);
     }
     connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
-    // Stash actions are wired via btnGitStash->menu()
+    // Stash / 更多操作 are wired via button menus
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
     connect(btnGitExeReminderCheckNow, &QPushButton::clicked, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
@@ -5244,6 +5276,13 @@ void MainWindow::onGitConsoleCommandSubmitted()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == cmbGitBranches && event && event->type() == QEvent::MouseButtonDblClick) {
+        const auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() == Qt::LeftButton) {
+            onGitCheckoutClicked();
+            return true;
+        }
+    }
     if (watched == lblGitPendingStatus && event
         && event->type() == QEvent::MouseButtonRelease) {
         const auto *me = static_cast<QMouseEvent *>(event);
@@ -5608,9 +5647,9 @@ void MainWindow::setGitNetworkBusy(bool busy, const QString &statusText)
     const bool enableNetBtns = !busy;
     if (btnGitFetch) btnGitFetch->setEnabled(enableNetBtns);
     if (btnGitPush) btnGitPush->setEnabled(enableNetBtns);
-    if (btnGitPull) btnGitPull->setEnabled(enableNetBtns);
+    if (actGitPull) actGitPull->setEnabled(enableNetBtns);
     if (btnGitSmartSync) btnGitSmartSync->setEnabled(enableNetBtns);
-    if (btnGitRemoteProtocol) btnGitRemoteProtocol->setEnabled(enableNetBtns);
+    if (actGitRemoteProtocol) actGitRemoteProtocol->setEnabled(enableNetBtns);
 }
 
 void MainWindow::onGitCancelNetworkClicked()
@@ -5794,6 +5833,31 @@ bool MainWindow::gitHasUncommittedChanges(const QString &workDir) const {
 
     const QString output = PlatformPrefs::decodeProcessOutput(process.readAllStandardOutput()).trimmed();
     return !output.isEmpty();
+}
+
+bool MainWindow::gitHasUnstagedChanges(const QString &workDir) const
+{
+    if (workDir.trimmed().isEmpty())
+        return false;
+
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+    process.start(PlatformPrefs::gitBinary(),
+                  QStringList() << QStringLiteral("status") << QStringLiteral("--porcelain"));
+    if (!finishGitProcess(process, 15000) || process.exitCode() != 0)
+        return false;
+
+    const QString output = PlatformPrefs::decodeProcessOutput(process.readAllStandardOutput());
+    const QStringList lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        if (line.size() < 2)
+            continue;
+        if (line.startsWith(QLatin1String("??")))
+            return true;
+        if (line.at(1) != QLatin1Char(' '))
+            return true;
+    }
+    return false;
 }
 
 bool MainWindow::gitStageWithReview(const QString &workDir)
@@ -6420,6 +6484,17 @@ void MainWindow::pullAllRemoteAheadRepos(const QStringList &repoDirs)
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    const bool sessionEnding = isSessionEnding();
+    if (sessionEnding) {
+        tryAutoSaveDailyReport();
+        if (trayIcon)
+            trayIcon->hide();
+        forceQuit = true;
+        QMainWindow::closeEvent(event);
+        QApplication::quit();
+        return;
+    }
+
     if (!forceQuit) {
         CloseBehavior behavior = closeBehavior();
         if (behavior == CloseBehavior::Ask) {
@@ -6812,7 +6887,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     QString pathError;
     const QString workDir = currentGitWorkDir(&pathError);
     if (workDir.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("快速切换"),
+        QMessageBox::warning(this, QStringLiteral("切换分支"),
                              pathError.isEmpty() ? QStringLiteral("请先选择 Git 仓库目录。") : pathError);
         return;
     }
@@ -6827,7 +6902,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
                                  "--format=%(refname)\t%(refname:short)\t%(objectname:short)\t%(contents:subject)")
                           << QStringLiteral("refs/heads/") << QStringLiteral("refs/remotes/"),
             &out, &err)) {
-        QMessageBox::warning(this, QStringLiteral("快速切换"),
+        QMessageBox::warning(this, QStringLiteral("切换分支"),
                              QStringLiteral("无法读取分支列表。\n%1").arg(err.trimmed()));
         return;
     }
@@ -6859,12 +6934,12 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     }
 
     if (rows.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("快速切换"), QStringLiteral("没有可切换的分支。"));
+        QMessageBox::information(this, QStringLiteral("切换分支"), QStringLiteral("没有可切换的分支。"));
         return;
     }
 
     QDialog dlg(this);
-    dlg.setWindowTitle(QStringLiteral("快速切换分支"));
+    dlg.setWindowTitle(QStringLiteral("切换分支"));
     dlg.resize(640, 420);
     auto *layout = new QVBoxLayout(&dlg);
     auto *filter = new QLineEdit(&dlg);
@@ -6920,7 +6995,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
         return;
     }
     if (branch == current) {
-        QMessageBox::information(this, QStringLiteral("快速切换"),
+        QMessageBox::information(this, QStringLiteral("切换分支"),
                                  QStringLiteral("已经在分支 [%1] 上。").arg(current));
         return;
     }
@@ -6928,7 +7003,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     if (isRemote) {
         const int slash = branch.indexOf(QLatin1Char('/'));
         if (slash <= 0 || slash + 1 >= branch.size()) {
-            QMessageBox::warning(this, QStringLiteral("快速切换"),
+            QMessageBox::warning(this, QStringLiteral("切换分支"),
                                  QStringLiteral("无法解析远程分支名: %1").arg(branch));
             return;
         }
@@ -6945,7 +7020,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
         } else {
             if (!runGitCommand(QStringList() << QStringLiteral("checkout") << QStringLiteral("-b")
                                              << localName << QStringLiteral("--track") << branch)) {
-                QMessageBox::warning(this, QStringLiteral("快速切换"),
+                QMessageBox::warning(this, QStringLiteral("切换分支"),
                                      QStringLiteral("跟踪签出远程分支失败，请查看日志。"));
                 return;
             }
@@ -6956,7 +7031,7 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     }
 
     if (!runGitCommand(QStringList() << QStringLiteral("checkout") << branch)) {
-        QMessageBox::warning(this, QStringLiteral("快速切换"),
+        QMessageBox::warning(this, QStringLiteral("切换分支"),
                              QStringLiteral("切换失败（可能有未提交修改）。可用「智能同步」或 Stash 后再试。"));
         return;
     }
@@ -7250,52 +7325,42 @@ void MainWindow::onGitAutoDiffReminderTick()
     onGitAiCommitMsgClicked();
 }
 
-void MainWindow::onGitSyncRemoteClicked() {
-    QString branch = cmbGitBranches->currentText().trimmed();
-    if (branch.isEmpty()) return;
-
-    if (!branch.startsWith("remotes/")) {
-        QMessageBox::information(this, "提示", "该分支已在本地或不是远程分支标识，请直接使用'切换分支'。");
-        return;
-    }
-
-    // 从 remotes/origin/branch-name 提取 branch-name
-    // 通常格式是 remotes/[remote-name]/[branch-name]
-    QStringList parts = branch.split('/');
-    if (parts.size() < 3) {
-        QMessageBox::critical(this, "错误", "无法解析远程分支路径: " + branch);
-        return;
-    }
-
-    // 重新拼接真正的分支名 (处理分支名中包含 / 的情况)
-    QString branchName = parts.mid(2).join('/');
-    
-    QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "确认同步", 
-                                  QString("确定要将远程分支 '%1' 同步到本地并签出吗?").arg(branchName),
-                                  QMessageBox::Yes|QMessageBox::No);
-    
-    if (reply == QMessageBox::Yes) {
-        // 执行 git checkout -b branch-name --track remotes/origin/branch-name
-        // 或者简单的 git checkout branch-name (如果 fetch 过，git 会自动建立追踪)
-        if (runGitCommand(QStringList() << "checkout" << "-b" << branchName << "--track" << branch)) {
-            onGitRefreshBranchesClicked(); // 刷新列表以变为黑色
-            maybePromptApplyMainAfterCheckout(branchName);
-        }
-    }
-}
-
 void MainWindow::onGitCheckoutClicked() {
     QString branch = cmbGitBranches->currentText().trimmed();
-    if (branch.startsWith("+ ")) {
+    if (branch.startsWith(QStringLiteral("+ "))) {
         branch = branch.mid(2).trimmed();
     }
-    
+
     if (branch.isEmpty()) {
-       txtGitLog->append("<font color='red'>错误: 请先选择要切换的分支</font>");
-       return;
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择要切换的分支</font>"));
+        return;
     }
-    if (runGitCommand(QStringList() << "checkout" << branch)) {
+
+    if (branch.startsWith(QStringLiteral("remotes/"))) {
+        QStringList parts = branch.split(QLatin1Char('/'));
+        if (parts.size() < 3) {
+            QMessageBox::critical(this, QStringLiteral("错误"),
+                                  QStringLiteral("无法解析远程分支路径: ") + branch);
+            return;
+        }
+
+        const QString branchName = parts.mid(2).join(QLatin1Char('/'));
+        const auto reply = QMessageBox::question(
+            this, QStringLiteral("确认同步"),
+            QStringLiteral("确定要将远程分支 '%1' 同步到本地并签出吗?").arg(branchName),
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes)
+            return;
+
+        if (runGitCommand(QStringList() << QStringLiteral("checkout") << QStringLiteral("-b")
+                                        << branchName << QStringLiteral("--track") << branch)) {
+            onGitRefreshBranchesClicked();
+            maybePromptApplyMainAfterCheckout(branchName);
+        }
+        return;
+    }
+
+    if (runGitCommand(QStringList() << QStringLiteral("checkout") << branch)) {
         onGitRefreshBranchesClicked();
         onGitRefreshLogClicked();
         maybePromptApplyMainAfterCheckout(branch);
@@ -7588,6 +7653,16 @@ void MainWindow::onGitCommitClicked() {
     }
 
     const QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='red'>错误: 请先选择Git仓库目录!</font>"));
+        return;
+    }
+
+    if (gitHasUnstagedChanges(workDir)) {
+        if (!gitStageWithReview(workDir))
+            return;
+    }
+
     QStringList blocked;
     if (gitStagedHasBlockedPaths(workDir, &blocked)) {
         const auto reply = QMessageBox::question(

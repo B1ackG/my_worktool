@@ -195,7 +195,6 @@ private slots:
     void onGitPendingTrayMessageClicked();
     void onGitCheckoutClicked();
     void onGitApplyMainOntoFeatureClicked();
-    void onGitSyncRemoteClicked();   // 新增：同步远程分支到本地
     void onGitCreateBranchClicked(); // 新增：创建新分支
     void onGitDeleteBranchClicked(); // 新增：删除分支
     void onGitAddClicked();
@@ -303,6 +302,8 @@ private:
     CloseBehavior closeBehavior() const;
     void setCloseBehavior(CloseBehavior behavior);
     bool promptCloseBehavior(CloseBehavior *chosenOut);
+    void onCommitDataRequest(class QSessionManager &manager);
+    bool isSessionEnding() const;
     void minimizeToTray();
     void restoreFromTray();
     
@@ -321,6 +322,7 @@ private:
     QAction *actDeepSeekSettings = nullptr;
     QSystemTrayIcon *trayIcon = nullptr;
     bool forceQuit = false;
+    bool sessionShutdown = false;
     QWidget *centralWidget;
     QHBoxLayout *mainLayout; // Horizontal: Nav + Stack
     QListWidget *navWidget;
@@ -454,10 +456,8 @@ private:
     QLabel *lblGitMainAheadHint = nullptr;
     QComboBox *cmbGitBranches;
     QPushButton *btnGitRefreshBranches;
-    QPushButton *btnGitCheckout;
     QPushButton *btnGitApplyMainOntoFeature = nullptr;
     QPushButton *btnGitQuickBranchSwitch = nullptr;
-    QPushButton *btnGitSyncRemote;   // 同步远程分支
     QPushButton *btnGitCreateBranch; // 新增：创建分支按钮
     QPushButton *btnGitDeleteBranch; // 新增：删除分支按钮
     QLineEdit *txtGitCommitMsg;
@@ -467,17 +467,16 @@ private:
     DeepSeekClient *deepSeekHelpClient = nullptr;
     bool gitAiCommitPendingConfirm = false;
     bool scpTransferPendingAiCommit = false;
-    QPushButton *btnGitAdd;
     QPushButton *btnGitCommit;
     QPushButton *btnGitPush;
     QComboBox *cmbGitRemote; // Added for remote selection
-    QPushButton *btnGitPull;
     QPushButton *btnGitSmartSync = nullptr;
-    QPushButton *btnGitMerge;
-    QPushButton *btnGitRebase;
     QPushButton *btnGitStatus;
     QPushButton *btnGitDiff;
     QPushButton *btnGitFetch;
+    QPushButton *btnGitMoreOps = nullptr;
+    QAction *actGitPull = nullptr;
+    QAction *actGitRemoteProtocol = nullptr;
     QCheckBox *chkGitAutoFetch = nullptr;
     QCheckBox *chkGitAutoPushAfterCommit = nullptr;
     QLabel *lblGitPendingStatus = nullptr;
@@ -494,8 +493,6 @@ private:
     QPushButton *btnGitAutoDiffReminder;
     QPushButton *btnGitExeReminderCheckNow = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
-    QPushButton *btnGitRemoteAdd; // 新增
-    QPushButton *btnGitRemoteProtocol = nullptr;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
     QPushButton *btnGitReset;
@@ -698,6 +695,8 @@ private:
     void maybeNotifyGitPendingTray(bool hasPending, const QString &body);
     void maybeAutoPushAfterCommit();
     bool gitHasUncommittedChanges(const QString &workDir) const;
+    /** Untracked or worktree-dirty (not fully staged). */
+    bool gitHasUnstagedChanges(const QString &workDir) const;
     /** Staging review gate: dialog + selective git add. Returns false if cancelled/refused. */
     bool gitStageWithReview(const QString &workDir);
     /** True if index contains blocked paths (e.g. *.log). */
