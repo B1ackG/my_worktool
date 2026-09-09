@@ -764,8 +764,9 @@ private:
     void loadGitDiffReminderSettings();
     void saveGitDiffReminderSettings();
     void applyGitDiffReminderEnabled(bool enabled);
-    /** Latest deployable executable under workDir. If allowRunningApp is false, skips the
-     *  currently running application binary (for SCP). Reminder should pass true. */
+    /** Latest aarch64 ELF executable under workDir. If allowRunningApp is false, skips the
+     *  currently running application binary (for SCP). Reminder should pass true so this
+     *  helper's own rebuild can still be detected even when it is not aarch64. */
     QFileInfo findLatestDeployExecutable(const QString &workDir, bool allowRunningApp = false) const;
     void rememberDeployExecutableBaseline(const QString &repoDir, const QFileInfo &fi);
     bool hasDeployExecutableBaseline(const QString &repoDir) const;

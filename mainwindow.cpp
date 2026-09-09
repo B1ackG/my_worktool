@@ -1263,6 +1263,7 @@ void MainWindow::createWidgets()
     txtScpPassword->setToolTip(QStringLiteral("明文显示，按目标地址记忆"));
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
+    btnScpTransfer->setToolTip(QStringLiteral("递归查找并传输最新的 aarch64 ELF 可执行文件"));
     
     btnRebootTarget = new QPushButton("重启目标");
     btnRebootTarget->setStyleSheet("background-color: #ffccbc; font-weight: bold; color: #d84315;");
@@ -7039,6 +7040,34 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     maybePromptApplyMainAfterCheckout(branch);
 }
 
+static bool isAarch64Elf(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray hdr = f.read(20);
+    if (hdr.size() < 20) {
+        return false;
+    }
+    const auto *b = reinterpret_cast<const unsigned char *>(hdr.constData());
+    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') {
+        return false;
+    }
+    if (b[4] != 2) { // ELFCLASS64
+        return false;
+    }
+    quint16 machine = 0;
+    if (b[5] == 1) { // ELFDATA2LSB
+        machine = quint16(b[18]) | (quint16(b[19]) << 8);
+    } else if (b[5] == 2) { // ELFDATA2MSB
+        machine = (quint16(b[18]) << 8) | quint16(b[19]);
+    } else {
+        return false;
+    }
+    return machine == 183; // EM_AARCH64
+}
+
 QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool allowRunningApp) const
 {
     if (workDir.trimmed().isEmpty() || !QDir(workDir).exists()) {
@@ -7048,9 +7077,7 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
     const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
 
     QFileInfo bestBin;
-    QFileInfo bestScript;
     QDateTime bestBinTime;
-    QDateTime bestScriptTime;
 
     QDirIterator it(workDir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
     while (it.hasNext()) {
@@ -7059,12 +7086,12 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
         const QString fileName = fileInfo.fileName();
         const QString absPath = fileInfo.absoluteFilePath();
 
+        const bool isSelf = !selfPath.isEmpty() && absPath == selfPath;
         // SCP must not pick the running helper; reminder must see rebuilds of this binary.
-        if (!allowRunningApp && !selfPath.isEmpty() && absPath == selfPath) {
+        if (isSelf && !allowRunningApp) {
             continue;
         }
 
-        // Skip obvious non-deploy paths
         const QString rel = QDir(workDir).relativeFilePath(absPath);
         if (rel.contains(QStringLiteral("/.venv/")) || rel.startsWith(QStringLiteral(".venv/"))
             || rel.contains(QStringLiteral("/.git/")) || rel.contains(QStringLiteral("/node_modules/"))) {
@@ -7074,28 +7101,22 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
         if (fileName.startsWith(QLatin1Char('.')) || fileName.endsWith(QStringLiteral(".so"))) {
             continue;
         }
-        // Allow extension-less binaries and *.sh; skip other dotted names (objects, images, …)
-        if (fileName.contains(QLatin1Char('.')) && !fileName.endsWith(QStringLiteral(".sh"))) {
+        // Extension-less binaries only (skip objects, images, scripts, …)
+        if (fileName.contains(QLatin1Char('.'))) {
             continue;
         }
 
-        if (fileName.endsWith(QStringLiteral(".sh"))) {
-            if (!bestScript.exists() || fileInfo.lastModified() > bestScriptTime) {
-                bestScript = fileInfo;
-                bestScriptTime = fileInfo.lastModified();
-            }
-        } else {
-            if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
-                bestBin = fileInfo;
-                bestBinTime = fileInfo.lastModified();
-            }
+        if (!(isSelf && allowRunningApp) && !isAarch64Elf(absPath)) {
+            continue;
+        }
+
+        if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
+            bestBin = fileInfo;
+            bestBinTime = fileInfo.lastModified();
         }
     }
 
-    if (bestBin.exists()) {
-        return bestBin;
-    }
-    return bestScript;
+    return bestBin;
 }
 
 static QString deployExeBaselineId(const QString &repoDir)
@@ -7233,7 +7254,7 @@ void MainWindow::onGitAutoDiffReminderTick()
         const QFileInfo fi = findLatestDeployExecutable(workDir, true);
         if (!fi.exists()) {
             ++noExe;
-            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到可部署可执行文件")
+            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到 aarch64 可执行文件")
                                   .arg(workDir));
             continue;
         }
@@ -8909,10 +8930,10 @@ void MainWindow::continueScpSearchAndTransfer()
         return;
     }
 
-    // 递归查找目录下最新的可执行文件（与可执行文件提醒共用规则）
+    // 递归查找最新 aarch64 ELF（与可执行文件提醒共用规则）
     const QFileInfo fi = findLatestDeployExecutable(dir);
     if (!fi.exists()) {
-        txtGitLog->append("未在目录及其子目录下找到符合条件的可执行文件");
+        txtGitLog->append(QStringLiteral("未在目录及其子目录下找到 aarch64 可执行文件"));
         return;
     }
 
