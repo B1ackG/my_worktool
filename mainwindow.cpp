@@ -326,16 +326,48 @@ QStringList parseBitDescriptionsFromComment(const QString &comment)
         return bits;
     }
 
-    // 标准导入格式：各位说明以 "0 名称 ... 1 名称 ..." 形式合并在同一描述中
-    const QRegularExpression re(
-        QStringLiteral("(?:^|\\s)(\\d{1,2})\\s+(.*?)(?=\\s\\d{1,2}\\s|$)"));
-    QRegularExpressionMatchIterator it = re.globalMatch(text);
-    while (it.hasNext()) {
-        const QRegularExpressionMatch m = it.next();
-        const int bit = m.captured(1).toInt();
-        const QString desc = m.captured(2).trimmed();
-        if (bit >= 0 && bit <= 15 && !desc.isEmpty()) {
-            bits[bit] = desc;
+    // 注释里各位说明合并在同一段中，例如：
+    //   "0 心跳 1 避障开关"          （位号后有空格，标准导入）
+    //   "0心跳 1避障开关(1关0开)"    （位号后直接接功能名）
+    // 括号/花括号内的数字不作为位号。
+    struct BitHit {
+        int bit = 0;
+        int indexStart = 0;
+        int nameStart = 0;
+    };
+    QVector<BitHit> hits;
+    const int n = text.size();
+    int i = 0;
+    while (i < n) {
+        const bool atTokenStart = (i == 0) || text.at(i - 1).isSpace();
+        if (atTokenStart && text.at(i).isDigit()) {
+            int j = i;
+            while (j < n && text.at(j).isDigit()) {
+                ++j;
+            }
+            if (j - i <= 2) {
+                bool ok = false;
+                const int bit = text.mid(i, j - i).toInt(&ok);
+                if (ok && bit >= 0 && bit <= 15) {
+                    hits.push_back(BitHit{bit, i, j});
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        ++i;
+    }
+
+    static const QString kLeadingSeps = QStringLiteral(".:：、-");
+    for (int h = 0; h < hits.size(); ++h) {
+        const int from = hits[h].nameStart;
+        const int to = (h + 1 < hits.size()) ? hits[h + 1].indexStart : n;
+        QString desc = text.mid(from, to - from).trimmed();
+        while (!desc.isEmpty() && kLeadingSeps.contains(desc.at(0))) {
+            desc = desc.mid(1).trimmed();
+        }
+        if (!desc.isEmpty() && bits[hits[h].bit].isEmpty()) {
+            bits[hits[h].bit] = desc;
         }
     }
 
@@ -1263,7 +1295,6 @@ void MainWindow::createWidgets()
     txtScpPassword->setToolTip(QStringLiteral("明文显示，按目标地址记忆"));
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
-    btnScpTransfer->setToolTip(QStringLiteral("递归查找并传输最新的 aarch64 ELF 可执行文件"));
     
     btnRebootTarget = new QPushButton("重启目标");
     btnRebootTarget->setStyleSheet("background-color: #ffccbc; font-weight: bold; color: #d84315;");
@@ -7040,34 +7071,6 @@ void MainWindow::onGitQuickBranchSwitchClicked()
     maybePromptApplyMainAfterCheckout(branch);
 }
 
-static bool isAarch64Elf(const QString &path)
-{
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) {
-        return false;
-    }
-    const QByteArray hdr = f.read(20);
-    if (hdr.size() < 20) {
-        return false;
-    }
-    const auto *b = reinterpret_cast<const unsigned char *>(hdr.constData());
-    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') {
-        return false;
-    }
-    if (b[4] != 2) { // ELFCLASS64
-        return false;
-    }
-    quint16 machine = 0;
-    if (b[5] == 1) { // ELFDATA2LSB
-        machine = quint16(b[18]) | (quint16(b[19]) << 8);
-    } else if (b[5] == 2) { // ELFDATA2MSB
-        machine = (quint16(b[18]) << 8) | quint16(b[19]);
-    } else {
-        return false;
-    }
-    return machine == 183; // EM_AARCH64
-}
-
 QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool allowRunningApp) const
 {
     if (workDir.trimmed().isEmpty() || !QDir(workDir).exists()) {
@@ -7077,7 +7080,9 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
     const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
 
     QFileInfo bestBin;
+    QFileInfo bestScript;
     QDateTime bestBinTime;
+    QDateTime bestScriptTime;
 
     QDirIterator it(workDir, QDir::Files | QDir::Executable, QDirIterator::Subdirectories);
     while (it.hasNext()) {
@@ -7086,12 +7091,12 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
         const QString fileName = fileInfo.fileName();
         const QString absPath = fileInfo.absoluteFilePath();
 
-        const bool isSelf = !selfPath.isEmpty() && absPath == selfPath;
         // SCP must not pick the running helper; reminder must see rebuilds of this binary.
-        if (isSelf && !allowRunningApp) {
+        if (!allowRunningApp && !selfPath.isEmpty() && absPath == selfPath) {
             continue;
         }
 
+        // Skip obvious non-deploy paths
         const QString rel = QDir(workDir).relativeFilePath(absPath);
         if (rel.contains(QStringLiteral("/.venv/")) || rel.startsWith(QStringLiteral(".venv/"))
             || rel.contains(QStringLiteral("/.git/")) || rel.contains(QStringLiteral("/node_modules/"))) {
@@ -7101,22 +7106,28 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
         if (fileName.startsWith(QLatin1Char('.')) || fileName.endsWith(QStringLiteral(".so"))) {
             continue;
         }
-        // Extension-less binaries only (skip objects, images, scripts, …)
-        if (fileName.contains(QLatin1Char('.'))) {
+        // Allow extension-less binaries and *.sh; skip other dotted names (objects, images, …)
+        if (fileName.contains(QLatin1Char('.')) && !fileName.endsWith(QStringLiteral(".sh"))) {
             continue;
         }
 
-        if (!(isSelf && allowRunningApp) && !isAarch64Elf(absPath)) {
-            continue;
-        }
-
-        if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
-            bestBin = fileInfo;
-            bestBinTime = fileInfo.lastModified();
+        if (fileName.endsWith(QStringLiteral(".sh"))) {
+            if (!bestScript.exists() || fileInfo.lastModified() > bestScriptTime) {
+                bestScript = fileInfo;
+                bestScriptTime = fileInfo.lastModified();
+            }
+        } else {
+            if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
+                bestBin = fileInfo;
+                bestBinTime = fileInfo.lastModified();
+            }
         }
     }
 
-    return bestBin;
+    if (bestBin.exists()) {
+        return bestBin;
+    }
+    return bestScript;
 }
 
 static QString deployExeBaselineId(const QString &repoDir)
@@ -7254,7 +7265,7 @@ void MainWindow::onGitAutoDiffReminderTick()
         const QFileInfo fi = findLatestDeployExecutable(workDir, true);
         if (!fi.exists()) {
             ++noExe;
-            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到 aarch64 可执行文件")
+            txtGitLog->append(QStringLiteral("[可执行文件提醒] %1：未找到可部署可执行文件")
                                   .arg(workDir));
             continue;
         }
@@ -8930,10 +8941,10 @@ void MainWindow::continueScpSearchAndTransfer()
         return;
     }
 
-    // 递归查找最新 aarch64 ELF（与可执行文件提醒共用规则）
+    // 递归查找目录下最新的可执行文件（与可执行文件提醒共用规则）
     const QFileInfo fi = findLatestDeployExecutable(dir);
     if (!fi.exists()) {
-        txtGitLog->append(QStringLiteral("未在目录及其子目录下找到 aarch64 可执行文件"));
+        txtGitLog->append("未在目录及其子目录下找到符合条件的可执行文件");
         return;
     }
 
