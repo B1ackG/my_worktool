@@ -822,6 +822,14 @@ private:
     void rebuildSlaveReadbackMaps();
     void setRegisterMapReadbackForWriteAddr(QTableWidget *mapTable, quint16 writeAddr, quint16 readbackAddr);
     int findSimRowByAddress(QTableWidget *table, quint16 addr) const;
+    int simOwnerRowForAddress(QTableWidget *table, quint16 addr) const;
+    QString simCommentForAddress(QTableWidget *table, quint16 addr, int row) const;
+    QString decodeSimWordsForLog(QTableWidget *table, int row, const QVector<quint16> &words,
+                                 const QString &fmtOverride = QString()) const;
+    QString formatSimRegisterLogBody(QTableWidget *table, ModbusSlave *slave,
+                                     const QVector<QPair<quint16, quint16>> &ops,
+                                     bool isWrite,
+                                     const QSet<quint16> *changedAddrs = nullptr) const;
     void rebuildSimAddrIndex(QTableWidget *table);
     void rebuildSimRowStates(QTableWidget *table);
     void handleRegisterOps(ModbusSlave *senderDevice, const QVector<QPair<quint16, quint16>> &ops,

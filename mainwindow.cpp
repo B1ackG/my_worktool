@@ -374,6 +374,82 @@ QStringList parseBitDescriptionsFromComment(const QString &comment)
     return bits;
 }
 
+bool commentHasBitDescriptions(const QStringList &bits)
+{
+    for (const QString &d : bits) {
+        if (!d.isEmpty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QString truncateSimLogName(const QString &name, int maxLen = 40)
+{
+    if (name.size() <= maxLen) {
+        return name;
+    }
+    return name.left(qMax(1, maxLen - 1)) + QStringLiteral("…");
+}
+
+QString simLogNameFromComment(const QString &comment)
+{
+    const QString text = comment.simplified();
+    if (text.isEmpty()) {
+        return {};
+    }
+
+    const QStringList bits = parseBitDescriptionsFromComment(text);
+    if (!commentHasBitDescriptions(bits)) {
+        return truncateSimLogName(text);
+    }
+
+    const int n = text.size();
+    for (int i = 0; i < n; ++i) {
+        const bool atTokenStart = (i == 0) || text.at(i - 1).isSpace();
+        if (!atTokenStart || !text.at(i).isDigit()) {
+            continue;
+        }
+        int j = i;
+        while (j < n && text.at(j).isDigit()) {
+            ++j;
+        }
+        if (j - i > 2) {
+            continue;
+        }
+        bool ok = false;
+        const int bit = text.mid(i, j - i).toInt(&ok);
+        if (ok && bit >= 0 && bit <= 15) {
+            return truncateSimLogName(text.left(i).trimmed());
+        }
+    }
+    return {};
+}
+
+QString simLogBitsFromValue(const QString &comment, quint16 value)
+{
+    const QStringList bits = parseBitDescriptionsFromComment(comment);
+    if (!commentHasBitDescriptions(bits)) {
+        return {};
+    }
+
+    QStringList parts;
+    for (int i = 0; i < 16; ++i) {
+        if (((value >> i) & 1) == 0) {
+            continue;
+        }
+        if (!bits.at(i).isEmpty()) {
+            parts.append(bits.at(i));
+        } else {
+            parts.append(QStringLiteral("bit%1").arg(i));
+        }
+    }
+    if (parts.isEmpty()) {
+        return QStringLiteral("全0");
+    }
+    return parts.join(QStringLiteral(", "));
+}
+
 quint16 swapBytes16(quint16 w)
 {
     return static_cast<quint16>(((w & 0xFF) << 8) | ((w >> 8) & 0xFF));
@@ -4242,6 +4318,344 @@ void MainWindow::flushPendingSimWriteRefresh()
     }
 }
 
+int MainWindow::simOwnerRowForAddress(QTableWidget *table, quint16 addr) const
+{
+    if (!table) {
+        return -1;
+    }
+
+    const auto itTouch = simAddrTouchRows.constFind(table);
+    if (itTouch != simAddrTouchRows.constEnd()) {
+        const QVector<int> rows = itTouch->value(addr);
+        for (int row : rows) {
+            if (row < 0 || row >= table->rowCount()) {
+                continue;
+            }
+            const QTableWidgetItem *item = table->item(row, SimRegisterCol::Address);
+            if (!item || item->text().isEmpty()) {
+                continue;
+            }
+            bool ok = false;
+            const quint16 base = static_cast<quint16>(item->text().toUInt(&ok));
+            if (!ok) {
+                continue;
+            }
+            const QString fmt = simTableFormats.value(table).value(row, QStringLiteral("Unsigned"));
+            const int stringRegCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+            const int wordCount = qMax(1, simFormatWordCount(fmt, stringRegCount));
+            if (wordCount > 1 && addr >= base && addr < static_cast<quint16>(base + wordCount)) {
+                return row;
+            }
+        }
+    }
+
+    return findSimRowByAddress(table, addr);
+}
+
+QString MainWindow::simCommentForAddress(QTableWidget *table, quint16 addr, int row) const
+{
+    if (table && row >= 0 && row < table->rowCount()) {
+        const QTableWidgetItem *descItem = table->item(row, SimRegisterCol::Description);
+        const QString desc = descItem ? descItem->text().trimmed() : QString();
+        if (!desc.isEmpty()) {
+            return desc;
+        }
+    }
+
+    QTableWidget *mapTable = nullptr;
+    if (table == tblSimAGV) {
+        mapTable = tblAGV;
+    } else if (table == tblSimMain) {
+        mapTable = tblRobot;
+    }
+    if (!mapTable) {
+        return {};
+    }
+
+    for (int r = 0; r < mapTable->rowCount(); ++r) {
+        const QTableWidgetItem *addrItem = mapTable->item(r, RegisterMapCol::Address);
+        if (!addrItem) {
+            continue;
+        }
+        bool ok = false;
+        if (static_cast<quint16>(addrItem->text().trimmed().toUInt(&ok)) != addr || !ok) {
+            continue;
+        }
+        const QTableWidgetItem *cmtItem = mapTable->item(r, RegisterMapCol::Comment);
+        const QString comment = cmtItem ? cmtItem->text().trimmed() : QString();
+        if (!comment.isEmpty()) {
+            return comment;
+        }
+    }
+    return {};
+}
+
+QString MainWindow::decodeSimWordsForLog(QTableWidget *table, int row, const QVector<quint16> &words,
+                                         const QString &fmtOverride) const
+{
+    if (words.isEmpty()) {
+        return QStringLiteral("0");
+    }
+
+    QString fmt = fmtOverride;
+    if (fmt.isEmpty()) {
+        fmt = (table && row >= 0)
+                  ? simTableFormats.value(table).value(row, QStringLiteral("Unsigned"))
+                  : QStringLiteral("Unsigned");
+    }
+    const quint16 val = words.first();
+    QString display;
+
+    if (fmt == QStringLiteral("Hex")) {
+        display = QStringLiteral("0x") + QString::number(val, 16).toUpper().rightJustified(4, QLatin1Char('0'));
+    } else if (fmt == QStringLiteral("Signed")) {
+        display = QString::number(static_cast<qint16>(val));
+    } else if (fmt == QStringLiteral("ASCII - Hex")) {
+        const char c1 = static_cast<char>((val >> 8) & 0xFF);
+        const char c2 = static_cast<char>(val & 0xFF);
+        display = QStringLiteral("'%1%2'")
+                      .arg(c1 > 31 ? QChar(c1) : QChar('.'))
+                      .arg(c2 > 31 ? QChar(c2) : QChar('.'));
+    } else if (fmt == QStringLiteral("String")) {
+        display = decodeUtf8FromRegisters(words);
+    } else if (fmt == QStringLiteral("32-bit Float") && words.size() >= 2) {
+        display = QString::number(decodeFloat32Words(words.at(0), words.at(1)), 'f', 2);
+    } else if (fmt.startsWith(QStringLiteral("32-bit")) && words.size() >= 2) {
+        const quint32 val32 = (static_cast<quint32>(words.at(0)) << 16) | words.at(1);
+        if (fmt == QStringLiteral("32-bit Signed")) {
+            display = QString::number(static_cast<qint32>(val32));
+        } else {
+            display = QString::number(val32);
+        }
+    } else if (fmt == QStringLiteral("64-bit Float") && words.size() >= 4) {
+        display = QString::number(decodeFloat64Words(words.at(0), words.at(1), words.at(2), words.at(3)), 'f', 6);
+    }
+
+    if (display.isEmpty()) {
+        if (words.size() == 1) {
+            display = QString::number(val);
+        } else {
+            QStringList nums;
+            nums.reserve(words.size());
+            for (quint16 w : words) {
+                nums.append(QString::number(w));
+            }
+            display = nums.join(QLatin1Char(','));
+        }
+    }
+    return display;
+}
+
+QString MainWindow::formatSimRegisterLogBody(QTableWidget *table,
+                                            ModbusSlave *slave,
+                                            const QVector<QPair<quint16, quint16>> &ops,
+                                            bool isWrite,
+                                            const QSet<quint16> *changedAddrs) const
+{
+    if (ops.isEmpty()) {
+        return {};
+    }
+
+    QMap<quint16, quint16> valueMap;
+    QSet<quint16> opAddrs;
+    opAddrs.reserve(ops.size());
+    for (const auto &op : ops) {
+        valueMap.insert(op.first, op.second);
+        opAddrs.insert(op.first);
+    }
+
+    QSet<quint16> skipReadback;
+    if (slave) {
+        const QHash<quint16, quint16> rbMap = slave->readbackMapSnapshot();
+        for (auto it = rbMap.cbegin(); it != rbMap.cend(); ++it) {
+            if (opAddrs.contains(it.key()) && opAddrs.contains(it.value())) {
+                skipReadback.insert(it.value());
+            }
+        }
+    }
+
+    QSet<quint16> addrsToShow = changedAddrs ? *changedAddrs : opAddrs;
+    if (addrsToShow.isEmpty()) {
+        addrsToShow = opAddrs;
+    }
+
+    struct Field {
+        quint16 base = 0;
+        int wordCount = 1;
+        QString name;
+        QString valueText;
+        bool named = false;
+    };
+    QVector<Field> fields;
+    QSet<quint16> consumed;
+
+    auto collectWords = [&](quint16 base, int wordCount) {
+        QVector<quint16> words;
+        words.reserve(wordCount);
+        for (int i = 0; i < wordCount; ++i) {
+            const quint16 a = static_cast<quint16>(base + i);
+            if (valueMap.contains(a)) {
+                words.append(valueMap.value(a));
+            } else if (slave) {
+                words.append(slave->getRegister(a));
+            } else {
+                words.append(0);
+            }
+        }
+        return words;
+    };
+
+    auto lookupMapFormat = [&](quint16 addr, QString *fmtOut, int *wordCountOut) -> bool {
+        QTableWidget *mapTable = nullptr;
+        if (table == tblSimAGV) {
+            mapTable = tblAGV;
+        } else if (table == tblSimMain) {
+            mapTable = tblRobot;
+        }
+        if (!mapTable) {
+            return false;
+        }
+        for (int r = 0; r < mapTable->rowCount(); ++r) {
+            const QTableWidgetItem *addrItem = mapTable->item(r, RegisterMapCol::Address);
+            if (!addrItem) {
+                continue;
+            }
+            bool ok = false;
+            if (static_cast<quint16>(addrItem->text().trimmed().toUInt(&ok)) != addr || !ok) {
+                continue;
+            }
+            const QTableWidgetItem *fmtItem = mapTable->item(r, RegisterMapCol::Format);
+            const QString regFmt = fmtItem ? fmtItem->text() : QString();
+            const QString simFmt = mapRegisterFormatToSimFormat(regFmt);
+            const int stringCount = parseStringRegisterCount(regFmt, kDefaultStringRegisterCount);
+            if (fmtOut) {
+                *fmtOut = simFmt;
+            }
+            if (wordCountOut) {
+                *wordCountOut = qMax(1, simFormatWordCount(simFmt,
+                    stringCount > 0 ? stringCount : kDefaultStringRegisterCount));
+            }
+            return true;
+        }
+        return false;
+    };
+
+    for (const auto &op : ops) {
+        const quint16 addr = op.first;
+        if (!addrsToShow.contains(addr) || skipReadback.contains(addr) || consumed.contains(addr)) {
+            continue;
+        }
+
+        quint16 base = addr;
+        int wordCount = 1;
+        int row = simOwnerRowForAddress(table, addr);
+        QString fmt;
+
+        if (row >= 0 && table) {
+            const QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
+            if (addrItem && !addrItem->text().isEmpty()) {
+                bool ok = false;
+                const quint16 rowBase = static_cast<quint16>(addrItem->text().toUInt(&ok));
+                if (ok) {
+                    base = rowBase;
+                }
+            }
+            fmt = simTableFormats.value(table).value(row, QStringLiteral("Unsigned"));
+            const int stringRegCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+            wordCount = qMax(1, simFormatWordCount(fmt, stringRegCount));
+        } else {
+            lookupMapFormat(addr, &fmt, &wordCount);
+        }
+
+        if (consumed.contains(base)) {
+            continue;
+        }
+
+        for (int i = 0; i < wordCount; ++i) {
+            consumed.insert(static_cast<quint16>(base + i));
+        }
+
+        const QString comment = simCommentForAddress(table, base, row);
+        const QString name = simLogNameFromComment(comment);
+        const QVector<quint16> words = collectWords(base, wordCount);
+        QString valueText = decodeSimWordsForLog(table, row, words, fmt);
+        QString bitsText;
+        if (wordCount == 1 && !words.isEmpty()) {
+            bitsText = simLogBitsFromValue(comment, words.first());
+            if (!bitsText.isEmpty()) {
+                valueText += QStringLiteral(" (") + bitsText + QLatin1Char(')');
+            }
+        }
+
+        Field field;
+        field.base = base;
+        field.wordCount = wordCount;
+        field.name = name;
+        field.valueText = valueText;
+        field.named = !name.isEmpty() || !bitsText.isEmpty() || wordCount > 1
+                      || (!fmt.isEmpty() && fmt != QStringLiteral("Unsigned")
+                          && fmt != QStringLiteral("Binary"));
+        fields.append(field);
+    }
+
+    if (fields.isEmpty()) {
+        const quint16 first = ops.first().first;
+        const quint16 last = ops.last().first;
+        if (ops.size() == 1) {
+            return QStringLiteral("地址[%1] %2 %3")
+                .arg(first)
+                .arg(isWrite ? QStringLiteral("<-") : QStringLiteral("->"))
+                .arg(ops.first().second);
+        }
+        return QStringLiteral("地址[%1..%2] qty=%3").arg(first).arg(last).arg(ops.size());
+    }
+
+    const QString arrow = isWrite ? QStringLiteral(" <- ") : QStringLiteral(" -> ");
+    QStringList lines;
+    int i = 0;
+    while (i < fields.size()) {
+        if (!fields.at(i).named) {
+            int j = i;
+            while (j + 1 < fields.size()
+                   && !fields.at(j + 1).named
+                   && fields.at(j + 1).base == static_cast<quint16>(fields.at(j).base + fields.at(j).wordCount)) {
+                ++j;
+            }
+            const int run = j - i + 1;
+            if (run >= 3) {
+                const quint16 start = fields.at(i).base;
+                const quint16 end = static_cast<quint16>(fields.at(j).base + fields.at(j).wordCount - 1);
+                lines.append(QStringLiteral("地址[%1..%2] qty=%3").arg(start).arg(end).arg(end - start + 1));
+                i = j + 1;
+                continue;
+            }
+        }
+
+        const Field &field = fields.at(i);
+        QString addrLabel;
+        if (field.wordCount > 1) {
+            addrLabel = QStringLiteral("地址[%1..%2]")
+                            .arg(field.base)
+                            .arg(field.base + field.wordCount - 1);
+        } else {
+            addrLabel = QStringLiteral("地址[%1]").arg(field.base);
+        }
+        if (!field.name.isEmpty()) {
+            addrLabel += QLatin1Char(' ') + field.name;
+        }
+        lines.append(addrLabel + arrow + field.valueText);
+        ++i;
+    }
+
+    static const int kMaxLogFields = 8;
+    if (lines.size() > kMaxLogFields) {
+        const int hidden = lines.size() - kMaxLogFields;
+        lines = lines.mid(0, kMaxLogFields);
+        lines.append(QStringLiteral("…等%1项").arg(hidden));
+    }
+    return lines.join(QStringLiteral("; "));
+}
+
 void MainWindow::handleRegisterOps(ModbusSlave *senderDevice,
                                    const QVector<QPair<quint16, quint16>> &ops,
                                    const QString &opType)
@@ -4302,45 +4716,26 @@ void MainWindow::handleRegisterOps(ModbusSlave *senderDevice,
 
     if (isRead) {
         QMap<quint16, quint16> &deviceReadValues = simLastReadValues[deviceName];
-        int changed = 0;
+        QSet<quint16> changedAddrs;
         for (const auto &op : ops) {
             if (!deviceReadValues.contains(op.first) || deviceReadValues.value(op.first) != op.second) {
-                ++changed;
+                changedAddrs.insert(op.first);
             }
             deviceReadValues.insert(op.first, op.second);
         }
-        if (changed == 0) {
+        if (changedAddrs.isEmpty()) {
             return;
         }
-        if (ops.size() == 1) {
-            txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 读取 地址[%3] -> %4")
-                                  .arg(timeStr, deviceName)
-                                  .arg(ops.first().first)
-                                  .arg(ops.first().second));
-        } else {
-            txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 读取 地址[%3..%4] qty=%5 (变更%6)")
-                                  .arg(timeStr, deviceName)
-                                  .arg(ops.first().first)
-                                  .arg(ops.last().first)
-                                  .arg(ops.size())
-                                  .arg(changed));
-        }
+        const QString body = formatSimRegisterLogBody(table, senderDevice, ops, false, &changedAddrs);
+        txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 读取 %3")
+                              .arg(timeStr, deviceName, body));
         return;
     }
 
     if (isWrite) {
-        if (ops.size() == 1) {
-            txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 写入 地址[%3] <- %4")
-                                  .arg(timeStr, deviceName)
-                                  .arg(ops.first().first)
-                                  .arg(ops.first().second));
-        } else {
-            txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 写入 地址[%3..%4] qty=%5")
-                                  .arg(timeStr, deviceName)
-                                  .arg(ops.first().first)
-                                  .arg(ops.last().first)
-                                  .arg(ops.size()));
-        }
+        const QString body = formatSimRegisterLogBody(table, senderDevice, ops, true);
+        txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 写入 %3")
+                              .arg(timeStr, deviceName, body));
     }
 }
 
