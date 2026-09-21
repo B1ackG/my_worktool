@@ -78,6 +78,7 @@
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QSystemTrayIcon>
+#include <algorithm>
 
 namespace {
 
@@ -246,6 +247,7 @@ double gitLinesToStarWeight(int lines)
 }
 
 static const int kDefaultStringRegisterCount = 15;
+static const int kMaxSimWordCount = 64;
 
 int parseStringRegisterCount(const QString &regFmt, int defaultCount = kDefaultStringRegisterCount)
 {
@@ -254,7 +256,7 @@ int parseStringRegisterCount(const QString &regFmt, int defaultCount = kDefaultS
     const QRegularExpressionMatch match = re.match(regFmt.trimmed());
     if (match.hasMatch()) {
         const int count = match.captured(1).toInt();
-        return count > 0 ? count : defaultCount;
+        return count > 0 ? qMin(count, kMaxSimWordCount) : defaultCount;
     }
     if (regFmt.trimmed().contains(QStringLiteral("STRING"), Qt::CaseInsensitive)
         || regFmt.trimmed().contains(QStringLiteral("WSTRING"), Qt::CaseInsensitive)) {
@@ -303,7 +305,7 @@ QVector<quint16> encodeUtf8ToRegisters(const QString &str, int regCount)
 int simFormatWordCount(const QString &fmt, int stringRegCount = kDefaultStringRegisterCount)
 {
     if (fmt == QStringLiteral("String")) {
-        return qMax(1, stringRegCount);
+        return qBound(1, stringRegCount, kMaxSimWordCount);
     }
     if (fmt.startsWith(QStringLiteral("64-bit"))) {
         return 4;
@@ -516,7 +518,8 @@ constexpr int Address = 1;
 constexpr int ReadbackAddress = 2;
 constexpr int Description = 3;
 constexpr int Value = 4;
-constexpr int ColumnCount = 5;
+constexpr int Heartbeat = 5;
+constexpr int ColumnCount = 6;
 }
 
 enum class RegisterMapDirection { Unknown, Read, Write };
@@ -827,6 +830,10 @@ MainWindow::MainWindow(QWidget *parent)
     simWriteRefreshTimer->setSingleShot(true);
     simWriteRefreshTimer->setInterval(33);
     connect(simWriteRefreshTimer, &QTimer::timeout, this, &MainWindow::flushPendingSimWriteRefresh);
+    simHeartbeatSaveTimer = new QTimer(this);
+    simHeartbeatSaveTimer->setSingleShot(true);
+    simHeartbeatSaveTimer->setInterval(250);
+    connect(simHeartbeatSaveTimer, &QTimer::timeout, this, &MainWindow::saveSimHeartbeatSettings);
     monitorTimer = new QTimer(this);
     monitorTimer->setInterval(60 * 1000);
     tcpServer = new QTcpServer(this);
@@ -854,6 +861,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadRegisterTables();
     loadAutoScene(); // 自动加载上次保存的寄存器设置、格式和波形
     syncSimulatorTablesFromMaps();
+    loadSimHeartbeatSettings();
 
     connect(simMainDevice, &ModbusSlave::clientConnected, this, [this](){
         int count = simMainDevice->clientCount();
@@ -901,6 +909,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(simAGVDevice, &ModbusSlave::registerOperation, this, &MainWindow::onRegisterOperation);
     connect(simMainDevice, &ModbusSlave::registersChanged, this, &MainWindow::onRegistersChanged);
     connect(simAGVDevice, &ModbusSlave::registersChanged, this, &MainWindow::onRegistersChanged);
+    if (chkSimLogShowHeartbeat) {
+        connect(chkSimLogShowHeartbeat, &QCheckBox::toggled, this, [this](bool checked) {
+            simLogShowHeartbeat = checked;
+            if (simHeartbeatSaveTimer) {
+                simHeartbeatSaveTimer->start();
+            } else {
+                saveSimHeartbeatSettings();
+            }
+        });
+    }
 
     // initial buttons: start enabled, stop disabled
     btnSimStartMain->setEnabled(true);
@@ -918,6 +936,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     saveRegisterTables();
+    saveSimHeartbeatSettings();
     saveAutoScene(); // 自动保存所有寄存器设置、格式和波形
 
     if (tcpSocket && tcpSocket->state() == QAbstractSocket::ConnectedState)
@@ -2034,6 +2053,12 @@ QWidget* MainWindow::createSimulatorPage()
 
     QGroupBox *gSimLog = new QGroupBox("模拟器运行日志");
     QVBoxLayout *ll = new QVBoxLayout();
+    chkSimLogShowHeartbeat = new QCheckBox(QStringLiteral("日志显示心跳寄存器"));
+    chkSimLogShowHeartbeat->setChecked(false);
+    chkSimLogShowHeartbeat->setToolTip(QStringLiteral(
+        "勾选后，已标记为心跳的寄存器读写会出现在运行日志中。\n"
+        "取消勾选可隐藏周期心跳（例如运行时间秒）造成的刷屏。"));
+    ll->addWidget(chkSimLogShowHeartbeat);
     txtSimLog = new QTextEdit();
     txtSimLog->setReadOnly(true);
     txtSimLog->setStyleSheet("background: #1e1e1e; color: #00ff00; font-family: Monospace;");
@@ -3857,6 +3882,10 @@ void MainWindow::onSimSaveSceneClicked()
         }
         obj.insert("values", values);
         obj.insert("formats", formats);
+        const QJsonArray hb = simHeartbeatAddrsToJson(table);
+        if (!hb.isEmpty()) {
+            obj.insert("heartbeat", hb);
+        }
         return obj;
     };
 
@@ -3865,6 +3894,7 @@ void MainWindow::onSimSaveSceneClicked()
 
     // Save Waveform Settings (CyclicTimers)
     root.insert("waveforms", waveformsToJson());
+    root.insert("logShowHeartbeat", simLogShowHeartbeat);
 
     QFile f(fn);
     if (!f.open(QIODevice::WriteOnly)) {
@@ -3929,6 +3959,9 @@ void MainWindow::onSimLoadSceneClicked()
             }
             rebuildSimRowStates(table);
         }
+        if (obj.contains("heartbeat") && obj.value("heartbeat").isArray()) {
+            applySimHeartbeatAddrsFromJson(table, obj.value("heartbeat").toArray());
+        }
         return count;
     };
 
@@ -3957,6 +3990,14 @@ void MainWindow::onSimLoadSceneClicked()
         applyWaveformsFromJson(root.value(QStringLiteral("waveforms")).toArray());
         waveCount = simCyclicTimers.size();
     }
+    if (root.contains(QStringLiteral("logShowHeartbeat"))) {
+        simLogShowHeartbeat = root.value(QStringLiteral("logShowHeartbeat")).toBool();
+        if (chkSimLogShowHeartbeat) {
+            const QSignalBlocker blocker(chkSimLogShowHeartbeat);
+            chkSimLogShowHeartbeat->setChecked(simLogShowHeartbeat);
+        }
+        saveSimHeartbeatSettings();
+    }
 
     logMessage(QStringLiteral("场景加载成功: AGV(%1) 主设备(%2) 波形(%3)").arg(cAGV).arg(cMain).arg(waveCount));
     if (txtSimLog) {
@@ -3983,7 +4024,7 @@ void MainWindow::onSimExportCsvClicked()
     QTextStream out(&f);
     // BOM for Excel
     out.setGenerateByteOrderMark(true);
-    out << "Device,Direction,Address,Value,Format,Description\n";
+    out << "Device,Direction,Address,Value,Format,Description,Heartbeat\n";
 
     auto exportTable = [&](QTableWidget *table, const QString &deviceName) {
         if (!table) return;
@@ -3997,6 +4038,9 @@ void MainWindow::onSimExportCsvClicked()
             QString fmt = simTableFormats.value(table).value(i, "Unsigned");
             QString desc = table->item(i, SimRegisterCol::Description)
                                ? table->item(i, SimRegisterCol::Description)->text() : "";
+            const QTableWidgetItem *hbItem = table->item(i, SimRegisterCol::Heartbeat);
+            const QString heartbeat = (hbItem && hbItem->checkState() == Qt::Checked)
+                                          ? QStringLiteral("1") : QStringLiteral("0");
 
             if (direction.isEmpty() && addr.isEmpty() && val.isEmpty() && desc.isEmpty()) continue;
 
@@ -4005,7 +4049,8 @@ void MainWindow::onSimExportCsvClicked()
                 << escapeRegisterMapCsvField(addr) << ","
                 << escapeRegisterMapCsvField(val) << ","
                 << escapeRegisterMapCsvField(fmt) << ","
-                << escapeRegisterMapCsvField(desc) << "\n";
+                << escapeRegisterMapCsvField(desc) << ","
+                << heartbeat << "\n";
         }
     };
 
@@ -4038,6 +4083,7 @@ void MainWindow::onSimImportCsvClicked()
     int valCol = 2;
     int fmtCol = 3;
     int descCol = 4;
+    int heartbeatCol = -1;
     bool hasHeader = false;
 
     for (int i = 0; i < headerParts.size(); ++i) {
@@ -4059,6 +4105,9 @@ void MainWindow::onSimImportCsvClicked()
             hasHeader = true;
         } else if (h == QStringLiteral("description") || h == QStringLiteral("描述") || h == QStringLiteral("comment")) {
             descCol = i;
+            hasHeader = true;
+        } else if (h == QStringLiteral("heartbeat") || h == QStringLiteral("心跳")) {
+            heartbeatCol = i;
             hasHeader = true;
         }
     }
@@ -4087,6 +4136,7 @@ void MainWindow::onSimImportCsvClicked()
                                 ? QStringLiteral("Unsigned")
                                 : parts.value(fmtCol).trimmed();
         const QString desc = parts.value(descCol).trimmed();
+        const QString hbText = heartbeatCol >= 0 ? parts.value(heartbeatCol).trimmed() : QString();
 
         QTableWidget *table = (deviceStr.toLower() == "main" || deviceStr == QStringLiteral("主设备"))
                                   ? tblSimMain : tblSimAGV;
@@ -4132,6 +4182,12 @@ void MainWindow::onSimImportCsvClicked()
         applyRegisterMapRowStyle(table, row);
 
         simTableFormats[table][row] = fmt;
+        if (heartbeatCol >= 0) {
+            const QString t = hbText.toLower();
+            const bool on = (t == QStringLiteral("1") || t == QStringLiteral("true")
+                             || t == QStringLiteral("yes") || t == QStringLiteral("心跳"));
+            setSimHeartbeatRow(table, row, on);
+        }
 
         bool ok = false;
         if (fmt == "32-bit Float") {
@@ -4172,6 +4228,7 @@ void MainWindow::onSimImportCsvClicked()
 
     f.close();
     syncSimulatorTablesFromMaps();
+    saveSimHeartbeatSettings();
     txtSimLog->append(QString("寄存器表已导入: %1 (共 %2 条)").arg(fn).arg(count));
 }
 
@@ -4473,6 +4530,14 @@ QString MainWindow::formatSimRegisterLogBody(QTableWidget *table,
             }
         }
     }
+    if (!simLogShowHeartbeat && table) {
+        const QSet<quint16> hb = simHeartbeatAddrs.value(table);
+        for (quint16 a : opAddrs) {
+            if (hb.contains(a)) {
+                skipReadback.insert(a);
+            }
+        }
+    }
 
     QSet<quint16> addrsToShow = changedAddrs ? *changedAddrs : opAddrs;
     if (addrsToShow.isEmpty()) {
@@ -4599,6 +4664,16 @@ QString MainWindow::formatSimRegisterLogBody(QTableWidget *table,
     }
 
     if (fields.isEmpty()) {
+        bool allSkipped = true;
+        for (const auto &op : ops) {
+            if (addrsToShow.contains(op.first) && !skipReadback.contains(op.first)) {
+                allSkipped = false;
+                break;
+            }
+        }
+        if (allSkipped) {
+            return {};
+        }
         const quint16 first = ops.first().first;
         const quint16 last = ops.last().first;
         if (ops.size() == 1) {
@@ -4727,6 +4802,9 @@ void MainWindow::handleRegisterOps(ModbusSlave *senderDevice,
             return;
         }
         const QString body = formatSimRegisterLogBody(table, senderDevice, ops, false, &changedAddrs);
+        if (body.isEmpty()) {
+            return;
+        }
         txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 读取 %3")
                               .arg(timeStr, deviceName, body));
         return;
@@ -4734,6 +4812,9 @@ void MainWindow::handleRegisterOps(ModbusSlave *senderDevice,
 
     if (isWrite) {
         const QString body = formatSimRegisterLogBody(table, senderDevice, ops, true);
+        if (body.isEmpty()) {
+            return;
+        }
         txtSimLog->append(QStringLiteral("[%1] 指令: [%2] 写入 %3")
                               .arg(timeStr, deviceName, body));
     }
@@ -12093,6 +12174,202 @@ void MainWindow::onGitGoalDeleteClicked() {
     txtGitLog->append(QString("[工作目标] 已删除: %1").arg(title));
 }
 
+void MainWindow::ensureSimHeartbeatItem(QTableWidget *table, int row)
+{
+    if (!table || row < 0 || row >= table->rowCount()) {
+        return;
+    }
+
+    QTableWidgetItem *item = table->item(row, SimRegisterCol::Heartbeat);
+    if (!item) {
+        item = new QTableWidgetItem();
+        table->setItem(row, SimRegisterCol::Heartbeat, item);
+    }
+    item->setText(QString());
+    item->setTextAlignment(Qt::AlignCenter);
+    item->setToolTip(QStringLiteral("标记为心跳寄存器：周期刷新的地址可从此处勾选，再在日志区关闭显示"));
+
+    Qt::ItemFlags flags = Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable;
+    item->setFlags(flags);
+
+    bool checked = false;
+    if (const QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address)) {
+        bool ok = false;
+        const quint16 addr = static_cast<quint16>(addrItem->text().trimmed().toUInt(&ok));
+        if (ok) {
+            checked = isSimHeartbeatAddress(table, addr);
+        }
+    }
+    item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+}
+
+void MainWindow::refreshSimHeartbeatColumn(QTableWidget *table)
+{
+    if (!table) {
+        return;
+    }
+    const QSignalBlocker blocker(table);
+    const bool wasUpdating = simHeartbeatUpdating;
+    simHeartbeatUpdating = true;
+    for (int row = 0; row < table->rowCount(); ++row) {
+        ensureSimHeartbeatItem(table, row);
+    }
+    simHeartbeatUpdating = wasUpdating;
+}
+
+QJsonArray MainWindow::simHeartbeatAddrsToJson(QTableWidget *table) const
+{
+    QJsonArray arr;
+    if (!table) {
+        return arr;
+    }
+    QList<quint16> addrs = simHeartbeatAddrs.value(table).values();
+    std::sort(addrs.begin(), addrs.end());
+    for (quint16 addr : addrs) {
+        arr.append(static_cast<int>(addr));
+    }
+    return arr;
+}
+
+void MainWindow::applySimHeartbeatAddrsFromJson(QTableWidget *table, const QJsonArray &arr)
+{
+    if (!table) {
+        return;
+    }
+    QSet<quint16> &hb = simHeartbeatAddrs[table];
+    hb.clear();
+    for (const QJsonValue &v : arr) {
+        if (!v.isDouble() && !v.isString()) {
+            continue;
+        }
+        bool ok = true;
+        const int addr = v.isString() ? v.toString().toInt(&ok) : v.toInt();
+        if (ok && addr >= 0 && addr <= ModbusSlave::MaxHoldingRegisterAddress) {
+            hb.insert(static_cast<quint16>(addr));
+        }
+    }
+    refreshSimHeartbeatColumn(table);
+}
+
+void MainWindow::setSimHeartbeatRow(QTableWidget *table, int row, bool on)
+{
+    if (!table || row < 0 || row >= table->rowCount()) {
+        return;
+    }
+    const QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
+    if (!addrItem || addrItem->text().trimmed().isEmpty()) {
+        return;
+    }
+    bool ok = false;
+    const quint16 base = static_cast<quint16>(addrItem->text().trimmed().toUInt(&ok));
+    if (!ok) {
+        return;
+    }
+
+    const QString fmt = simTableFormats.value(table).value(row, QStringLiteral("Unsigned"));
+    const int stringRegCount = simTableStringLengths.value(table).value(row, kDefaultStringRegisterCount);
+    const int wordCount = qBound(1, simFormatWordCount(fmt, stringRegCount), kMaxSimWordCount);
+
+    QSet<quint16> &hb = simHeartbeatAddrs[table];
+    for (int i = 0; i < wordCount; ++i) {
+        const quint16 addr = static_cast<quint16>(base + i);
+        if (on) {
+            hb.insert(addr);
+        } else {
+            hb.remove(addr);
+        }
+    }
+
+    const bool wasUpdating = simHeartbeatUpdating;
+    simHeartbeatUpdating = true;
+    ensureSimHeartbeatItem(table, row);
+    simHeartbeatUpdating = wasUpdating;
+
+    if (simHeartbeatSaveTimer) {
+        simHeartbeatSaveTimer->start();
+    }
+}
+
+bool MainWindow::isSimHeartbeatAddress(QTableWidget *table, quint16 addr) const
+{
+    if (!table) {
+        return false;
+    }
+    return simHeartbeatAddrs.value(table).contains(addr);
+}
+
+void MainWindow::saveSimHeartbeatSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("simulator"));
+
+    auto saveTable = [this, &settings](QTableWidget *table, const QString &key) {
+        QStringList addrs;
+        if (table) {
+            QList<quint16> values = simHeartbeatAddrs.value(table).values();
+            std::sort(values.begin(), values.end());
+            addrs.reserve(values.size());
+            for (quint16 addr : values) {
+                addrs.append(QString::number(addr));
+            }
+        }
+        settings.setValue(key, addrs.join(QLatin1Char(',')));
+    };
+    saveTable(tblSimMain, QStringLiteral("heartbeatMain"));
+    saveTable(tblSimAGV, QStringLiteral("heartbeatAGV"));
+    settings.setValue(QStringLiteral("logShowHeartbeat"), simLogShowHeartbeat);
+    settings.endGroup();
+}
+
+void MainWindow::loadSimHeartbeatSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("simulator"));
+
+    auto loadTable = [this, &settings](QTableWidget *table, const QString &key) {
+        if (!table) {
+            return;
+        }
+        QSet<quint16> &hb = simHeartbeatAddrs[table];
+        hb.clear();
+        const QVariant raw = settings.value(key);
+        QStringList addrs = raw.toStringList();
+        if (addrs.size() <= 1) {
+            const QString text = (addrs.size() == 1 ? addrs.first() : raw.toString()).trimmed();
+            if (text.isEmpty() || text == QStringLiteral("@Invalid()")) {
+                addrs.clear();
+            } else if (text.contains(QLatin1Char(','))) {
+                addrs = text.split(QLatin1Char(','),
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+                                   Qt::SkipEmptyParts
+#else
+                                   QString::SkipEmptyParts
+#endif
+                );
+            } else if (addrs.isEmpty()) {
+                addrs = QStringList{text};
+            }
+        }
+        for (const QString &token : addrs) {
+            bool ok = false;
+            const int addr = token.trimmed().toInt(&ok);
+            if (ok && addr >= 0 && addr <= ModbusSlave::MaxHoldingRegisterAddress) {
+                hb.insert(static_cast<quint16>(addr));
+            }
+        }
+        refreshSimHeartbeatColumn(table);
+    };
+    loadTable(tblSimMain, QStringLiteral("heartbeatMain"));
+    loadTable(tblSimAGV, QStringLiteral("heartbeatAGV"));
+    simLogShowHeartbeat = settings.value(QStringLiteral("logShowHeartbeat"), false).toBool();
+    settings.endGroup();
+
+    if (chkSimLogShowHeartbeat) {
+        const QSignalBlocker blocker(chkSimLogShowHeartbeat);
+        chkSimLogShowHeartbeat->setChecked(simLogShowHeartbeat);
+    }
+}
+
 void MainWindow::setupRegisterTable(QTableWidget *table) {
     if(!table) return;
     table->setColumnCount(RegisterMapCol::ColumnCount);
@@ -12134,6 +12411,7 @@ void MainWindow::applyRegisterMapRowStyle(QTableWidget *table, int row)
         return;
     }
 
+    const QSignalBlocker blocker(table);
     const QTableWidgetItem *dirItem = table->item(row, RegisterMapCol::Direction);
     const RegisterMapDirection dir = parseRegisterMapDirection(dirItem ? dirItem->text() : QString());
 
@@ -12162,6 +12440,7 @@ void MainWindow::applyRegisterMapTableStyles(QTableWidget *table)
     if (!table) {
         return;
     }
+    const QSignalBlocker blocker(table);
     for (int row = 0; row < table->rowCount(); ++row) {
         applyRegisterMapRowStyle(table, row);
     }
@@ -12175,13 +12454,18 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
                                      << QStringLiteral("地址")
                                      << QStringLiteral("回读地址")
                                      << QStringLiteral("描述")
-                                     << QStringLiteral("值"));
+                                     << QStringLiteral("值")
+                                     << QStringLiteral("心跳"));
 
     table->setColumnWidth(SimRegisterCol::Direction, 40);
     table->setColumnWidth(SimRegisterCol::Address, 50);
     table->setColumnWidth(SimRegisterCol::ReadbackAddress, 70);
     table->setColumnWidth(SimRegisterCol::Description, 150);
     table->setColumnWidth(SimRegisterCol::Value, 100);
+    table->setColumnWidth(SimRegisterCol::Heartbeat, 44);
+    if (QTableWidgetItem *hbHeader = table->horizontalHeaderItem(SimRegisterCol::Heartbeat)) {
+        hbHeader->setToolTip(QStringLiteral("勾选后将该寄存器（含多字长占用）标为心跳，可在日志区关闭其通讯显示"));
+    }
 
     table->horizontalHeader()->setSectionResizeMode(SimRegisterCol::Description, QHeaderView::Stretch);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -12202,6 +12486,7 @@ void MainWindow::setupSimulatorRegisterTable(QTableWidget *table) {
             table->setItem(i, SimRegisterCol::Description, new QTableWidgetItem(""));
         if (!table->item(i, SimRegisterCol::Value))
             table->setItem(i, SimRegisterCol::Value, new QTableWidgetItem("0"));
+        ensureSimHeartbeatItem(table, i);
         applyRegisterMapRowStyle(table, i);
     }
     connect(table, &QTableWidget::cellChanged, this, &MainWindow::onSimTableRowChanged);
@@ -12280,6 +12565,9 @@ void MainWindow::setSimRowEnabled(QTableWidget *table, int row, bool enabled)
                     flags &= ~Qt::ItemIsEditable;
                 else
                     flags |= Qt::ItemIsEditable;
+            } else if (col == SimRegisterCol::Heartbeat) {
+                flags |= Qt::ItemIsUserCheckable;
+                flags &= ~Qt::ItemIsEditable;
             } else {
                 flags &= ~Qt::ItemIsEditable;
             }
@@ -12301,6 +12589,15 @@ void MainWindow::onSimTableRowChanged(int row, int column)
     QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
     if (!addrItem || addrItem->text().isEmpty()) return;
     quint16 addr = (quint16)addrItem->text().toUInt();
+
+    if (column == SimRegisterCol::Heartbeat) {
+        if (simHeartbeatUpdating) {
+            return;
+        }
+        const QTableWidgetItem *hbItem = table->item(row, SimRegisterCol::Heartbeat);
+        setSimHeartbeatRow(table, row, hbItem && hbItem->checkState() == Qt::Checked);
+        return;
+    }
     
     if (column != SimRegisterCol::Value) {
         return;
@@ -12765,6 +13062,7 @@ void MainWindow::rebuildSimRowStates(QTableWidget *table)
         return;
     }
 
+    const QSignalBlocker blocker(table);
     rebuildSimAddrIndex(table);
 
     for (int r = 0; r < table->rowCount(); ++r) {
@@ -12792,12 +13090,10 @@ void MainWindow::rebuildSimRowStates(QTableWidget *table)
             }
             setSimRowEnabled(table, subRow, false);
             simTableFormats[table].remove(subRow);
-            table->blockSignals(true);
             if (!table->item(subRow, SimRegisterCol::Value)) {
                 table->setItem(subRow, SimRegisterCol::Value, new QTableWidgetItem());
             }
             table->item(subRow, SimRegisterCol::Value)->setText(QString());
-            table->blockSignals(false);
         }
     }
 
@@ -12807,11 +13103,13 @@ void MainWindow::rebuildSimRowStates(QTableWidget *table)
         refreshSimRowDisplay(table, r);
         applyRegisterMapRowStyle(table, r);
     }
+    refreshSimHeartbeatColumn(table);
 }
 
 void MainWindow::syncSimulatorTablesFromMaps() {
     auto syncOne = [this](QTableWidget *src, QTableWidget *dst) {
         if (!src || !dst) return;
+        const QSignalBlocker blocker(dst);
         if (dst->rowCount() < src->rowCount()) dst->setRowCount(src->rowCount());
 
         for (int row = 0; row < src->rowCount(); ++row) {
@@ -12825,6 +13123,7 @@ void MainWindow::syncSimulatorTablesFromMaps() {
                 dst->setItem(row, SimRegisterCol::Description, new QTableWidgetItem());
             if (!dst->item(row, SimRegisterCol::Value))
                 dst->setItem(row, SimRegisterCol::Value, new QTableWidgetItem("0"));
+            ensureSimHeartbeatItem(dst, row);
 
             QTableWidgetItem *srcDir = src->item(row, RegisterMapCol::Direction);
             QTableWidgetItem *srcAddr = src->item(row, RegisterMapCol::Address);
@@ -12854,6 +13153,7 @@ void MainWindow::syncSimulatorTablesFromMaps() {
         }
 
         rebuildSimRowStates(dst);
+        refreshSimHeartbeatColumn(dst);
     };
 
     syncOne(tblAGV, tblSimAGV);
@@ -13568,6 +13868,23 @@ void MainWindow::onSimShowContextMenu(const QPoint &pos) {
     QAction *actWave = menu.addAction(QStringLiteral("周期波形"));
     connect(actWave, &QAction::triggered, this, [this, row](){ onSimShowWaveformEditor(row); });
 
+    menu.addSeparator();
+    const bool isHeartbeat = [&]() {
+        const QTableWidgetItem *addrItem = table->item(row, SimRegisterCol::Address);
+        if (!addrItem) {
+            return false;
+        }
+        bool ok = false;
+        const quint16 addr = static_cast<quint16>(addrItem->text().trimmed().toUInt(&ok));
+        return ok && isSimHeartbeatAddress(table, addr);
+    }();
+    QAction *actHeartbeat = menu.addAction(isHeartbeat
+                                               ? QStringLiteral("取消心跳寄存器")
+                                               : QStringLiteral("设为心跳寄存器"));
+    connect(actHeartbeat, &QAction::triggered, this, [this, table, row, isHeartbeat]() {
+        setSimHeartbeatRow(table, row, !isHeartbeat);
+    });
+
     menu.exec(table->viewport()->mapToGlobal(pos));
 }
 
@@ -13706,11 +14023,16 @@ void MainWindow::saveAutoScene()
         if (!stringLengths.isEmpty()) {
             obj.insert("stringLengths", stringLengths);
         }
+        const QJsonArray hb = simHeartbeatAddrsToJson(table);
+        if (!hb.isEmpty()) {
+            obj.insert("heartbeat", hb);
+        }
         return obj;
     };
     root.insert("main", exportDeviceHolding(simMainDevice, tblSimMain));
     root.insert("agv", exportDeviceHolding(simAGVDevice, tblSimAGV));
     root.insert("waveforms", waveformsToJson());
+    root.insert("logShowHeartbeat", simLogShowHeartbeat);
     
     QFile f("autoscene.json");
     if (f.open(QIODevice::WriteOnly)) {
@@ -13754,6 +14076,9 @@ void MainWindow::loadAutoScene()
                 refreshSimRowDisplay(table, row);
             }
         }
+        if (obj.contains("heartbeat") && obj.value("heartbeat").isArray()) {
+            applySimHeartbeatAddrsFromJson(table, obj.value("heartbeat").toArray());
+        }
         rebuildSimRowStates(table);
     };
     if (root.contains("main")) {
@@ -13773,6 +14098,13 @@ void MainWindow::loadAutoScene()
     
     if (root.contains("waveforms")) {
         applyWaveformsFromJson(root.value("waveforms").toArray());
+    }
+    if (root.contains("logShowHeartbeat")) {
+        simLogShowHeartbeat = root.value("logShowHeartbeat").toBool();
+        if (chkSimLogShowHeartbeat) {
+            const QSignalBlocker blocker(chkSimLogShowHeartbeat);
+            chkSimLogShowHeartbeat->setChecked(simLogShowHeartbeat);
+        }
     }
 }
 

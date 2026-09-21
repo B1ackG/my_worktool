@@ -610,6 +610,7 @@ private:
     QPushButton *btnSimRunScript;
     QPushButton *btnSimStopScript;
     QTextEdit *txtSimLog;
+    QCheckBox *chkSimLogShowHeartbeat = nullptr;
     QPushButton *btnExportHistory;
     QTabWidget *tabSimTools; // 新增：模拟器子功能Tab
 
@@ -618,6 +619,10 @@ private:
     QMap<QString, QMap<quint16, quint16>> simLastReadValues;
     QTimer *simWriteRefreshTimer = nullptr;
     QHash<QTableWidget *, QSet<quint16>> simPendingWriteAddrs;
+    QHash<QTableWidget *, QSet<quint16>> simHeartbeatAddrs;
+    bool simLogShowHeartbeat = false;
+    bool simHeartbeatUpdating = false;
+    QTimer *simHeartbeatSaveTimer = nullptr;
     // address -> primary row (Address column match)
     QHash<QTableWidget *, QHash<quint16, int>> simAddrToRow;
     // address -> rows whose multi-word span covers this address
@@ -818,6 +823,14 @@ private:
     void copyRegisterMapSelection(QTableWidget *table);
     void pasteRegisterMapFromClipboard(QTableWidget *table, int startRow, int startColumn);
     void setupSimulatorRegisterTable(QTableWidget *table);
+    void ensureSimHeartbeatItem(QTableWidget *table, int row);
+    void refreshSimHeartbeatColumn(QTableWidget *table);
+    void saveSimHeartbeatSettings();
+    void loadSimHeartbeatSettings();
+    QJsonArray simHeartbeatAddrsToJson(QTableWidget *table) const;
+    void applySimHeartbeatAddrsFromJson(QTableWidget *table, const QJsonArray &arr);
+    void setSimHeartbeatRow(QTableWidget *table, int row, bool on);
+    bool isSimHeartbeatAddress(QTableWidget *table, quint16 addr) const;
     void syncSimulatorTablesFromMaps();
     void rebuildSlaveReadbackMaps();
     void setRegisterMapReadbackForWriteAddr(QTableWidget *mapTable, quint16 writeAddr, quint16 readbackAddr);
