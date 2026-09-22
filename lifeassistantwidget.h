@@ -21,6 +21,7 @@
 #include <QListWidget>
 #include <QStackedWidget>
 #include <QProcess>
+#include <QDateTime>
 #include "capturewindow.h"
 #include "ruledialog.h"
 
@@ -51,9 +52,12 @@ private slots:
     void showTaskContextMenu(const QPoint &pos);
     void editTaskAt(int row);
     void onProcessCaptured(const QString &proc);
+    void onWatchProcessCaptured(const QString &title);
     void toggleFatigue(bool enabled);
     void onSidebarChanged(int index);
     void checkWorkDay();
+    void checkIdleShutdown();
+    void onIdleShutdownToggled(bool enabled);
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -87,6 +91,14 @@ private:
     QProcess *focusProcess = nullptr;
 
     QPushButton *pickBtn = nullptr;
+    QCheckBox *idleEnableCheck = nullptr;
+    QTimeEdit *idleStartEdit = nullptr;
+    QLineEdit *idleProcEdit = nullptr;
+    QSpinBox *idleDelaySpin = nullptr;
+    QLabel *idleStatusLabel = nullptr;
+    bool idleArmed = false;
+    bool countdownActive = false;
+    QDateTime countdownEndsAt;
     bool isPicking = false;
 
     QElapsedTimer useTimer;
@@ -99,11 +111,16 @@ private:
     QString lastFocusTitle;
     QString lastFocusProc;
 
-    QString getActiveWindowTitle();
-    QString getActiveWindowProcessName();
+    QString getActiveWindowTitle() const;
+    QString getActiveWindowProcessName() const;
     void requestFocusSnapshot();
     void applyFocusSnapshot(const QString &title, const QString &proc);
     void shutdownSystem();
+    void scheduleShutdown(int seconds);
+    void abortShutdown();
+    void setIdleArmed(bool armed);
+    void updateIdleStatusLabel(const QString &text);
+    bool isWatchedWindowForeground(const QString &watchedTitle) const;
     void executeBlockAction(const QString &title, const QString &proc);
     bool checkSingleRule(const ShieldRule &rule, const QString &title, const QString &proc);
     bool isBrowser(const QString &proc);

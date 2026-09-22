@@ -4,10 +4,18 @@
 #include <QProcess>
 #include <QStyleFactory>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <string>
+#endif
+
 // GNOME autostart often races Xft.dpi: Qt then uses physical DPI (~188 on HiDPI)
 // as logical DPI and point fonts become ~2x. Prefer X resources; else 96.
 static int resolveSessionFontDpi()
 {
+#ifdef Q_OS_WIN
+    return 96;
+#else
     QProcess xrdb;
     xrdb.start(QStringLiteral("xrdb"), {QStringLiteral("-query")});
     if (!xrdb.waitForFinished(800) || xrdb.exitStatus() != QProcess::NormalExit || xrdb.exitCode() != 0)
@@ -22,10 +30,50 @@ static int resolveSessionFontDpi()
             return dpi;
     }
     return 96;
+#endif
 }
+
+#ifdef Q_OS_WIN
+// HKCU Run / Startup shortcuts often start with CWD=System32. Pin CWD, PATH and
+// the platform plugin dir to the exe folder before QApplication loads QPA.
+static void prepareWindowsAppEnvironment()
+{
+    wchar_t modulePath[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH)
+        return;
+
+    wchar_t *lastSlash = wcsrchr(modulePath, L'\\');
+    if (!lastSlash)
+        return;
+    *lastSlash = L'\0';
+
+    const std::wstring dir(modulePath);
+    SetCurrentDirectoryW(dir.c_str());
+    SetDllDirectoryW(dir.c_str());
+
+    const std::wstring platforms = dir + L"\\platforms";
+    const DWORD attrs = GetFileAttributesW(platforms.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+        SetEnvironmentVariableW(L"QT_QPA_PLATFORM_PLUGIN_PATH", platforms.c_str());
+
+    wchar_t oldPath[32768];
+    const DWORD oldLen = GetEnvironmentVariableW(L"PATH", oldPath, 32768);
+    if (oldLen > 0 && oldLen < 32767) {
+        const std::wstring combined = dir + L';' + oldPath;
+        SetEnvironmentVariableW(L"PATH", combined.c_str());
+    } else {
+        SetEnvironmentVariableW(L"PATH", dir.c_str());
+    }
+}
+#endif
 
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    prepareWindowsAppEnvironment();
+#endif
+
     if (qEnvironmentVariableIsEmpty("QT_FONT_DPI"))
         qputenv("QT_FONT_DPI", QByteArray::number(resolveSessionFontDpi()));
 

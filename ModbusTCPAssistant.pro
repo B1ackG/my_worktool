@@ -59,7 +59,7 @@ HEADERS += \
     platformprefs.h \
     deepseekclient.h
 
-win32: LIBS += -lpsapi -luser32
+win32: LIBS += -lpsapi -luser32 -lole32 -luuid -lshell32 -ladvapi32
 
 # Qt 5 MinGW needs OpenSSL 1.1 DLLs beside the exe for HTTPS (DeepSeek, etc.).
 win32 {

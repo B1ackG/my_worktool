@@ -9,6 +9,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 
 namespace {
@@ -239,16 +240,28 @@ bool WinDeployPackager::copySiblingRuntimeFiles(const QString &exePath, const QS
 bool WinDeployPackager::copyProjectIniFiles(const QString &repoDir, const QString &exeDir,
                                             const QString &destDir, QString *errorOut)
 {
-    auto copyInisFrom = [&](const QString &dir) {
+    QSet<QString> fromRelease;
+
+    auto copyInisFrom = [&](const QString &dir, bool onlyIfMissing) {
         if (dir.isEmpty() || !QDir(dir).exists()) {
             return true;
         }
-        if (QDir::cleanPath(dir).compare(QDir::cleanPath(exeDir), Qt::CaseInsensitive) == 0) {
-            return true;
-        }
+        const bool alreadyCopiedAsSibling =
+            QDir::cleanPath(dir).compare(QDir::cleanPath(exeDir), Qt::CaseInsensitive) == 0;
         const QFileInfoList files = QDir(dir).entryInfoList(QStringList() << QStringLiteral("*.ini"),
                                                             QDir::Files);
         for (const QFileInfo &fi : files) {
+            const QString key = fi.fileName().toLower();
+            if (!onlyIfMissing) {
+                fromRelease.insert(key);
+            }
+            if (alreadyCopiedAsSibling) {
+                continue;
+            }
+            if (onlyIfMissing && fromRelease.contains(key)) {
+                log(QStringLiteral("跳过 %1（已有 release 版本）").arg(fi.fileName()));
+                continue;
+            }
             if (!copyOneFile(fi.absoluteFilePath(), destDir, errorOut)) {
                 return false;
             }
@@ -256,10 +269,11 @@ bool WinDeployPackager::copyProjectIniFiles(const QString &repoDir, const QStrin
         return true;
     };
 
-    if (!copyInisFrom(repoDir)) {
+    const QString releaseDir = QDir(repoDir).filePath(QStringLiteral("release"));
+    if (!copyInisFrom(releaseDir, false)) {
         return false;
     }
-    if (!copyInisFrom(QDir(repoDir).filePath(QStringLiteral("release")))) {
+    if (!copyInisFrom(repoDir, true)) {
         return false;
     }
     return true;

@@ -34,7 +34,10 @@
 #include <QFileInfo>
 #include <QShowEvent>
 #include <QHideEvent>
+#include <QSignalBlocker>
+#include <algorithm>
 
+#include <QDateTime>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
@@ -47,6 +50,7 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
     // 初始化悬浮窗
     captureWin = new CaptureWindow();
     connect(captureWin, &CaptureWindow::procConfirmed, this, &LifeAssistantWidget::onProcessCaptured);
+    connect(captureWin, &CaptureWindow::watchProcConfirmed, this, &LifeAssistantWidget::onWatchProcessCaptured);
     useTimer.start();
 
     networkManager = new QNetworkAccessManager(this);
@@ -275,7 +279,8 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
 
     // 监控预览 & 捕获
     QGroupBox *topGroup = new QGroupBox("实时状态与程序捕获");
-    QHBoxLayout *topH = new QHBoxLayout(topGroup);
+    QVBoxLayout *topV = new QVBoxLayout(topGroup);
+    QHBoxLayout *topH = new QHBoxLayout();
     focusInfoLabel = new QLabel("窗口: 正在检测...");
     processNameLabel = new QLabel("进程: 正在检测...");
     pickBtn = new QPushButton("捕获当前程序 (5s)");
@@ -283,6 +288,27 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
     topH->addWidget(focusInfoLabel, 2);
     topH->addWidget(processNameLabel, 1);
     topH->addWidget(pickBtn, 1);
+    topV->addLayout(topH);
+
+    QHBoxLayout *idleH = new QHBoxLayout();
+    idleEnableCheck = new QCheckBox("窗口离开前台则关机");
+    idleStartEdit = new QTimeEdit(QTime(23, 0));
+    idleStartEdit->setDisplayFormat("HH:mm");
+    idleProcEdit = new QLineEdit();
+    idleProcEdit->setPlaceholderText("监控窗口标题，可捕获填入");
+    idleDelaySpin = new QSpinBox();
+    idleDelaySpin->setRange(1, 600);
+    idleDelaySpin->setValue(60);
+    idleDelaySpin->setSuffix("秒");
+    idleH->addWidget(idleEnableCheck);
+    idleH->addWidget(new QLabel("开始"));
+    idleH->addWidget(idleStartEdit);
+    idleH->addWidget(idleProcEdit, 1);
+    idleH->addWidget(new QLabel("倒计时"));
+    idleH->addWidget(idleDelaySpin);
+    topV->addLayout(idleH);
+    idleStatusLabel = new QLabel("未启用");
+    topV->addWidget(idleStatusLabel);
     toolPageLayout->addWidget(topGroup);
 
     QSplitter *mainSplitter = new QSplitter(Qt::Horizontal);
@@ -357,12 +383,14 @@ LifeAssistantWidget::LifeAssistantWidget(QWidget *parent)
 
     checkTimer = new QTimer(this);
     connect(checkTimer, &QTimer::timeout, this, &LifeAssistantWidget::checkTasks);
+    connect(checkTimer, &QTimer::timeout, this, &LifeAssistantWidget::checkIdleShutdown);
     checkTimer->start(1000);
 
     // 信号绑定
     connect(pickBtn, &QPushButton::clicked, this, &LifeAssistantWidget::startPickWindow);
     connect(saveBtn, &QPushButton::clicked, this, &LifeAssistantWidget::saveSettings);
     connect(fatigueCheck, &QCheckBox::toggled, this, &LifeAssistantWidget::toggleFatigue);
+    connect(idleEnableCheck, &QCheckBox::toggled, this, &LifeAssistantWidget::onIdleShutdownToggled);
 
     loadSettings();
     checkWorkDay();
@@ -416,6 +444,31 @@ void LifeAssistantWidget::toggleFatigue(bool enabled) {
         useTimer.start();
         isBlockingState = false;
     }
+}
+
+void LifeAssistantWidget::onWatchProcessCaptured(const QString &title)
+{
+    const QString watched = title.trimmed();
+    if (watched.isEmpty()) {
+        QMessageBox::warning(this, "提示", "未能设为关机监控窗口。");
+        return;
+    }
+    if (idleProcEdit)
+        idleProcEdit->setText(watched);
+    QMessageBox::information(this, "已设置",
+        QString("窗口 [%1] 已设为关机监控窗口。").arg(watched));
+}
+
+void LifeAssistantWidget::onIdleShutdownToggled(bool enabled)
+{
+    if (enabled) {
+        checkIdleShutdown();
+        return;
+    }
+    if (countdownActive)
+        abortShutdown();
+    setIdleArmed(false);
+    updateIdleStatusLabel(QStringLiteral("未启用"));
 }
 
 void LifeAssistantWidget::onProcessCaptured(const QString &proc) {
@@ -593,6 +646,11 @@ void LifeAssistantWidget::saveSettings() {
     s.setValue("f_w", workSpin->value());
     s.setValue("f_r", restSpin->value());
 
+    s.setValue("idle_en", idleEnableCheck && idleEnableCheck->isChecked());
+    s.setValue("idle_start", idleStartEdit ? idleStartEdit->time().toString("HH:mm") : QStringLiteral("23:00"));
+    s.setValue("idle_proc", idleProcEdit ? idleProcEdit->text().trimmed() : QString());
+    s.setValue("idle_delay", idleDelaySpin ? idleDelaySpin->value() : 60);
+
     QMessageBox::information(this, "结果", "配置已保存！");
 }
 
@@ -650,6 +708,21 @@ void LifeAssistantWidget::loadSettings() {
     workSpin->setValue(s.value("f_w", 40).toInt());
     restSpin->setValue(s.value("f_r", 10).toInt());
 
+    if (idleEnableCheck) {
+        QSignalBlocker blocker(idleEnableCheck);
+        idleEnableCheck->setChecked(s.value("idle_en", false).toBool());
+    }
+    if (idleStartEdit) {
+        const QTime start = QTime::fromString(s.value("idle_start", "23:00").toString(), "HH:mm");
+        idleStartEdit->setTime(start.isValid() ? start : QTime(23, 0));
+    }
+    if (idleProcEdit)
+        idleProcEdit->setText(s.value("idle_proc").toString());
+    if (idleDelaySpin)
+        idleDelaySpin->setValue(s.value("idle_delay", 60).toInt());
+    idleArmed = s.value("idle_armed", false).toBool();
+    countdownActive = false;
+
     QJsonArray sArr = QJsonDocument::fromJson(s.value("st_v2").toByteArray()).array();
     taskTable->setRowCount(0);
     for (auto v : sArr) {
@@ -660,6 +733,7 @@ void LifeAssistantWidget::loadSettings() {
         qobject_cast<QTimeEdit *>(taskTable->cellWidget(r, 1))->setTime(QTime::fromString(o["t"].toString(), "HH:mm"));
         qobject_cast<QComboBox *>(taskTable->cellWidget(r, 2))->setCurrentIndex(o["y"].toInt());
     }
+    checkIdleShutdown();
 }
 
 bool LifeAssistantWidget::isBrowser(const QString &p) {
@@ -866,6 +940,107 @@ void LifeAssistantWidget::addTask() {
     taskTable->setCellWidget(r, 3, d);
 }
 
+void LifeAssistantWidget::checkIdleShutdown()
+{
+    if (!idleEnableCheck || !idleEnableCheck->isChecked()) {
+        if (countdownActive)
+            abortShutdown();
+        if (idleArmed)
+            setIdleArmed(false);
+        updateIdleStatusLabel(QStringLiteral("未启用"));
+        return;
+    }
+
+    const QString watched = idleProcEdit ? idleProcEdit->text().trimmed() : QString();
+    if (watched.isEmpty()) {
+        if (countdownActive)
+            abortShutdown();
+        updateIdleStatusLabel(QStringLiteral("请指定监控窗口"));
+        return;
+    }
+
+    const QTime start = idleStartEdit ? idleStartEdit->time() : QTime(23, 0);
+    const QTime now = QTime::currentTime();
+    if (!idleArmed) {
+        if (now < start) {
+            updateIdleStatusLabel(QStringLiteral("等待开始时间 %1").arg(start.toString("HH:mm")));
+            return;
+        }
+        setIdleArmed(true);
+    }
+
+    if (isWatchedWindowForeground(watched)) {
+        if (countdownActive)
+            abortShutdown();
+        updateIdleStatusLabel(QStringLiteral("监控中（窗口在前台）"));
+        return;
+    }
+
+    const int delay = idleDelaySpin ? idleDelaySpin->value() : 60;
+    if (!countdownActive)
+        scheduleShutdown(delay);
+
+#ifndef Q_OS_WIN
+    if (countdownActive && QDateTime::currentDateTimeUtc() >= countdownEndsAt) {
+        countdownActive = false;
+        QProcess::startDetached(QStringLiteral("shutdown"), QStringList() << QStringLiteral("now"));
+        return;
+    }
+#endif
+
+    const int remaining = (std::max)(0, static_cast<int>(QDateTime::currentDateTimeUtc().secsTo(countdownEndsAt)));
+    updateIdleStatusLabel(
+        QStringLiteral("已发出关机，剩余约 %1 秒（回到前台将取消）").arg(remaining));
+}
+
+void LifeAssistantWidget::setIdleArmed(bool armed)
+{
+    if (idleArmed == armed)
+        return;
+    idleArmed = armed;
+    QSettings s(QStringLiteral("MyCompany"), QStringLiteral("LifeAssistant"));
+    s.setValue(QStringLiteral("idle_armed"), idleArmed);
+}
+
+void LifeAssistantWidget::updateIdleStatusLabel(const QString &text)
+{
+    if (!idleStatusLabel || idleStatusLabel->text() == text)
+        return;
+    idleStatusLabel->setText(text);
+}
+
+void LifeAssistantWidget::scheduleShutdown(int seconds)
+{
+    if (countdownActive)
+        return;
+    countdownActive = true;
+    const int secs = (std::max)(0, seconds);
+    countdownEndsAt = QDateTime::currentDateTimeUtc().addSecs(secs);
+#ifdef Q_OS_WIN
+    QProcess::startDetached(QStringLiteral("shutdown"),
+                            QStringList() << QStringLiteral("/s") << QStringLiteral("/t") << QString::number(secs));
+#endif
+}
+
+void LifeAssistantWidget::abortShutdown()
+{
+    if (!countdownActive)
+        return;
+    countdownActive = false;
+#ifdef Q_OS_WIN
+    QProcess::startDetached(QStringLiteral("shutdown"), QStringList() << QStringLiteral("/a"));
+#endif
+}
+
+bool LifeAssistantWidget::isWatchedWindowForeground(const QString &watchedTitle) const
+{
+    const QString target = watchedTitle.trimmed();
+    if (target.isEmpty())
+        return false;
+    const QString fg = getActiveWindowTitle();
+    return fg.contains(target, Qt::CaseInsensitive);
+}
+
 void LifeAssistantWidget::checkTasks() {
     QTime now = QTime::currentTime();
     if (now.second() != 0) return;
@@ -933,7 +1108,7 @@ void LifeAssistantWidget::shutdownSystem() {
 #endif
 }
 
-QString LifeAssistantWidget::getActiveWindowTitle() {
+QString LifeAssistantWidget::getActiveWindowTitle() const {
 #ifdef Q_OS_WIN
     HWND hwnd = GetForegroundWindow();
     if (!hwnd) return "";
@@ -949,7 +1124,7 @@ QString LifeAssistantWidget::getActiveWindowTitle() {
 #endif
 }
 
-QString LifeAssistantWidget::getActiveWindowProcessName() {
+QString LifeAssistantWidget::getActiveWindowProcessName() const {
 #ifdef Q_OS_WIN
     HWND hwnd = GetForegroundWindow();
     if (!hwnd) return "";

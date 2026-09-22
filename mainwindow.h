@@ -299,7 +299,9 @@ private:
     bool isAutostartEnabled() const;
     bool setAutostartEnabled(bool enabled);
     QString autostartDesktopFilePath() const;
+    QString autostartShortcutFilePath() const;
     QString autostartRegistryKey() const;
+    void repairWindowsAutostartIfNeeded();
     CloseBehavior closeBehavior() const;
     void setCloseBehavior(CloseBehavior behavior);
     bool promptCloseBehavior(CloseBehavior *chosenOut);
@@ -722,6 +724,10 @@ private:
     void pushAllUnpushedRepos(const QStringList &repoDirs);
     /** 启动后若远程领先本地则弹窗提示处理。 */
     void promptRemoteAheadOnOpen();
+    /** 启动时对当前仓库 fetch，再检查远程是否领先。 */
+    void startStartupRemoteCheck();
+    /** 启动 fetch 失败时提示；返回 true 表示用户要重试。 */
+    bool promptStartupFetchFailed();
     /** 对给定仓库逐个 git pull，将远程领先同步到本地。 */
     void pullAllRemoteAheadRepos(const QStringList &repoDirs);
     void saveGitHistory(const QString &dir);

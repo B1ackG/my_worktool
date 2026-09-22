@@ -12,7 +12,12 @@
 #include "windeploydialog.h"
 #include "windeploypackager.h"
 #ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <shlobj.h>
+#include <objbase.h>
 #endif
 #include <QMessageBox>
 #include <QCloseEvent>
@@ -70,6 +75,7 @@
 #include <QProgressBar>
 #include <QStatusBar>
 #include <QStandardPaths>
+#include <QLibraryInfo>
 #include <QMenuBar>
 #include <QActionGroup>
 #include <QKeySequence>
@@ -846,6 +852,7 @@ MainWindow::MainWindow(QWidget *parent)
     createWidgets();
     createLayouts();
     createMenus();
+    repairWindowsAutostartIfNeeded();
     createConnections();
     setupSystemTray();
     connect(qApp, &QGuiApplication::commitDataRequest,
@@ -2333,11 +2340,222 @@ void MainWindow::showPlatformModeDialog()
                                           : QStringLiteral("Linux")));
 }
 
+namespace {
+
+#ifdef Q_OS_WIN
+QString windowsStartupFolder()
+{
+    wchar_t path[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_STARTUP, nullptr, SHGFP_TYPE_CURRENT, path)))
+        return QString::fromWCharArray(path);
+    const QString programs = QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation);
+    return programs + QStringLiteral("/Startup");
+}
+
+QString windowsAutostartVbsPath()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    return QDir(dir).filePath(QStringLiteral("autostart-launch.vbs"));
+}
+
+bool windowsRuntimeDeployed(const QString &appDir)
+{
+    const QDir dir(appDir);
+    const bool hasPlugin = QFileInfo::exists(dir.filePath(QStringLiteral("platforms/qwindows.dll")))
+                           || QFileInfo::exists(dir.filePath(QStringLiteral("platforms/qwindowsd.dll")));
+    if (!hasPlugin)
+        return false;
+    return QFileInfo::exists(dir.filePath(QStringLiteral("Qt6Core.dll")))
+           || QFileInfo::exists(dir.filePath(QStringLiteral("Qt6Cored.dll")))
+           || QFileInfo::exists(dir.filePath(QStringLiteral("Qt5Core.dll")))
+           || QFileInfo::exists(dir.filePath(QStringLiteral("Qt5Cored.dll")));
+}
+
+bool writeUtf16LeFile(const QString &path, const QString &content)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const ushort bom = 0xFEFF;
+    if (file.write(reinterpret_cast<const char *>(&bom), 2) != 2)
+        return false;
+    const int bytes = content.size() * int(sizeof(ushort));
+    return file.write(reinterpret_cast<const char *>(content.utf16()), bytes) == bytes;
+}
+
+bool writeWindowsShortcut(const QString &lnkPath, const QString &target, const QString &arguments,
+                          const QString &workDir, const QString &iconPath)
+{
+    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool needUninit = (initHr == S_OK);
+    if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE && initHr != S_FALSE)
+        return false;
+
+    IShellLinkW *link = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                                  reinterpret_cast<void **>(&link));
+    if (FAILED(hr) || !link) {
+        if (needUninit)
+            CoUninitialize();
+        return false;
+    }
+
+    const QString nativeTarget = QDir::toNativeSeparators(target);
+    const QString nativeWorkDir = QDir::toNativeSeparators(workDir);
+    const QString nativeIcon = QDir::toNativeSeparators(iconPath.isEmpty() ? target : iconPath);
+    link->SetPath(reinterpret_cast<const wchar_t *>(nativeTarget.utf16()));
+    link->SetWorkingDirectory(reinterpret_cast<const wchar_t *>(nativeWorkDir.utf16()));
+    link->SetArguments(reinterpret_cast<const wchar_t *>(arguments.utf16()));
+    link->SetIconLocation(reinterpret_cast<const wchar_t *>(nativeIcon.utf16()), 0);
+    link->SetShowCmd(SW_SHOWNORMAL);
+
+    IPersistFile *persist = nullptr;
+    hr = link->QueryInterface(IID_IPersistFile, reinterpret_cast<void **>(&persist));
+    bool ok = false;
+    if (SUCCEEDED(hr) && persist) {
+        const QString nativeLnk = QDir::toNativeSeparators(lnkPath);
+        ok = SUCCEEDED(persist->Save(reinterpret_cast<const wchar_t *>(nativeLnk.utf16()), TRUE));
+        persist->Release();
+    }
+    link->Release();
+    if (needUninit)
+        CoUninitialize();
+    return ok;
+}
+
+const wchar_t kRunSubKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t kApprovedRunSubKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+const wchar_t kApprovedFolderSubKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder";
+
+QString readRunValue(const QString &valueName)
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunSubKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return QString();
+    wchar_t buf[4096] = {};
+    DWORD size = sizeof(buf);
+    DWORD type = 0;
+    const LONG rc = RegQueryValueExW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()), nullptr, &type,
+                                     reinterpret_cast<LPBYTE>(buf), &size);
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+        return QString();
+    return QString::fromWCharArray(buf);
+}
+
+void writeApprovedValue(const wchar_t *subKey, const QString &valueName, bool enabled)
+{
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, subKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr)
+        != ERROR_SUCCESS) {
+        return;
+    }
+    if (!enabled) {
+        RegDeleteValueW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()));
+        RegCloseKey(key);
+        return;
+    }
+    BYTE data[12] = {0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    RegSetValueExW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()), 0, REG_BINARY, data, sizeof(data));
+    RegCloseKey(key);
+}
+
+void setStartupApproved(const QString &valueName, bool folderItem, bool enabled)
+{
+    writeApprovedValue(folderItem ? kApprovedFolderSubKey : kApprovedRunSubKey, valueName, enabled);
+}
+
+void removeLegacyRunValue(const QString &valueName)
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunSubKey, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+        RegDeleteValueW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()));
+        RegCloseKey(key);
+    }
+    setStartupApproved(valueName, false, false);
+}
+
+QString vbsQuote(const QString &value)
+{
+    QString quoted = value;
+    quoted.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    return quoted;
+}
+
+bool writeAutostartLaunchVbs(const QString &vbsPath, const QString &exePath, const QString &appDir,
+                             QString *errorOut)
+{
+    const QString qtBin = QDir::toNativeSeparators(QLibraryInfo::location(QLibraryInfo::BinariesPath));
+    const QString plugins = QDir::toNativeSeparators(
+        QDir(QLibraryInfo::location(QLibraryInfo::PluginsPath)).filePath(QStringLiteral("platforms")));
+    const QString mingwBin = QDir::toNativeSeparators(WinDeployPackager::guessMingwBin(
+        QLibraryInfo::location(QLibraryInfo::PrefixPath)));
+    const QString nativeExe = QDir::toNativeSeparators(exePath);
+    const QString nativeDir = QDir::toNativeSeparators(appDir);
+
+    QString pathExtra = nativeDir;
+    if (!mingwBin.isEmpty())
+        pathExtra += QLatin1Char(';') + mingwBin;
+    if (!qtBin.isEmpty())
+        pathExtra += QLatin1Char(';') + qtBin;
+
+    if (!QFileInfo::exists(QDir(qtBin).filePath(QStringLiteral("Qt5Core.dll")))
+        && !QFileInfo::exists(QDir(qtBin).filePath(QStringLiteral("Qt5Cored.dll")))
+        && !QFileInfo::exists(QDir(qtBin).filePath(QStringLiteral("Qt6Core.dll")))
+        && !QFileInfo::exists(QDir(qtBin).filePath(QStringLiteral("Qt6Cored.dll")))) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("找不到当前 Qt 的 bin 目录，无法为未打包的程序准备开机自启动。");
+        }
+        return false;
+    }
+
+    const QString content =
+        QStringLiteral("Option Explicit\n")
+        + QStringLiteral("Dim sh, fso, exeDir, exePath, pathExtra, pluginDir\n")
+        + QStringLiteral("Set sh = CreateObject(\"WScript.Shell\")\n")
+        + QStringLiteral("Set fso = CreateObject(\"Scripting.FileSystemObject\")\n")
+        + QStringLiteral("exeDir = \"%1\"\n").arg(vbsQuote(nativeDir))
+        + QStringLiteral("exePath = \"%1\"\n").arg(vbsQuote(nativeExe))
+        + QStringLiteral("pathExtra = \"%1\"\n").arg(vbsQuote(pathExtra))
+        + QStringLiteral("sh.CurrentDirectory = exeDir\n")
+        + QStringLiteral("sh.Environment(\"Process\")(\"PATH\") = pathExtra & \";\" & sh.Environment(\"Process\")(\"PATH\")\n")
+        + QStringLiteral("pluginDir = exeDir & \"\\platforms\"\n")
+        + QStringLiteral("If Not fso.FolderExists(pluginDir) Then\n")
+        + QStringLiteral("  pluginDir = \"%1\"\n").arg(vbsQuote(plugins))
+        + QStringLiteral("End If\n")
+        + QStringLiteral("If fso.FolderExists(pluginDir) Then\n")
+        + QStringLiteral("  sh.Environment(\"Process\")(\"QT_QPA_PLATFORM_PLUGIN_PATH\") = pluginDir\n")
+        + QStringLiteral("End If\n")
+        + QStringLiteral("sh.Run \"\"\"\" & exePath & \"\"\" --autostart\", 1, False\n");
+
+    QDir().mkpath(QFileInfo(vbsPath).absolutePath());
+    if (!writeUtf16LeFile(vbsPath, content)) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入启动脚本: %1").arg(QDir::toNativeSeparators(vbsPath));
+        return false;
+    }
+    return true;
+}
+#endif
+
+} // namespace
+
 QString MainWindow::autostartDesktopFilePath() const
 {
     const QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation)
                                  + QStringLiteral("/autostart");
     return autostartDir + QStringLiteral("/ModbusTCPAssistant.desktop");
+}
+
+QString MainWindow::autostartShortcutFilePath() const
+{
+#ifdef Q_OS_WIN
+    return windowsStartupFolder() + QLatin1String("\\LinuxHelper.lnk");
+#else
+    return autostartDesktopFilePath();
+#endif
 }
 
 QString MainWindow::autostartRegistryKey() const
@@ -2348,12 +2566,12 @@ QString MainWindow::autostartRegistryKey() const
 bool MainWindow::isAutostartEnabled() const
 {
 #ifdef Q_OS_WIN
-    QSettings runKey(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                     QSettings::NativeFormat);
-    const QString stored = runKey.value(autostartRegistryKey()).toString();
-    if (stored.isEmpty()) {
+    if (QFile::exists(autostartShortcutFilePath()))
+        return true;
+
+    const QString stored = readRunValue(autostartRegistryKey());
+    if (stored.isEmpty())
         return false;
-    }
     const QString execPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     return stored.contains(execPath, Qt::CaseInsensitive);
 #else
@@ -2374,18 +2592,51 @@ bool MainWindow::isAutostartEnabled() const
 bool MainWindow::setAutostartEnabled(bool enabled)
 {
 #ifdef Q_OS_WIN
-    QSettings runKey(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                     QSettings::NativeFormat);
-    if (enabled) {
-        const QString execPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-        runKey.setValue(autostartRegistryKey(), QStringLiteral("\"%1\"").arg(execPath));
-    } else {
-        runKey.remove(autostartRegistryKey());
+    const QString shortcutPath = autostartShortcutFilePath();
+    const QString vbsPath = windowsAutostartVbsPath();
+    const QString valueName = autostartRegistryKey();
+
+    auto persistFlag = [enabled]() {
+        QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+        settings.setValue(QStringLiteral("autostart/enabled"), enabled);
+    };
+
+    if (!enabled) {
+        removeLegacyRunValue(valueName);
+        bool ok = true;
+        if (QFile::exists(shortcutPath) && !QFile::remove(shortcutPath))
+            ok = false;
+        if (QFile::exists(vbsPath))
+            QFile::remove(vbsPath);
+        setStartupApproved(QFileInfo(shortcutPath).fileName(), true, false);
+        persistFlag();
+        return ok;
     }
-    runKey.sync();
-    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    settings.setValue(QStringLiteral("autostart/enabled"), enabled);
-    return runKey.status() == QSettings::NoError;
+
+    QDir().mkpath(windowsStartupFolder());
+    const QString execPath = QCoreApplication::applicationFilePath();
+    const QString appDir = QCoreApplication::applicationDirPath();
+    bool wrote = false;
+    if (windowsRuntimeDeployed(appDir)) {
+        wrote = writeWindowsShortcut(shortcutPath, execPath, QStringLiteral("--autostart"), appDir, execPath);
+    } else {
+        QString error;
+        if (!writeAutostartLaunchVbs(vbsPath, execPath, appDir, &error))
+            return false;
+        const QString windir = qEnvironmentVariable("WINDIR", QStringLiteral("C:/Windows"));
+        const QString wscript = QDir(windir).filePath(QStringLiteral("System32/wscript.exe"));
+        if (!QFileInfo::exists(wscript))
+            return false;
+        const QString args = QStringLiteral("//nologo \"%1\"").arg(QDir::toNativeSeparators(vbsPath));
+        wrote = writeWindowsShortcut(shortcutPath, wscript, args, appDir, execPath);
+    }
+    if (!wrote)
+        return false;
+
+    removeLegacyRunValue(valueName);
+    setStartupApproved(QFileInfo(shortcutPath).fileName(), true, true);
+    persistFlag();
+    return true;
 #else
     const QString desktopPath = autostartDesktopFilePath();
     const QFileInfo desktopInfo(desktopPath);
@@ -2454,10 +2705,43 @@ void MainWindow::onAutostartToggled(bool checked)
         return;
 
     syncAutostartActionState();
+#ifdef Q_OS_WIN
+    QMessageBox::warning(this,
+                         QStringLiteral("设置失败"),
+                         checked ? QStringLiteral("无法启用开机自启动。\n\n"
+                                                  "请确认当前 Qt 套件可用，或先用「工具 → 打包 Windows 目录」"
+                                                  "生成带 platforms 的目录后再勾选。")
+                                 : QStringLiteral("无法关闭开机自启动，请检查启动文件夹权限。"));
+#else
     QMessageBox::warning(this,
                          QStringLiteral("设置失败"),
                          checked ? QStringLiteral("无法启用开机自启动，请检查程序是否有写入权限。")
                                  : QStringLiteral("无法关闭开机自启动，请检查 autostart 目录权限。"));
+#endif
+}
+
+void MainWindow::repairWindowsAutostartIfNeeded()
+{
+#ifdef Q_OS_WIN
+    const QString shortcutPath = autostartShortcutFilePath();
+    const bool hasShortcut = QFile::exists(shortcutPath);
+
+    const QString stored = readRunValue(autostartRegistryKey());
+    const bool hasRun = !stored.isEmpty();
+
+    if (hasShortcut && hasRun) {
+        removeLegacyRunValue(autostartRegistryKey());
+        setStartupApproved(QFileInfo(shortcutPath).fileName(), true, true);
+        return;
+    }
+    if (hasShortcut)
+        return;
+    if (!hasRun)
+        return;
+
+    if (setAutostartEnabled(true))
+        syncAutostartActionState();
+#endif
 }
 
 MainWindow::CloseBehavior MainWindow::closeBehavior() const
@@ -6891,6 +7175,57 @@ QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
     return items;
 }
 
+bool MainWindow::promptStartupFetchFailed()
+{
+    if (txtGitLog) {
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[启动检查] git fetch 失败，无法确认远端是否有新提交。</font>"));
+    }
+
+    QString repoHint;
+    if (cmbGitDir) {
+        const QString repoDir = cmbGitDir->currentText().trimmed();
+        if (!repoDir.isEmpty()) {
+            repoHint = gitRepoDisplayName(repoDir);
+            if (repoHint.isEmpty()) {
+                repoHint = QFileInfo(repoDir).fileName();
+            }
+        }
+    }
+
+    QString text = QStringLiteral("启动时无法从远程更新仓库信息（网络失败或超时）。");
+    if (!repoHint.isEmpty()) {
+        text += QStringLiteral("\n当前仓库：%1").arg(repoHint);
+    }
+    text += QStringLiteral("\n\n随后的「远程是否领先」检查只能依据本地缓存，可能不是最新状态。");
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("启动检查"));
+    box.setText(text);
+    box.addButton(QStringLiteral("稍后"), QMessageBox::RejectRole);
+    QPushButton *retryBtn = box.addButton(QStringLiteral("重试"), QMessageBox::AcceptRole);
+    box.setDefaultButton(retryBtn);
+    box.exec();
+    return box.clickedButton() == retryBtn;
+}
+
+void MainWindow::startStartupRemoteCheck()
+{
+    // 失败改由 promptStartupFetchFailed 提示，不走通用「是否重试」框
+    gitNetworkSuppressRetry = true;
+    runGitNetworkCommand(
+        QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
+        [this](bool ok) {
+            refreshGitBranchesLocal();
+            if (!ok && promptStartupFetchFailed()) {
+                startStartupRemoteCheck();
+                return;
+            }
+            promptRemoteAheadOnOpen();
+        });
+}
+
 void MainWindow::promptRemoteAheadOnOpen()
 {
     const QList<QPair<QString, QString>> items = collectRemoteAheadItems();
@@ -10199,14 +10534,10 @@ void MainWindow::deferredGitRepoInit() {
     if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
         activateGitRepo(repoDir, false);
         refreshGitGoalsTable();
-        // 启动后静默 fetch，再检查远程是否领先本地；失败不弹重试框以免干扰启动
-        gitNetworkSuppressRetry = true;
-        runGitNetworkCommand(
-            QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
-            [this](bool) {
-                refreshGitBranchesLocal();
-                promptRemoteAheadOnOpen();
-            });
+        const int delayMs = QCoreApplication::arguments().contains(QLatin1String("--autostart"))
+                                ? 12000
+                                : 0;
+        QTimer::singleShot(delayMs, this, &MainWindow::startStartupRemoteCheck);
     } else {
         promptRemoteAheadOnOpen();
     }
