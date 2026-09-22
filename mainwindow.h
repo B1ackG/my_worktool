@@ -611,6 +611,7 @@ private:
     QPushButton *btnSimStopScript;
     QTextEdit *txtSimLog;
     QCheckBox *chkSimLogShowHeartbeat = nullptr;
+    QPushButton *btnSimClearLog = nullptr;
     QPushButton *btnExportHistory;
     QTabWidget *tabSimTools; // 新增：模拟器子功能Tab
 
@@ -854,6 +855,7 @@ private:
     void onSimImportCsvClicked();
     void onSimRunScriptClicked();
     void onSimStopScriptClicked();
+    void onSimClearLogClicked();
     void onSimRandomAndWriteClicked_v2(); // unused but keeping to maintain structure if needed
     void onSimTableRowChanged(int row, int column);
     void onSimPopulateFloats();

@@ -919,6 +919,9 @@ MainWindow::MainWindow(QWidget *parent)
             }
         });
     }
+    if (btnSimClearLog) {
+        connect(btnSimClearLog, &QPushButton::clicked, this, &MainWindow::onSimClearLogClicked);
+    }
 
     // initial buttons: start enabled, stop disabled
     btnSimStartMain->setEnabled(true);
@@ -2058,7 +2061,13 @@ QWidget* MainWindow::createSimulatorPage()
     chkSimLogShowHeartbeat->setToolTip(QStringLiteral(
         "勾选后，已标记为心跳的寄存器读写会出现在运行日志中。\n"
         "取消勾选可隐藏周期心跳（例如运行时间秒）造成的刷屏。"));
-    ll->addWidget(chkSimLogShowHeartbeat);
+    btnSimClearLog = new QPushButton(QStringLiteral("清空日志"));
+    btnSimClearLog->setToolTip(QStringLiteral("清空模拟器运行日志显示，不影响寄存器值和读写检测。"));
+    QHBoxLayout *logToolbar = new QHBoxLayout();
+    logToolbar->addWidget(chkSimLogShowHeartbeat);
+    logToolbar->addStretch();
+    logToolbar->addWidget(btnSimClearLog);
+    ll->addLayout(logToolbar);
     txtSimLog = new QTextEdit();
     txtSimLog->setReadOnly(true);
     txtSimLog->setStyleSheet("background: #1e1e1e; color: #00ff00; font-family: Monospace;");
@@ -4334,6 +4343,13 @@ void MainWindow::onSimStopScriptClicked()
     btnSimRunScript->setEnabled(true);
     btnSimStopScript->setEnabled(false);
     txtSimLog->append("脚本调度已停止");
+}
+
+void MainWindow::onSimClearLogClicked()
+{
+    if (txtSimLog) {
+        txtSimLog->clear();
+    }
 }
 
 void MainWindow::refreshSimTableForAddr(QTableWidget *table, quint16 addr)
