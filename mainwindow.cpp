@@ -9,6 +9,8 @@
 #include "inputquickerwidget.h"
 #include "nowheelfilter.h"
 #include "platformprefs.h"
+#include "windeploydialog.h"
+#include "windeploypackager.h"
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -1364,6 +1366,14 @@ void MainWindow::createWidgets()
         QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒"));
     btnGitExeReminderCheckNow = new QPushButton(QStringLiteral("立即检查"));
     btnGitExeReminderCheckNow->setToolTip(QStringLiteral("立刻扫描全部记忆仓库的可执行文件更新（不必等间隔）"));
+    btnWinDeploy = new QPushButton(QStringLiteral("打包 Windows 目录"));
+    btnWinDeploy->setStyleSheet(QStringLiteral("background-color: #e3f2fd; font-weight: bold;"));
+    btnWinDeploy->setToolTip(
+        QStringLiteral("对选中工程运行 windeployqt，生成可整夹拷到工控机的目录（不负责编译）"));
+#ifndef Q_OS_WIN
+    btnWinDeploy->setEnabled(false);
+    btnWinDeploy->setToolTip(QStringLiteral("仅 Windows 可用，Linux 请用下方 SCP 传输。"));
+#endif
     spinGitDiffIntervalMinutes = new QSpinBox();
     spinGitDiffIntervalMinutes->setRange(1, 24 * 60);
     spinGitDiffIntervalMinutes->setValue(5);
@@ -1729,6 +1739,7 @@ QWidget* MainWindow::createGitPage()
     QHBoxLayout *layReminder = new QHBoxLayout();
     layReminder->addWidget(btnGitAutoDiffReminder);
     layReminder->addWidget(btnGitExeReminderCheckNow);
+    layReminder->addWidget(btnWinDeploy);
     layReminder->addWidget(new QLabel(QStringLiteral("检查间隔:")));
     layReminder->addWidget(spinGitDiffIntervalMinutes);
     layReminder->addStretch();
@@ -2216,6 +2227,15 @@ void MainWindow::createMenus()
 
     QAction *actExeCheckNow = toolsMenu->addAction(QStringLiteral("立即检查可执行文件更新"));
     connect(actExeCheckNow, &QAction::triggered, this, &MainWindow::onGitAutoDiffReminderTick);
+
+    QAction *actWinDeploy = toolsMenu->addAction(QStringLiteral("打包 Windows 目录…"));
+    actWinDeploy->setToolTip(
+        QStringLiteral("对选中工程运行 windeployqt，生成可整夹拷到工控机的目录"));
+#ifndef Q_OS_WIN
+    actWinDeploy->setEnabled(false);
+    actWinDeploy->setToolTip(QStringLiteral("仅 Windows 可用，Linux 请用 Git 页的 SCP 传输。"));
+#endif
+    connect(actWinDeploy, &QAction::triggered, this, &MainWindow::onWinDeployClicked);
 
     // --- 设置 ---
     QMenu *settingsMenu = menuBar()->addMenu(QStringLiteral("设置(&S)"));
@@ -2817,6 +2837,7 @@ void MainWindow::createConnections()
     // Stash / 更多操作 are wired via button menus
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
     connect(btnGitExeReminderCheckNow, &QPushButton::clicked, this, &MainWindow::onGitAutoDiffReminderTick);
+    connect(btnWinDeploy, &QPushButton::clicked, this, &MainWindow::onWinDeployClicked);
     connect(gitDiffReminderTimer, &QTimer::timeout, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(spinGitDiffIntervalMinutes, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int minutes){
         int ms = qMax(1, minutes) * 60 * 1000;
@@ -7571,6 +7592,10 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
 
     const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
 
+#ifdef Q_OS_WIN
+    const QString skip = allowRunningApp ? QString() : selfPath;
+    return WinDeployPackager::findLatestExe(workDir, skip);
+#else
     QFileInfo bestBin;
     QFileInfo bestScript;
     QDateTime bestBinTime;
@@ -7590,8 +7615,7 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
 
         // Skip obvious non-deploy paths
         const QString rel = QDir(workDir).relativeFilePath(absPath);
-        if (rel.contains(QStringLiteral("/.venv/")) || rel.startsWith(QStringLiteral(".venv/"))
-            || rel.contains(QStringLiteral("/.git/")) || rel.contains(QStringLiteral("/node_modules/"))) {
+        if (WinDeployPackager::isSkippedDeployPath(rel)) {
             continue;
         }
 
@@ -7620,6 +7644,7 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
         return bestBin;
     }
     return bestScript;
+#endif
 }
 
 static QString deployExeBaselineId(const QString &repoDir)
@@ -9156,6 +9181,31 @@ void MainWindow::onGitOpenSkillsClicked() {
     dlg.exec();
     txtGitLog->append(QStringLiteral("信息: 已打开 Cursor Skills 列表（总 Skill: %1）")
                           .arg(CursorSkillsDialog::globalSkillsRoot()));
+}
+
+void MainWindow::onWinDeployClicked()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+
+    QVector<WinDeployRepoRef> repos;
+    repos.reserve(history.size());
+    QSet<QString> seen;
+    for (const QString &rawPath : history) {
+        const QString absPath = gitGoalsRepoKey(rawPath);
+        if (absPath.isEmpty() || seen.contains(absPath) || !QDir(absPath).exists()) {
+            continue;
+        }
+        seen.insert(absPath);
+        WinDeployRepoRef ref;
+        ref.repoPath = absPath;
+        ref.displayName = gitRepoDisplayName(absPath);
+        repos.append(ref);
+    }
+
+    const QString current = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    WinDeployDialog dlg(repos, current, this);
+    dlg.exec();
 }
 
 QString MainWindow::buildDailyReportContent(QString *errorOut, bool showUiWarnings) {

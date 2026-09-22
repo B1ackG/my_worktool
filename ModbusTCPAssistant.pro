@@ -28,6 +28,8 @@ SOURCES += \
     gitstageguard.cpp \
     gitstagereviewdialog.cpp \
     cursorskillsdialog.cpp \
+    windeploypackager.cpp \
+    windeploydialog.cpp \
     platformprefs.cpp \
     deepseekclient.cpp
 
@@ -52,6 +54,8 @@ HEADERS += \
     gitstageguard.h \
     gitstagereviewdialog.h \
     cursorskillsdialog.h \
+    windeploypackager.h \
+    windeploydialog.h \
     platformprefs.h \
     deepseekclient.h
 

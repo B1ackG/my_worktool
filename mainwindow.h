@@ -228,6 +228,7 @@ private slots:
     void onGitCopyForDailyReportClicked();
     void onGitOpenDailyReportClicked();
     void onGitOpenSkillsClicked();
+    void onWinDeployClicked();
     void onDeepSeekCommitMsgReady(const QString &content);
     void onDeepSeekCommitMsgFailed(const QString &error);
     void onDeepSeekGitHelpReady(const QString &content);
@@ -492,6 +493,7 @@ private:
     QPushButton *btnGitStashPop = nullptr; // 已并入 Stash 菜单
     QPushButton *btnGitAutoDiffReminder;
     QPushButton *btnGitExeReminderCheckNow = nullptr;
+    QPushButton *btnWinDeploy = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
     QComboBox *cmbGitHistory;
     QPushButton *btnGitRefreshLog;
