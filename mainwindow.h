@@ -243,6 +243,7 @@ private slots:
     void onGitGoalStartClicked();
     void onGitGoalRowDoubleClicked(int row, int column);
     void onScpTransferClicked();
+    void onScpUseBackupClicked();
     void onRebootTargetClicked();
     void onScpTargetActivated(int index);
     void saveScpTargetHistory();
@@ -509,6 +510,7 @@ private:
     QComboBox *cmbScpTargetIp;
     QLineEdit *txtScpPassword;
     QPushButton *btnScpTransfer;
+    QPushButton *btnScpUseBackup = nullptr;
     QPushButton *btnRebootTarget;
     QPushButton *btnMonitorUsage;
     QLineEdit *txtMonitorProcess;
@@ -544,7 +546,10 @@ private:
     bool gitNetworkUserCancelled = false;
     bool gitNetworkTimedOut = false;
     bool gitNetworkSuppressRetry = false;
+    bool gitStartupCheckActive = false;
+    bool gitStartupCheckAborted = false;
     QStringList gitNetworkLastArgs;
+    QString gitNetworkLastWorkDir;
     int gitNetworkLastTimeoutMs = 30000;
     std::function<void(bool)> gitNetworkDoneCallback;
     std::function<void(bool)> gitNetworkLastDoneCallback;
@@ -673,13 +678,23 @@ private:
     bool requestAiCommitThenContinueScp(const QString &workDir);
     void commitThenContinueScpTransfer(const QString &commitMsg);
     void continueScpSearchAndTransfer();
+    QString scpDeployBackupRoot(const QString &repoDir) const;
+    QStringList listScpDeployBackupStamps(const QString &repoDir) const;
+    void pruneScpDeployBackups(const QString &backupRoot, int maxKeep = 5);
+    void backupRemoteDeployFileThenContinue(const QString &repoDir, const QString &targetIp,
+                                            const QString &password, const QString &fileName,
+                                            const std::function<void()> &thenContinue);
+    void startScpStopAndUpload(const QString &repoDir, const QString &targetIp,
+                               const QString &password, const QString &fileName,
+                               const QString &latestFile);
     /** Build Git console + repo snapshot for DeepSeek “what next” help. */
     QString collectGitHelpContextForAi(const QString &workDir) const;
     void setGitAiCommitBusy(bool busy);
     void setGitAskDeepSeekBusy(bool busy);
     void showDeepSeekGitHelpDialog(const QString &advice);
     void runGitNetworkCommand(const QStringList &args, int timeoutMs = 30000,
-                              const std::function<void(bool ok)> &done = {});
+                              const std::function<void(bool ok)> &done = {},
+                              const QString &workDirOverride = QString());
     void setGitNetworkBusy(bool busy, const QString &statusText = QString());
     void finishGitNetworkCommand(bool ok, const QString &stdoutText, const QString &stderrText);
     void offerGitNetworkRetry(const QString &reason);
@@ -716,6 +731,8 @@ private:
     int gitBehindCommitCount(const QString &workDir) const;
     /** 返回 (仓库绝对路径, 提示行) 列表，按记忆路径顺序。 */
     QList<QPair<QString, QString>> collectGitPendingExitItems() const;
+    /** 记忆列表中存在且为 Git 仓库的绝对路径（去重，保序）。 */
+    QStringList rememberedGitRepoPaths() const;
     /** 返回远程领先本地的仓库列表，按记忆路径顺序。 */
     QList<QPair<QString, QString>> collectRemoteAheadItems() const;
     void focusGitPendingRepo(const QString &repoDir);
@@ -724,10 +741,13 @@ private:
     void pushAllUnpushedRepos(const QStringList &repoDirs);
     /** 启动后若远程领先本地则弹窗提示处理。 */
     void promptRemoteAheadOnOpen();
-    /** 启动时对当前仓库 fetch，再检查远程是否领先。 */
+    /** 启动时对全部记忆仓库 fetch，再检查远程是否领先。 */
     void startStartupRemoteCheck();
-    /** 启动 fetch 失败时提示；返回 true 表示用户要重试。 */
-    bool promptStartupFetchFailed();
+    /** 按队列逐个 fetch；failedPaths 为已失败的绝对路径。 */
+    void continueStartupRemoteCheck(const QStringList &repos, int index,
+                                    const QStringList &failedPaths);
+    /** 启动 fetch 失败时提示；返回 true 表示用户要重试失败项。 */
+    bool promptStartupFetchFailed(const QStringList &failedPaths);
     /** 对给定仓库逐个 git pull，将远程领先同步到本地。 */
     void pullAllRemoteAheadRepos(const QStringList &repoDirs);
     void saveGitHistory(const QString &dir);

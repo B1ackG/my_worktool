@@ -45,6 +45,11 @@ bool pathUnderDir(const QString &path, const QString &dirPrefix)
     return p == d || p.startsWith(d + QLatin1Char('/'));
 }
 
+bool isDeployBackupPath(const QString &path)
+{
+    return pathUnderDir(path, QStringLiteral("备份"));
+}
+
 bool matchesKnownLogName(const QString &path)
 {
     const QString name = fileNameOf(normalizeRepoPath(path)).toLower();
@@ -240,6 +245,12 @@ bool GitStageGuard::isBlockedPath(const QString &repoDir, const QString &path, Q
     if (p.isEmpty())
         return false;
 
+    if (isDeployBackupPath(p)) {
+        if (reason)
+            *reason = QStringLiteral("部署备份目录");
+        return true;
+    }
+
     if (isExtensionLessDangerous(p, reason))
         return true;
 
@@ -393,6 +404,11 @@ QVector<GitStageEntry> GitStageGuard::collectPending(const QString &repoDir, QSt
     const QHash<QString, QString> ignored = ignoredPathReasons(repoDir, allPaths);
 
     for (GitStageEntry &entry : entries) {
+        if (isDeployBackupPath(entry.path)) {
+            entry.risk = GitStageRisk::Blocked;
+            entry.reason = QStringLiteral("部署备份目录");
+            continue;
+        }
         QString noExtReason;
         if (isExtensionLessDangerous(entry.path, &noExtReason)) {
             entry.risk = GitStageRisk::Blocked;
@@ -449,6 +465,10 @@ QStringList GitStageGuard::suggestIgnorePatterns(const QStringList &paths, bool 
         if (pathUnderDir(path, QStringLiteral("monitor_logs"))
             || path.contains(QLatin1String("/monitor_logs/"))) {
             patterns.insert(QStringLiteral("monitor_logs/"));
+        }
+
+        if (isDeployBackupPath(path)) {
+            patterns.insert(QStringLiteral("备份/"));
         }
 
         if (matchesKnownLogName(path)) {

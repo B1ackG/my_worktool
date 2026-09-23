@@ -20,7 +20,9 @@ bool pathLooksSkipped(const QString &rel)
     return n.contains(QStringLiteral("/.git/")) || n.startsWith(QStringLiteral(".git/"))
         || n.contains(QStringLiteral("/.venv/")) || n.startsWith(QStringLiteral(".venv/"))
         || n.contains(QStringLiteral("/node_modules/"))
-        || n.startsWith(QStringLiteral("node_modules/"));
+        || n.startsWith(QStringLiteral("node_modules/"))
+        || n == QStringLiteral("备份") || n.startsWith(QStringLiteral("备份/"))
+        || n.contains(QStringLiteral("/备份/"));
 }
 
 bool relativeInRelease(const QString &rel)

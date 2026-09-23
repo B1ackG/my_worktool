@@ -1410,7 +1410,10 @@ void MainWindow::createWidgets()
     txtScpPassword->setToolTip(QStringLiteral("明文显示，按目标地址记忆"));
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
-    
+    btnScpUseBackup = new QPushButton(QStringLiteral("使用备份"));
+    btnScpUseBackup->setStyleSheet("background-color: #e8f5e9; font-weight: bold;");
+    btnScpUseBackup->setToolTip(QStringLiteral("从本机工程「备份」目录选择一份时间戳，回传到设备"));
+
     btnRebootTarget = new QPushButton("重启目标");
     btnRebootTarget->setStyleSheet("background-color: #ffccbc; font-weight: bold; color: #d84315;");
 
@@ -1780,6 +1783,7 @@ QWidget* MainWindow::createGitPage()
 
     QHBoxLayout *layScpBtns = new QHBoxLayout();
     layScpBtns->addWidget(btnScpTransfer);
+    layScpBtns->addWidget(btnScpUseBackup);
     layScpBtns->addWidget(btnRebootTarget);
     layScpBtns->addStretch();
     layOps->addLayout(layScpBtns);
@@ -3134,6 +3138,7 @@ void MainWindow::createConnections()
     connect(btnGitReset, &QPushButton::clicked, this, &MainWindow::onGitResetClicked);
     connect(btnGitSoftReset, &QPushButton::clicked, this, &MainWindow::onGitSoftResetClicked);
     connect(btnScpTransfer, &QPushButton::clicked, this, &MainWindow::onScpTransferClicked);
+    connect(btnScpUseBackup, &QPushButton::clicked, this, &MainWindow::onScpUseBackupClicked);
     connect(btnRebootTarget, &QPushButton::clicked, this, &MainWindow::onRebootTargetClicked);
     connect(cmbScpTargetIp, QOverload<int>::of(&QComboBox::activated),
             this, &MainWindow::onScpTargetActivated);
@@ -6488,6 +6493,9 @@ void MainWindow::onGitCancelNetworkClicked()
     }
 
     gitNetworkUserCancelled = true;
+    if (gitStartupCheckActive) {
+        gitStartupCheckAborted = true;
+    }
     if (gitNetworkTimeout) {
         gitNetworkTimeout->stop();
     }
@@ -6566,18 +6574,22 @@ void MainWindow::offerGitNetworkRetry(const QString &reason)
         const QStringList args = gitNetworkLastArgs;
         const int timeoutMs = gitNetworkLastTimeoutMs;
         const auto done = gitNetworkLastDoneCallback;
-        runGitNetworkCommand(args, timeoutMs, done);
+        const QString workDir = gitNetworkLastWorkDir;
+        runGitNetworkCommand(args, timeoutMs, done, workDir);
     } else {
         txtGitLog->append(QStringLiteral("<font color='gray'>[Git] 已跳过此次远程通讯。</font>"));
     }
 }
 
 void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
-                                      const std::function<void(bool ok)> &done)
+                                      const std::function<void(bool ok)> &done,
+                                      const QString &workDirOverride)
 {
     QString pathError;
-    const QString workDir = currentGitWorkDir(&pathError);
-    if (workDir.isEmpty()) {
+    const QString workDir = workDirOverride.trimmed().isEmpty()
+                                ? currentGitWorkDir(&pathError)
+                                : QDir(workDirOverride).absolutePath();
+    if (workDir.isEmpty() || !QDir(workDir).exists()) {
         txtGitLog->append(QStringLiteral("<font color='red'>错误: %1</font>")
                               .arg(pathError.isEmpty() ? QStringLiteral("请先选择Git仓库目录!") : pathError));
         gitNetworkSuppressRetry = false;
@@ -6597,6 +6609,7 @@ void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
     }
 
     gitNetworkLastArgs = args;
+    gitNetworkLastWorkDir = workDirOverride.trimmed();
     gitNetworkLastTimeoutMs = timeoutMs;
     gitNetworkLastDoneCallback = done;
     gitNetworkDoneCallback = done;
@@ -6623,8 +6636,22 @@ void MainWindow::runGitNetworkCommand(const QStringList &args, int timeoutMs,
     gitNetworkProcess->setProgram(PlatformPrefs::gitBinary());
     gitNetworkProcess->setArguments(args);
 
-    txtGitLog->append(QStringLiteral("<font color='cyan'>$ git %1</font>").arg(args.join(QLatin1Char(' '))));
-    setGitNetworkBusy(true, QStringLiteral("正在 git %1 …").arg(args.join(QLatin1Char(' '))));
+    QString repoLabel;
+    if (!workDirOverride.trimmed().isEmpty()) {
+        repoLabel = gitRepoDisplayName(workDir);
+        if (repoLabel.isEmpty()) {
+            repoLabel = QFileInfo(workDir).fileName();
+        }
+    }
+    if (repoLabel.isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>$ git %1</font>").arg(args.join(QLatin1Char(' '))));
+        setGitNetworkBusy(true, QStringLiteral("正在 git %1 …").arg(args.join(QLatin1Char(' '))));
+    } else {
+        txtGitLog->append(QStringLiteral("<font color='cyan'>$ [%1] git %2</font>")
+                              .arg(repoLabel, args.join(QLatin1Char(' '))));
+        setGitNetworkBusy(true, QStringLiteral("正在 [%1] git %2 …")
+                                    .arg(repoLabel, args.join(QLatin1Char(' '))));
+    }
 
     connect(gitNetworkProcess,
             static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
@@ -7140,12 +7167,11 @@ void MainWindow::pushAllUnpushedRepos(const QStringList &repoDirs)
     refreshGitPendingStatusBar();
 }
 
-QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
+QStringList MainWindow::rememberedGitRepoPaths() const
 {
-    QList<QPair<QString, QString>> items;
-
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
     const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
+    QStringList repos;
     QSet<QString> seen;
 
     for (const QString &rawPath : history) {
@@ -7154,11 +7180,20 @@ QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
             continue;
         }
         seen.insert(absPath);
-
         if (!QDir(absPath).exists() || !isGitRepository(absPath)) {
             continue;
         }
+        repos << absPath;
+    }
+    return repos;
+}
 
+QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
+{
+    QList<QPair<QString, QString>> items;
+
+    const QStringList repos = rememberedGitRepoPaths();
+    for (const QString &absPath : repos) {
         const int behind = gitBehindCommitCount(absPath);
         if (behind <= 0) {
             continue;
@@ -7175,36 +7210,35 @@ QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
     return items;
 }
 
-bool MainWindow::promptStartupFetchFailed()
+bool MainWindow::promptStartupFetchFailed(const QStringList &failedPaths)
 {
+    QStringList names;
+    names.reserve(failedPaths.size());
+    for (const QString &absPath : failedPaths) {
+        QString name = gitRepoDisplayName(absPath);
+        if (name.isEmpty()) {
+            name = QFileInfo(absPath).fileName();
+        }
+        names << name;
+    }
+
     if (txtGitLog) {
         txtGitLog->append(
-            QStringLiteral("<font color='orange'>[启动检查] git fetch 失败，无法确认远端是否有新提交。</font>"));
+            QStringLiteral("<font color='orange'>[启动检查] 以下仓库 fetch 失败：\n• %1</font>")
+                .arg(names.join(QStringLiteral("\n• "))));
     }
 
-    QString repoHint;
-    if (cmbGitDir) {
-        const QString repoDir = cmbGitDir->currentText().trimmed();
-        if (!repoDir.isEmpty()) {
-            repoHint = gitRepoDisplayName(repoDir);
-            if (repoHint.isEmpty()) {
-                repoHint = QFileInfo(repoDir).fileName();
-            }
-        }
-    }
-
-    QString text = QStringLiteral("启动时无法从远程更新仓库信息（网络失败或超时）。");
-    if (!repoHint.isEmpty()) {
-        text += QStringLiteral("\n当前仓库：%1").arg(repoHint);
-    }
-    text += QStringLiteral("\n\n随后的「远程是否领先」检查只能依据本地缓存，可能不是最新状态。");
+    const QString text =
+        QStringLiteral("启动时无法从远程更新以下仓库（网络失败或超时）：\n\n• %1\n\n"
+                       "这些仓库的「远程是否领先」检查只能依据本地缓存，可能不是最新状态。")
+            .arg(names.join(QStringLiteral("\n• ")));
 
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(QStringLiteral("启动检查"));
     box.setText(text);
     box.addButton(QStringLiteral("稍后"), QMessageBox::RejectRole);
-    QPushButton *retryBtn = box.addButton(QStringLiteral("重试"), QMessageBox::AcceptRole);
+    QPushButton *retryBtn = box.addButton(QStringLiteral("重试失败项"), QMessageBox::AcceptRole);
     box.setDefaultButton(retryBtn);
     box.exec();
     return box.clickedButton() == retryBtn;
@@ -7212,18 +7246,87 @@ bool MainWindow::promptStartupFetchFailed()
 
 void MainWindow::startStartupRemoteCheck()
 {
-    // 失败改由 promptStartupFetchFailed 提示，不走通用「是否重试」框
+    if (gitStartupCheckActive) {
+        return;
+    }
+    if (gitNetworkBusy) {
+        QTimer::singleShot(800, this, [this]() {
+            if (gitNetworkBusy) {
+                if (txtGitLog) {
+                    txtGitLog->append(
+                        QStringLiteral("<font color='orange'>[启动检查] 其他 git 通讯占用中，"
+                                       "跳过自动 fetch，按本地缓存检查远程领先。</font>"));
+                }
+                promptRemoteAheadOnOpen();
+                return;
+            }
+            startStartupRemoteCheck();
+        });
+        return;
+    }
+
+    const QStringList repos = rememberedGitRepoPaths();
+    if (repos.isEmpty()) {
+        promptRemoteAheadOnOpen();
+        return;
+    }
+
+    gitStartupCheckAborted = false;
+    gitStartupCheckActive = true;
+    if (txtGitLog) {
+        txtGitLog->append(
+            QStringLiteral("<font color='gray'>[启动检查] 正在 fetch %1 个记忆仓库…</font>")
+                .arg(repos.size()));
+    }
+    continueStartupRemoteCheck(repos, 0, QStringList());
+}
+
+void MainWindow::continueStartupRemoteCheck(const QStringList &repos, int index,
+                                            const QStringList &failedPaths)
+{
+    if (gitStartupCheckAborted) {
+        gitStartupCheckActive = false;
+        gitStartupCheckAborted = false;
+        if (txtGitLog) {
+            txtGitLog->append(
+                QStringLiteral("<font color='orange'>[启动检查] 已取消后续 fetch，"
+                               "按已更新的仓库检查远程领先。</font>"));
+        }
+        refreshGitBranchesLocal();
+        promptRemoteAheadOnOpen();
+        return;
+    }
+
+    if (index >= repos.size()) {
+        gitStartupCheckActive = false;
+        refreshGitBranchesLocal();
+        if (!failedPaths.isEmpty() && promptStartupFetchFailed(failedPaths)) {
+            gitStartupCheckActive = true;
+            gitStartupCheckAborted = false;
+            continueStartupRemoteCheck(failedPaths, 0, QStringList());
+            return;
+        }
+        if (txtGitLog && failedPaths.isEmpty()) {
+            txtGitLog->append(
+                QStringLiteral("<font color='gray'>[启动检查] 已检查 %1 个记忆仓库。</font>")
+                    .arg(repos.size()));
+        }
+        promptRemoteAheadOnOpen();
+        return;
+    }
+
+    const QString absPath = repos.at(index);
     gitNetworkSuppressRetry = true;
     runGitNetworkCommand(
         QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
-        [this](bool ok) {
-            refreshGitBranchesLocal();
-            if (!ok && promptStartupFetchFailed()) {
-                startStartupRemoteCheck();
-                return;
+        [this, repos, index, failedPaths](bool ok) {
+            QStringList nextFailed = failedPaths;
+            if (!ok) {
+                nextFailed << repos.at(index);
             }
-            promptRemoteAheadOnOpen();
-        });
+            continueStartupRemoteCheck(repos, index + 1, nextFailed);
+        },
+        absPath);
 }
 
 void MainWindow::promptRemoteAheadOnOpen()
@@ -8680,6 +8783,8 @@ void MainWindow::setGitAiCommitBusy(bool busy)
     }
     if (btnScpTransfer)
         btnScpTransfer->setEnabled(!busy);
+    if (btnScpUseBackup)
+        btnScpUseBackup->setEnabled(!busy);
 }
 
 void MainWindow::setGitAskDeepSeekBusy(bool busy)
@@ -9852,60 +9957,350 @@ void MainWindow::continueScpSearchAndTransfer()
         }
     }
 
-    // 执行停止并传输命令
-    // 使用 sshpass 处理密码，增加 -o StrictHostKeyChecking=no 避免指纹验证阻塞
-    QString fileName = fi.fileName();
-    QString remotePath = QString("/userfs/app/%1").arg(fileName);
-    QString stopCmd = QString("pkill -9 %1").arg(fileName);
-    QString runCmd = QString("chmod +x %1 && %1 &").arg(remotePath);
+    const QString fileName = fi.fileName();
+    backupRemoteDeployFileThenContinue(
+        dir, targetIp, password, fileName,
+        [this, dir, targetIp, password, fileName, latestFile]() {
+            startScpStopAndUpload(dir, targetIp, password, fileName, latestFile);
+        });
+}
 
-    QString fullRemoteCmd;
-    if (!password.isEmpty()) {
-        fullRemoteCmd = QString("sshpass -p %1 ssh -o StrictHostKeyChecking=no root@%2 \"%3; exit 0\"").arg(password).arg(targetIp).arg(stopCmd);
-    } else {
-        fullRemoteCmd = QString("ssh -o StrictHostKeyChecking=no root@%2 \"%3; exit 0\"").arg(targetIp).arg(stopCmd);
+QString MainWindow::scpDeployBackupRoot(const QString &repoDir) const
+{
+    return QDir(repoDir).absoluteFilePath(QStringLiteral("备份"));
+}
+
+QStringList MainWindow::listScpDeployBackupStamps(const QString &repoDir) const
+{
+    QStringList stamps;
+    const QString rootPath = scpDeployBackupRoot(repoDir);
+    QDir root(rootPath);
+    if (!root.exists()) {
+        return stamps;
     }
 
-    txtGitLog->append(QString("正在停止目标程序: %1 ...").arg(fileName));
-    
-    QProcess *stopProcess = new QProcess(this);
-    connect(stopProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this, [this, stopProcess, fileName, password, targetIp, latestFile, dir, remotePath, runCmd](int, QProcess::ExitStatus) {
-        stopProcess->deleteLater();
-        
-        // 停止命令执行完（无论成功失败，可能程序本就没运行），开始传输
-        QString scpProgram;
-        QStringList scpArgs;
+    const QFileInfoList dirs =
+        root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
+    stamps.reserve(dirs.size());
+    for (const QFileInfo &info : dirs) {
+        stamps << info.fileName();
+    }
+    return stamps;
+}
 
-        if (!password.isEmpty()) {
-            scpProgram = "sshpass";
-            scpArgs << "-p" << password << "scp" << "-o" << "StrictHostKeyChecking=no" << latestFile << QString("root@%1:/userfs/app").arg(targetIp);
-        } else {
-            scpProgram = "scp";
-            scpArgs << "-o" << "StrictHostKeyChecking=no" << latestFile << QString("root@%1:/userfs/app").arg(targetIp);
+void MainWindow::onScpUseBackupClicked()
+{
+    const QString dir = cmbGitDir ? cmbGitDir->currentText().trimmed() : QString();
+    if (dir.isEmpty() || !QDir(dir).exists()) {
+        txtGitLog->append(QStringLiteral("错误: 请先选择有效的 Git 目录"));
+        return;
+    }
+
+    const QString targetIp = cmbScpTargetIp ? cmbScpTargetIp->currentText().trimmed() : QString();
+    if (targetIp.isEmpty()) {
+        txtGitLog->append(QStringLiteral("错误: 请输入目标设备地址"));
+        return;
+    }
+
+    const QString password = txtScpPassword ? txtScpPassword->text() : QString();
+    saveScpTargetHistory();
+
+    const QStringList stamps = listScpDeployBackupStamps(dir);
+    if (stamps.isEmpty()) {
+        const QString msg = QStringLiteral("本机工程「备份」目录中没有可用的时间戳备份。");
+        txtGitLog->append(QStringLiteral("<font color='orange'>[备份] %1</font>").arg(msg));
+        QMessageBox::information(this, QStringLiteral("使用备份"), msg);
+        return;
+    }
+
+    bool ok = false;
+    const QString stamp = QInputDialog::getItem(
+        this, QStringLiteral("使用备份"),
+        QStringLiteral("选择要回传到设备的备份时间戳："), stamps, 0, false, &ok);
+    if (!ok || stamp.trimmed().isEmpty()) {
+        txtGitLog->append(QStringLiteral("<font color='gray'>[备份] 已取消使用备份。</font>"));
+        return;
+    }
+
+    const QString stampDir = QDir(scpDeployBackupRoot(dir)).filePath(stamp);
+    QDir folder(stampDir);
+    if (!folder.exists()) {
+        txtGitLog->append(
+            QStringLiteral("<font color='red'>[备份] 备份目录不存在: %1</font>").arg(stampDir));
+        return;
+    }
+
+    const QFileInfoList files = folder.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    QFileInfo chosen;
+    for (const QFileInfo &info : files) {
+        if (info.fileName().contains(QLatin1Char('.'))) {
+            continue;
         }
-
-        txtGitLog->append(QString("正在传输文件: %1 ...").arg(fileName));
-
-        QProcess *scpProcess = new QProcess(this);
-        connect(scpProcess, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
-                [this, scpProcess, fileName, dir, latestFile](int exitCode, QProcess::ExitStatus exitStatus) {
-            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-                txtGitLog->append(QString("传输成功: %1 已上传至 /userfs/app").arg(fileName));
-                currentMonitoringProcess = fileName; // 记录当前传输的文件名以便监测
-                const QFileInfo transferred(latestFile);
-                if (transferred.exists()) {
-                    rememberDeployExecutableBaseline(dir, transferred);
-                }
-            } else {
-                QString error = scpProcess->readAllStandardError();
-                txtGitLog->append(QString("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
+        if (!chosen.exists() || info.isExecutable()) {
+            chosen = info;
+            if (info.isExecutable()) {
+                break;
             }
-            scpProcess->deleteLater();
-        });
-        scpProcess->start(scpProgram, scpArgs);
-    });
+        }
+    }
+    if (!chosen.exists() && !files.isEmpty()) {
+        chosen = files.first();
+    }
+    if (!chosen.exists()) {
+        const QString msg = QStringLiteral("时间戳 %1 下没有可回传的文件。").arg(stamp);
+        txtGitLog->append(QStringLiteral("<font color='orange'>[备份] %1</font>").arg(msg));
+        QMessageBox::warning(this, QStringLiteral("使用备份"), msg);
+        return;
+    }
 
-    stopProcess->start("sh", QStringList() << "-c" << fullRemoteCmd);
+    txtGitLog->append(
+        QStringLiteral("<font color='cyan'>[备份] 使用 %1 回传 %2</font>")
+            .arg(stamp, chosen.fileName()));
+    startScpStopAndUpload(dir, targetIp, password, chosen.fileName(), chosen.absoluteFilePath());
+}
+
+void MainWindow::pruneScpDeployBackups(const QString &backupRoot, int maxKeep)
+{
+    if (backupRoot.trimmed().isEmpty() || maxKeep <= 0) {
+        return;
+    }
+
+    QDir root(backupRoot);
+    if (!root.exists()) {
+        return;
+    }
+
+    const QFileInfoList dirs =
+        root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    if (dirs.size() <= maxKeep) {
+        return;
+    }
+
+    const int removeCount = dirs.size() - maxKeep;
+    for (int i = 0; i < removeCount; ++i) {
+        QDir(dirs.at(i).absoluteFilePath()).removeRecursively();
+        if (txtGitLog) {
+            txtGitLog->append(
+                QStringLiteral("<font color='gray'>[备份] 已删除最旧备份: %1</font>")
+                    .arg(dirs.at(i).fileName()));
+        }
+    }
+}
+
+void MainWindow::backupRemoteDeployFileThenContinue(const QString &repoDir,
+                                                    const QString &targetIp,
+                                                    const QString &password,
+                                                    const QString &fileName,
+                                                    const std::function<void()> &thenContinue)
+{
+    auto finish = [thenContinue]() {
+        if (thenContinue) {
+            thenContinue();
+        }
+    };
+
+    if (repoDir.trimmed().isEmpty() || fileName.trimmed().isEmpty() || targetIp.trimmed().isEmpty()) {
+        finish();
+        return;
+    }
+
+    const QString backupRoot = scpDeployBackupRoot(repoDir);
+    if (!QDir().mkpath(backupRoot)) {
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[备份] 无法创建本机备份目录: %1，跳过备份并继续上传。</font>")
+                .arg(backupRoot));
+        finish();
+        return;
+    }
+    GitStageGuard::appendIgnorePatterns(repoDir, {QStringLiteral("备份/")});
+
+    txtGitLog->append(
+        QStringLiteral("<font color='gray'>[备份] 正在探测远程同名文件 /userfs/app/%1 …</font>")
+            .arg(fileName));
+
+    QProcess *probe = new QProcess(this);
+    connect(probe, &QProcess::errorOccurred, this, [probe, this, finish](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) {
+            return;
+        }
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[备份] 无法启动 ssh/sshpass，跳过备份并继续上传。</font>"));
+        probe->deleteLater();
+        finish();
+    });
+    connect(probe, static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this,
+            [this, probe, repoDir, targetIp, password, fileName, backupRoot, finish](int exitCode,
+                                                                                     QProcess::ExitStatus) {
+                const QString probeErr =
+                    PlatformPrefs::decodeProcessOutput(probe->readAllStandardError()).trimmed();
+                probe->deleteLater();
+                if (exitCode != 0) {
+                    if (probeErr.isEmpty()) {
+                        txtGitLog->append(
+                            QStringLiteral("<font color='gray'>[备份] 远程没有同名文件 /userfs/app/%1，跳过备份。</font>")
+                                .arg(fileName));
+                    } else {
+                        txtGitLog->append(
+                            QStringLiteral("<font color='orange'>[备份] 探测失败，跳过备份并继续上传。%1</font>")
+                                .arg(probeErr));
+                    }
+                    finish();
+                    return;
+                }
+
+                const QString stamp =
+                    QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
+                const QString destDir = QDir(backupRoot).filePath(stamp);
+                if (!QDir().mkpath(destDir)) {
+                    txtGitLog->append(
+                        QStringLiteral("<font color='orange'>[备份] 无法创建备份子目录: %1，跳过备份并继续上传。</font>")
+                            .arg(destDir));
+                    finish();
+                    return;
+                }
+
+                QString scpProgram;
+                QStringList scpArgs;
+                const QString remoteFile =
+                    QStringLiteral("root@%1:/userfs/app/%2").arg(targetIp, fileName);
+                if (!password.isEmpty()) {
+                    scpProgram = QStringLiteral("sshpass");
+                    scpArgs << QStringLiteral("-p") << password << QStringLiteral("scp")
+                            << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << remoteFile << destDir;
+                } else {
+                    scpProgram = QStringLiteral("scp");
+                    scpArgs << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << remoteFile << destDir;
+                }
+
+                txtGitLog->append(
+                    QStringLiteral("<font color='cyan'>[备份] 正在拉回远程 %1 → %2</font>")
+                        .arg(remoteFile, destDir));
+
+                QProcess *pull = new QProcess(this);
+                connect(pull, &QProcess::errorOccurred, this,
+                        [this, pull, destDir, finish](QProcess::ProcessError error) {
+                            if (error != QProcess::FailedToStart) {
+                                return;
+                            }
+                            QDir(destDir).removeRecursively();
+                            txtGitLog->append(
+                                QStringLiteral("<font color='orange'>[备份] 无法启动 scp，跳过备份并继续上传。</font>"));
+                            pull->deleteLater();
+                            finish();
+                        });
+                connect(pull,
+                        static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                        this,
+                        [this, pull, destDir, backupRoot, fileName, finish](int pullCode,
+                                                                            QProcess::ExitStatus pullStatus) {
+                            const QString err =
+                                PlatformPrefs::decodeProcessOutput(pull->readAllStandardError());
+                            pull->deleteLater();
+                            if (pullStatus != QProcess::NormalExit || pullCode != 0) {
+                                QDir(destDir).removeRecursively();
+                                txtGitLog->append(
+                                    QStringLiteral("<font color='orange'>[备份] 拉回失败（退出码 %1），"
+                                                   "跳过备份并继续上传。%2</font>")
+                                        .arg(pullCode)
+                                        .arg(err.trimmed().isEmpty()
+                                                 ? QString()
+                                                 : QLatin1Char(' ') + err.trimmed()));
+                                finish();
+                                return;
+                            }
+
+                            txtGitLog->append(
+                                QStringLiteral("<font color='green'>[备份] 已保存: %1/%2</font>")
+                                    .arg(destDir, fileName));
+                            pruneScpDeployBackups(backupRoot, 5);
+                            finish();
+                        });
+                pull->start(scpProgram, scpArgs);
+            });
+
+    QStringList probeArgs;
+    const QString testCmd = QStringLiteral("test -f /userfs/app/%1").arg(fileName);
+    if (!password.isEmpty()) {
+        probeArgs << QStringLiteral("-p") << password << QStringLiteral("ssh")
+                  << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                  << QStringLiteral("root@%1").arg(targetIp) << testCmd;
+        probe->start(QStringLiteral("sshpass"), probeArgs);
+    } else {
+        probeArgs << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                  << QStringLiteral("root@%1").arg(targetIp) << testCmd;
+        probe->start(QStringLiteral("ssh"), probeArgs);
+    }
+}
+
+void MainWindow::startScpStopAndUpload(const QString &repoDir, const QString &targetIp,
+                                       const QString &password, const QString &fileName,
+                                       const QString &latestFile)
+{
+    const QString stopCmd = QStringLiteral("pkill -9 %1").arg(fileName);
+    QString fullRemoteCmd;
+    if (!password.isEmpty()) {
+        fullRemoteCmd =
+            QStringLiteral("sshpass -p %1 ssh -o StrictHostKeyChecking=no root@%2 \"%3; exit 0\"")
+                .arg(password, targetIp, stopCmd);
+    } else {
+        fullRemoteCmd =
+            QStringLiteral("ssh -o StrictHostKeyChecking=no root@%1 \"%2; exit 0\"")
+                .arg(targetIp, stopCmd);
+    }
+
+    txtGitLog->append(QStringLiteral("正在停止目标程序: %1 ...").arg(fileName));
+
+    QProcess *stopProcess = new QProcess(this);
+    connect(stopProcess,
+            static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
+            [this, stopProcess, fileName, password, targetIp, latestFile, repoDir](int,
+                                                                                   QProcess::ExitStatus) {
+                stopProcess->deleteLater();
+
+                QString scpProgram;
+                QStringList scpArgs;
+                if (!password.isEmpty()) {
+                    scpProgram = QStringLiteral("sshpass");
+                    scpArgs << QStringLiteral("-p") << password << QStringLiteral("scp")
+                            << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << latestFile << QStringLiteral("root@%1:/userfs/app").arg(targetIp);
+                } else {
+                    scpProgram = QStringLiteral("scp");
+                    scpArgs << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << latestFile << QStringLiteral("root@%1:/userfs/app").arg(targetIp);
+                }
+
+                txtGitLog->append(QStringLiteral("正在传输文件: %1 ...").arg(fileName));
+
+                QProcess *scpProcess = new QProcess(this);
+                connect(scpProcess,
+                        static_cast<void(QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                        this,
+                        [this, scpProcess, fileName, repoDir, latestFile](int exitCode,
+                                                                          QProcess::ExitStatus exitStatus) {
+                            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+                                txtGitLog->append(
+                                    QStringLiteral("传输成功: %1 已上传至 /userfs/app").arg(fileName));
+                                currentMonitoringProcess = fileName;
+                                const QFileInfo transferred(latestFile);
+                                if (transferred.exists()) {
+                                    rememberDeployExecutableBaseline(repoDir, transferred);
+                                }
+                            } else {
+                                const QString error =
+                                    PlatformPrefs::decodeProcessOutput(scpProcess->readAllStandardError());
+                                txtGitLog->append(
+                                    QStringLiteral("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
+                            }
+                            scpProcess->deleteLater();
+                        });
+                scpProcess->start(scpProgram, scpArgs);
+            });
+
+    stopProcess->start(QStringLiteral("sh"), QStringList() << QStringLiteral("-c") << fullRemoteCmd);
 }
 
 void MainWindow::onRebootTargetClicked() {
@@ -10534,13 +10929,11 @@ void MainWindow::deferredGitRepoInit() {
     if (!repoDir.isEmpty() && QDir(repoDir).exists()) {
         activateGitRepo(repoDir, false);
         refreshGitGoalsTable();
-        const int delayMs = QCoreApplication::arguments().contains(QLatin1String("--autostart"))
-                                ? 12000
-                                : 0;
-        QTimer::singleShot(delayMs, this, &MainWindow::startStartupRemoteCheck);
-    } else {
-        promptRemoteAheadOnOpen();
     }
+    const int delayMs = QCoreApplication::arguments().contains(QLatin1String("--autostart"))
+                            ? 12000
+                            : 0;
+    QTimer::singleShot(delayMs, this, &MainWindow::startStartupRemoteCheck);
 
     if (gitDiffReminderEnabled) {
         applyGitDiffReminderEnabled(true);
