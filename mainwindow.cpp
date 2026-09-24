@@ -12,6 +12,7 @@
 #include "windeploydialog.h"
 #include "windeploypackager.h"
 #ifdef Q_OS_WIN
+#include "winsshaskpass.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -43,6 +44,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
+#include <QDirIterator>
 #include <QTextStream>
 #include <QTextStream>
 #include <QDesktopServices>
@@ -1410,6 +1412,11 @@ void MainWindow::createWidgets()
     txtScpPassword->setToolTip(QStringLiteral("明文显示，按目标地址记忆"));
     btnScpTransfer = new QPushButton("搜索并传输(全目录层级)");
     btnScpTransfer->setStyleSheet("background-color: #fce4ec; font-weight: bold;");
+#ifdef Q_OS_WIN
+    btnScpTransfer->setToolTip(
+        QStringLiteral("在工程内查找最新的 Linux 可执行文件（ELF）或脚本并传到设备 /userfs/app。"
+                       "找不到这类文件时才退回最新的 .exe。密码登录使用本机 OpenSSH。"));
+#endif
     btnScpUseBackup = new QPushButton(QStringLiteral("使用备份"));
     btnScpUseBackup->setStyleSheet("background-color: #e8f5e9; font-weight: bold;");
     btnScpUseBackup->setToolTip(QStringLiteral("从本机工程「备份」目录选择一份时间戳，回传到设备"));
@@ -8031,7 +8038,73 @@ QFileInfo MainWindow::findLatestDeployExecutable(const QString &workDir, bool al
     const QString selfPath = QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath();
 
 #ifdef Q_OS_WIN
-    const QString skip = allowRunningApp ? QString() : selfPath;
+    // Windows 磁盘没有 Unix 执行位。按文件头识别要传到 Linux 设备的 ELF / 脚本，
+    // 避免把 Makefile 这类无后缀文本当成部署文件。都没有时再退回最新 .exe。
+    const QString skip = allowRunningApp ? QString() : QDir::cleanPath(selfPath);
+    QFileInfo bestBin;
+    QFileInfo bestScript;
+    QDateTime bestBinTime;
+    QDateTime bestScriptTime;
+
+    QDirIterator it(workDir, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo fileInfo = it.fileInfo();
+        const QString fileName = fileInfo.fileName();
+        const QString absPath = QDir::cleanPath(fileInfo.absoluteFilePath());
+
+        if (!skip.isEmpty() && absPath.compare(skip, Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+
+        const QString rel = QDir(workDir).relativeFilePath(absPath);
+        if (WinDeployPackager::isSkippedDeployPath(rel)) {
+            continue;
+        }
+
+        if (fileName.startsWith(QLatin1Char('.')) || fileName.endsWith(QStringLiteral(".so"))) {
+            continue;
+        }
+        if (fileName.contains(QLatin1Char('.')) && !fileName.endsWith(QStringLiteral(".sh"))) {
+            continue;
+        }
+
+        const bool isSh = fileName.endsWith(QStringLiteral(".sh"));
+        bool isElf = false;
+        bool isShebang = false;
+        if (!isSh) {
+            QFile header(absPath);
+            if (header.open(QIODevice::ReadOnly)) {
+                const QByteArray magic = header.read(4);
+                const auto *bytes = reinterpret_cast<const unsigned char *>(magic.constData());
+                isElf = magic.size() >= 4 && bytes[0] == 0x7F && bytes[1] == 'E' && bytes[2] == 'L'
+                        && bytes[3] == 'F';
+                if (!isElf) {
+                    isShebang = magic.startsWith("#!");
+                }
+            }
+        }
+        if (!isSh && !isElf && !isShebang) {
+            continue;
+        }
+
+        if (isSh) {
+            if (!bestScript.exists() || fileInfo.lastModified() > bestScriptTime) {
+                bestScript = fileInfo;
+                bestScriptTime = fileInfo.lastModified();
+            }
+        } else if (!bestBin.exists() || fileInfo.lastModified() > bestBinTime) {
+            bestBin = fileInfo;
+            bestBinTime = fileInfo.lastModified();
+        }
+    }
+
+    if (bestBin.exists()) {
+        return bestBin;
+    }
+    if (bestScript.exists()) {
+        return bestScript;
+    }
     return WinDeployPackager::findLatestExe(workDir, skip);
 #else
     QFileInfo bestBin;
@@ -10160,20 +10233,8 @@ void MainWindow::backupRemoteDeployFileThenContinue(const QString &repoDir,
                     return;
                 }
 
-                QString scpProgram;
-                QStringList scpArgs;
                 const QString remoteFile =
                     QStringLiteral("root@%1:/userfs/app/%2").arg(targetIp, fileName);
-                if (!password.isEmpty()) {
-                    scpProgram = QStringLiteral("sshpass");
-                    scpArgs << QStringLiteral("-p") << password << QStringLiteral("scp")
-                            << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
-                            << remoteFile << destDir;
-                } else {
-                    scpProgram = QStringLiteral("scp");
-                    scpArgs << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
-                            << remoteFile << destDir;
-                }
 
                 txtGitLog->append(
                     QStringLiteral("<font color='cyan'>[备份] 正在拉回远程 %1 → %2</font>")
@@ -10218,11 +10279,46 @@ void MainWindow::backupRemoteDeployFileThenContinue(const QString &repoDir,
                             pruneScpDeployBackups(backupRoot, 5);
                             finish();
                         });
+#ifdef Q_OS_WIN
+                QString scpError;
+                if (!WinSsh::startScp(pull, remoteFile, destDir, password, &scpError)) {
+                    QDir(destDir).removeRecursively();
+                    txtGitLog->append(
+                        QStringLiteral("<font color='orange'>[备份] %1，跳过备份并继续上传。</font>")
+                            .arg(scpError));
+                    pull->deleteLater();
+                    finish();
+                    return;
+                }
+#else
+                QString scpProgram;
+                QStringList scpArgs;
+                if (!password.isEmpty()) {
+                    scpProgram = QStringLiteral("sshpass");
+                    scpArgs << QStringLiteral("-p") << password << QStringLiteral("scp")
+                            << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << remoteFile << destDir;
+                } else {
+                    scpProgram = QStringLiteral("scp");
+                    scpArgs << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
+                            << remoteFile << destDir;
+                }
                 pull->start(scpProgram, scpArgs);
+#endif
             });
 
-    QStringList probeArgs;
     const QString testCmd = QStringLiteral("test -f /userfs/app/%1").arg(fileName);
+#ifdef Q_OS_WIN
+    QString sshError;
+    if (!WinSsh::startSsh(probe, targetIp, testCmd, password, &sshError)) {
+        txtGitLog->append(
+            QStringLiteral("<font color='orange'>[备份] %1，跳过备份并继续上传。</font>").arg(sshError));
+        probe->deleteLater();
+        finish();
+        return;
+    }
+#else
+    QStringList probeArgs;
     if (!password.isEmpty()) {
         probeArgs << QStringLiteral("-p") << password << QStringLiteral("ssh")
                   << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
@@ -10233,12 +10329,81 @@ void MainWindow::backupRemoteDeployFileThenContinue(const QString &repoDir,
                   << QStringLiteral("root@%1").arg(targetIp) << testCmd;
         probe->start(QStringLiteral("ssh"), probeArgs);
     }
+#endif
 }
 
 void MainWindow::startScpStopAndUpload(const QString &repoDir, const QString &targetIp,
                                        const QString &password, const QString &fileName,
                                        const QString &latestFile)
 {
+#ifdef Q_OS_WIN
+    const QString remoteStop = QStringLiteral("pkill -9 %1; exit 0").arg(fileName);
+    txtGitLog->append(QStringLiteral("正在停止目标程序: %1 ...").arg(fileName));
+
+    QProcess *stopProcess = new QProcess(this);
+    connect(stopProcess, &QProcess::errorOccurred, this,
+            [this, stopProcess](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart) {
+                    return;
+                }
+                txtGitLog->append(QStringLiteral(
+                    "传输失败: 无法启动 ssh。请确认已安装 Windows OpenSSH 客户端。"));
+                stopProcess->deleteLater();
+            });
+    connect(stopProcess,
+            static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished), this,
+            [this, stopProcess, fileName, password, targetIp, latestFile, repoDir](int,
+                                                                                   QProcess::ExitStatus) {
+                stopProcess->deleteLater();
+                txtGitLog->append(QStringLiteral("正在传输文件: %1 ...").arg(fileName));
+
+                QProcess *scpProcess = new QProcess(this);
+                connect(scpProcess, &QProcess::errorOccurred, this,
+                        [this, scpProcess](QProcess::ProcessError error) {
+                            if (error != QProcess::FailedToStart) {
+                                return;
+                            }
+                            txtGitLog->append(QStringLiteral(
+                                "传输失败: 无法启动 scp。请确认已安装 Windows OpenSSH 客户端。"));
+                            scpProcess->deleteLater();
+                        });
+                connect(scpProcess,
+                        static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                        this,
+                        [this, scpProcess, fileName, repoDir, latestFile](int exitCode,
+                                                                          QProcess::ExitStatus exitStatus) {
+                            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+                                txtGitLog->append(
+                                    QStringLiteral("传输成功: %1 已上传至 /userfs/app").arg(fileName));
+                                currentMonitoringProcess = fileName;
+                                const QFileInfo transferred(latestFile);
+                                if (transferred.exists()) {
+                                    rememberDeployExecutableBaseline(repoDir, transferred);
+                                }
+                            } else {
+                                const QString error =
+                                    PlatformPrefs::decodeProcessOutput(scpProcess->readAllStandardError());
+                                txtGitLog->append(
+                                    QStringLiteral("传输失败 (退出码 %1): %2").arg(exitCode).arg(error));
+                            }
+                            scpProcess->deleteLater();
+                        });
+
+                QString scpError;
+                if (!WinSsh::startScp(scpProcess, latestFile,
+                                      QStringLiteral("root@%1:/userfs/app").arg(targetIp), password,
+                                      &scpError)) {
+                    txtGitLog->append(QStringLiteral("传输失败: %1").arg(scpError));
+                    scpProcess->deleteLater();
+                }
+            });
+
+    QString sshError;
+    if (!WinSsh::startSsh(stopProcess, targetIp, remoteStop, password, &sshError)) {
+        txtGitLog->append(QStringLiteral("传输失败: %1").arg(sshError));
+        stopProcess->deleteLater();
+    }
+#else
     const QString stopCmd = QStringLiteral("pkill -9 %1").arg(fileName);
     QString fullRemoteCmd;
     if (!password.isEmpty()) {
@@ -10301,6 +10466,7 @@ void MainWindow::startScpStopAndUpload(const QString &repoDir, const QString &ta
             });
 
     stopProcess->start(QStringLiteral("sh"), QStringList() << QStringLiteral("-c") << fullRemoteCmd);
+#endif
 }
 
 void MainWindow::onRebootTargetClicked() {

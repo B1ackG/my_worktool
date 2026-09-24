@@ -61,6 +61,11 @@ HEADERS += \
 
 win32: LIBS += -lpsapi -luser32 -lole32 -luuid -lshell32 -ladvapi32
 
+win32 {
+    SOURCES += winsshaskpass.cpp
+    HEADERS += winsshaskpass.h
+}
+
 # Qt 5 MinGW needs OpenSSL 1.1 DLLs beside the exe for HTTPS (DeepSeek, etc.).
 win32 {
     OPENSSL_WIN64 = $$PWD/third_party/openssl/win64
