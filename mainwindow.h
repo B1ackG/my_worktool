@@ -50,7 +50,10 @@
 class LifeAssistantWidget;
 class DeepSeekClient;
 class QCloseEvent;
+class QDialog;
 class QEvent;
+class QRadioButton;
+class QShortcut;
 
 // A simple sparkline widget to show recent usage
 class MonitorChart : public QWidget {
@@ -173,7 +176,14 @@ private slots:
     void saveAutoScene();
     void loadAutoScene();
     void refreshWaveChannelsTable();
+    void sortWaveChannels();
     void updateSimTickTimerState();
+    int findWaveChannelIndex(const QString &device, quint16 addr) const;
+    int waveChannelRowForButton(const QWidget *btn) const;
+    QString waveChannelDescription(const QString &device, quint16 addr) const;
+    void loadWaveChannelIntoForm(int index);
+    void applyWaveChannelFromForm();
+    void updateWaveFormApplyButton();
     QJsonArray waveformsToJson() const;
     void applyWaveformsFromJson(const QJsonArray &waveArr);
 
@@ -346,8 +356,19 @@ private:
     QTabWidget *tabRegisterMaps;
     QTableWidget *tblAGV;
     QTableWidget *tblRobot;
-    QLineEdit *txtSearchMap;  // 新增：地址映射表搜索框
-    QPushButton *btnSearchMap; // 新增：搜索按钮
+    QPushButton *btnSearchMap;
+    QDialog *dlgFindMap = nullptr;
+    QLineEdit *txtFindMap = nullptr;
+    QRadioButton *radFindMapCurrent = nullptr;
+    QRadioButton *radFindMapAll = nullptr;
+    QLabel *lblFindMapStatus = nullptr;
+    QShortcut *shortcutFindMap = nullptr;
+    QString findMapLastQuery;
+    bool findMapLastAll = false;
+    int findMapGroup = -1;
+    int findMapTab = -1;
+    int findMapRow = -1;
+    int findMapCol = -1;
     QPushButton *btnExportRegisterMap;
     QPushButton *btnImportRegisterMap;
     QPushButton *btnImportStandardFile;
@@ -364,8 +385,9 @@ private:
     void loadRegisterTables();
     void onExportRegisterMapClicked();
     void onImportRegisterMapClicked();
-    void onSearchMapTextFinished(); // 新增：搜索回车处理
-    void onSearchMapClicked();      // 新增：搜索按钮点击处理
+    void onSearchMapClicked();
+    void onFindMapNext();
+    void showRegisterMapFindHit(int group, int tab, int row, int col);
 
     // Connection
     QLabel *lblIP;
@@ -890,7 +912,8 @@ private:
     void onSimShowBitEditor(QTableWidget *table, int row);
     void onSimCellDoubleClicked(int row, int column);
     void onSimAddCyclicTimerClicked();
-    void onSimRemoveCyclicTimerClicked(); // 新增
+    void onSimRemoveCyclicTimerClicked();
+    void onSimToggleWaveChannelClicked();
     void onSimWaveTypeChanged(const QString &type); // 新增
     void onSimStopAllWaveformsClicked(); // 新增
     void onSimTimerTick();
@@ -955,6 +978,7 @@ private:
     QTableWidget *tblWaveChannels;
     QPushButton *btnWaveAdd;
     QPushButton *btnWaveStopAll;
+    int waveFormEditingIndex = -1;
 
     QList<QTimer*> scriptTimers;
     QMap<quint16, QTimer*> cyclicTimers;

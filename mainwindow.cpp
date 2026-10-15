@@ -25,6 +25,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QAbstractItemView>
+#include <QItemSelectionModel>
 #include <QEvent>
 #include <QFrame>
 #include <QInputDialog>
@@ -85,7 +86,9 @@
 #include <QSet>
 #include <QScrollArea>
 #include <QSplitter>
+#include <QShortcut>
 #include <QSignalBlocker>
+#include <QVector>
 #include <QStyle>
 #include <QSystemTrayIcon>
 #include <algorithm>
@@ -94,6 +97,8 @@ namespace {
 
 constexpr int kGitGoalLinesPerStar = 5000;
 constexpr int kGitGoalMaxAutoStars = 10;
+constexpr int kWaveChannelActionColumn = 0;
+constexpr int kWaveChannelDescriptionColumn = 1;
 
 bool isKnownGitSubcommand(const QString &token)
 {
@@ -1049,10 +1054,8 @@ void MainWindow::createWidgets()
     btnExportRegisterMap = new QPushButton("导出");
     btnImportRegisterMap = new QPushButton("导入");
     btnImportStandardFile = new QPushButton("导入标准文件");
-    txtSearchMap = new QLineEdit();
-    txtSearchMap->setPlaceholderText("搜索内容...");
-    txtSearchMap->setClearButtonEnabled(true);
-    btnSearchMap = new QPushButton("搜索");
+    btnSearchMap = new QPushButton("查找");
+    btnSearchMap->setToolTip(QStringLiteral("Ctrl+F，在地址映射表和从站模拟器寄存器表中查找"));
 
     // Read Group
     lblReadStartAddr = new QLabel("起始地址:");
@@ -1575,7 +1578,6 @@ QWidget* MainWindow::createModbusPage()
     QVBoxLayout *layMaps = new QVBoxLayout();
     
     QHBoxLayout *layMapBtns = new QHBoxLayout();
-    layMapBtns->addWidget(txtSearchMap);
     layMapBtns->addWidget(btnSearchMap);
     layMapBtns->addWidget(btnExportRegisterMap);
     layMapBtns->addWidget(btnImportRegisterMap);
@@ -2013,9 +2015,19 @@ QWidget* MainWindow::createSimulatorPage()
     glWave->addLayout(hWaveBtns, 3, 0, 1, 4);
     lw->addLayout(glWave);
     tblWaveChannels = new QTableWidget();
-    tblWaveChannels->setColumnCount(5);
-    tblWaveChannels->setHorizontalHeaderLabels(QStringList() << "设备" << "地址" << "类型" << "状态" << "操作");
-    tblWaveChannels->horizontalHeader()->setStretchLastSection(true);
+    tblWaveChannels->setColumnCount(9);
+    tblWaveChannels->setHorizontalHeaderLabels(QStringList()
+                                               << QStringLiteral("操作") << QStringLiteral("描述")
+                                               << QStringLiteral("设备") << QStringLiteral("地址")
+                                               << QStringLiteral("类型") << QStringLiteral("最大")
+                                               << QStringLiteral("最小") << QStringLiteral("周期(s)")
+                                               << QStringLiteral("状态"));
+    tblWaveChannels->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tblWaveChannels->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblWaveChannels->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblWaveChannels->horizontalHeader()->setStretchLastSection(false);
+    tblWaveChannels->horizontalHeader()->setSectionResizeMode(kWaveChannelActionColumn, QHeaderView::ResizeToContents);
+    tblWaveChannels->horizontalHeader()->setSectionResizeMode(kWaveChannelDescriptionColumn, QHeaderView::Stretch);
     lw->addWidget(tblWaveChannels);
     tabSimTools->addTab(pageWave, "周期波形");
 
@@ -3023,7 +3035,9 @@ void MainWindow::createConnections()
     connect(tblRobot, &QTableWidget::cellChanged, this, &MainWindow::onRegisterTableChanged);
     connect(tabRegisterMaps, &QTabWidget::currentChanged, this, &MainWindow::onRegisterTabChanged);
     connect(btnSearchMap, &QPushButton::clicked, this, &MainWindow::onSearchMapClicked);
-    connect(txtSearchMap, &QLineEdit::returnPressed, this, &MainWindow::onSearchMapTextFinished);
+    shortcutFindMap = new QShortcut(QKeySequence::Find, this);
+    shortcutFindMap->setContext(Qt::WindowShortcut);
+    connect(shortcutFindMap, &QShortcut::activated, this, &MainWindow::onSearchMapClicked);
     connect(btnExportRegisterMap, &QPushButton::clicked, this, &MainWindow::onExportRegisterMapClicked);
     connect(btnImportRegisterMap, &QPushButton::clicked, this, &MainWindow::onImportRegisterMapClicked);
     connect(btnImportStandardFile, &QPushButton::clicked, this, &MainWindow::onImportStandardFileClicked);
@@ -3169,28 +3183,243 @@ void MainWindow::createConnections()
     // Waveform Controls
     connect(btnWaveAdd, &QPushButton::clicked, this, &MainWindow::onSimAddCyclicTimerClicked);
     connect(btnWaveStopAll, &QPushButton::clicked, this, &MainWindow::onSimStopAllWaveformsClicked);
-    
+    connect(tblWaveChannels, &QTableWidget::cellClicked, this, [this](int row, int column) {
+        if (column == kWaveChannelActionColumn) {
+            return;
+        }
+        loadWaveChannelIntoForm(row);
+    });
+    if (tblWaveChannels->selectionModel()) {
+        connect(tblWaveChannels->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+                [this](const QItemSelection &selected, const QItemSelection &deselected) {
+            Q_UNUSED(deselected);
+            if (selected.isEmpty()) {
+                waveFormEditingIndex = -1;
+                updateWaveFormApplyButton();
+                return;
+            }
+            const QModelIndex idx = selected.indexes().value(0);
+            if (idx.isValid() && idx.row() != waveFormEditingIndex) {
+                loadWaveChannelIntoForm(idx.row());
+            }
+        });
+    }
+
     simTickTimer = new QTimer(this);
     connect(simTickTimer, &QTimer::timeout, this, &MainWindow::onSimTimerTick);
     // 仅在有激活通道时由 updateSimTickTimerState() 启动，避免空转
+}
+
+void MainWindow::sortWaveChannels()
+{
+    const bool trackEdit = waveFormEditingIndex >= 0 && waveFormEditingIndex < simCyclicTimers.size();
+    const QString editingDevice = trackEdit ? simCyclicTimers.at(waveFormEditingIndex).device : QString();
+    const quint16 editingAddr = trackEdit ? simCyclicTimers.at(waveFormEditingIndex).addr : 0;
+
+    std::stable_sort(simCyclicTimers.begin(), simCyclicTimers.end(),
+                     [](const CyclicTimer &a, const CyclicTimer &b) {
+                         const auto rank = [](const QString &device) {
+                             if (device == QLatin1String("AGV")) {
+                                 return 0;
+                             }
+                             if (device == QLatin1String("Main")) {
+                                 return 1;
+                             }
+                             return 2;
+                         };
+                         const int rankA = rank(a.device);
+                         const int rankB = rank(b.device);
+                         if (rankA != rankB) {
+                             return rankA < rankB;
+                         }
+                         return a.addr < b.addr;
+                     });
+
+    if (trackEdit) {
+        waveFormEditingIndex = findWaveChannelIndex(editingDevice, editingAddr);
+    }
 }
 
 void MainWindow::refreshWaveChannelsTable()
 {
     if (!tblWaveChannels) return;
 
+    sortWaveChannels();
+
+    QSignalBlocker tableBlocker(tblWaveChannels);
+    QSignalBlocker selectionBlocker(tblWaveChannels->selectionModel());
+
     tblWaveChannels->setRowCount(simCyclicTimers.size());
     for (int i = 0; i < simCyclicTimers.size(); ++i) {
         const CyclicTimer &ct = simCyclicTimers[i];
-        tblWaveChannels->setItem(i, 0, new QTableWidgetItem(ct.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV")));
-        tblWaveChannels->setItem(i, 1, new QTableWidgetItem(QString::number(ct.addr)));
-        tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.type));
-        tblWaveChannels->setItem(i, 3, new QTableWidgetItem(ct.active ? QStringLiteral("运行中") : QStringLiteral("停止")));
+        tblWaveChannels->setItem(i, kWaveChannelDescriptionColumn, new QTableWidgetItem(waveChannelDescription(ct.device, ct.addr)));
+        tblWaveChannels->setItem(i, 2, new QTableWidgetItem(ct.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV")));
+        tblWaveChannels->setItem(i, 3, new QTableWidgetItem(QString::number(ct.addr)));
+        tblWaveChannels->setItem(i, 4, new QTableWidgetItem(ct.type));
+        tblWaveChannels->setItem(i, 5, new QTableWidgetItem(QString::number(ct.maxValue, 'f', 3)));
+        tblWaveChannels->setItem(i, 6, new QTableWidgetItem(QString::number(ct.minValue, 'f', 3)));
+        tblWaveChannels->setItem(i, 7, new QTableWidgetItem(QString::number(ct.period, 'f', 3)));
+        tblWaveChannels->setItem(i, 8, new QTableWidgetItem(ct.active ? QStringLiteral("运行中") : QStringLiteral("停止")));
 
-        QPushButton *btnRemove = new QPushButton(QStringLiteral("删除"));
-        tblWaveChannels->setCellWidget(i, 4, btnRemove);
+        auto *ops = new QWidget(tblWaveChannels);
+        auto *opsLay = new QHBoxLayout(ops);
+        opsLay->setContentsMargins(2, 2, 2, 2);
+        opsLay->setSpacing(4);
+        auto *btnToggle = new QPushButton(ct.active ? QStringLiteral("停止") : QStringLiteral("启动"), ops);
+        auto *btnRemove = new QPushButton(QStringLiteral("删除"), ops);
+        opsLay->addWidget(btnToggle);
+        opsLay->addWidget(btnRemove);
+        tblWaveChannels->setCellWidget(i, kWaveChannelActionColumn, ops);
+        connect(btnToggle, &QPushButton::clicked, this, &MainWindow::onSimToggleWaveChannelClicked);
         connect(btnRemove, &QPushButton::clicked, this, &MainWindow::onSimRemoveCyclicTimerClicked);
     }
+
+    if (waveFormEditingIndex >= 0 && waveFormEditingIndex < simCyclicTimers.size()) {
+        tblWaveChannels->selectRow(waveFormEditingIndex);
+    }
+}
+
+int MainWindow::findWaveChannelIndex(const QString &device, quint16 addr) const
+{
+    for (int i = 0; i < simCyclicTimers.size(); ++i) {
+        if (simCyclicTimers[i].device == device && simCyclicTimers[i].addr == addr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int MainWindow::waveChannelRowForButton(const QWidget *btn) const
+{
+    if (!btn || !tblWaveChannels) {
+        return -1;
+    }
+    for (int r = 0; r < tblWaveChannels->rowCount(); ++r) {
+        QWidget *cell = tblWaveChannels->cellWidget(r, kWaveChannelActionColumn);
+        if (!cell) {
+            continue;
+        }
+        if (cell == btn || cell->isAncestorOf(btn)) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+QString MainWindow::waveChannelDescription(const QString &device, quint16 addr) const
+{
+    QTableWidget *table = (device == QLatin1String("Main")) ? tblSimMain : tblSimAGV;
+    const int row = findSimRowByAddress(table, addr);
+    if (row < 0 || !table) {
+        return QString();
+    }
+    const QTableWidgetItem *item = table->item(row, SimRegisterCol::Description);
+    return item ? item->text() : QString();
+}
+
+void MainWindow::loadWaveChannelIntoForm(int index)
+{
+    if (index < 0 || index >= simCyclicTimers.size()) {
+        return;
+    }
+    if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveMax || !spinWaveMin || !spinWavePeriod) {
+        return;
+    }
+
+    const CyclicTimer &t = simCyclicTimers[index];
+    cmbWaveDevice->setCurrentText(t.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV"));
+    spinWaveAddr->setValue(t.addr);
+    const int typeIdx = cmbWaveType->findText(t.type);
+    if (typeIdx >= 0) {
+        cmbWaveType->setCurrentIndex(typeIdx);
+    }
+    spinWaveMax->setValue(t.maxValue);
+    spinWaveMin->setValue(t.minValue);
+    spinWavePeriod->setValue(t.period);
+
+    waveFormEditingIndex = index;
+    updateWaveFormApplyButton();
+}
+
+void MainWindow::updateWaveFormApplyButton()
+{
+    if (!btnWaveAdd) {
+        return;
+    }
+    btnWaveAdd->setText(waveFormEditingIndex >= 0 ? QStringLiteral("✅ 应用修改")
+                                                  : QStringLiteral("➕ 添加/更新通道"));
+}
+
+void MainWindow::applyWaveChannelFromForm()
+{
+    if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveMax || !spinWaveMin || !spinWavePeriod
+        || !tblWaveChannels) {
+        if (txtSimLog) {
+            txtSimLog->append(QStringLiteral("[%1] 波形控件未初始化，无法添加通道")
+                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
+        }
+        return;
+    }
+
+    CyclicTimer t;
+    t.device = cmbWaveDevice->currentText() == QStringLiteral("主设备") ? QStringLiteral("Main") : QStringLiteral("AGV");
+    t.addr = static_cast<quint16>(spinWaveAddr->value());
+    t.type = cmbWaveType->currentText();
+    t.maxValue = spinWaveMax->value();
+    t.minValue = spinWaveMin->value();
+    t.period = qMax(0.001, spinWavePeriod->value());
+    t.elapsedSec = 0.0;
+    t.lastUiMs = 0;
+    t.lastLogMs = 0;
+    t.active = true;
+    t.cacheValid = false;
+
+    const bool editingRow = waveFormEditingIndex >= 0 && waveFormEditingIndex < simCyclicTimers.size();
+    if (editingRow) {
+        const int targetIndex = waveFormEditingIndex;
+        t.active = simCyclicTimers[targetIndex].active;
+        t.elapsedSec = simCyclicTimers[targetIndex].elapsedSec;
+
+        int conflict = findWaveChannelIndex(t.device, t.addr);
+        if (conflict >= 0 && conflict != targetIndex) {
+            simCyclicTimers.removeAt(conflict);
+            int adjustedTarget = targetIndex;
+            if (conflict < adjustedTarget) {
+                --adjustedTarget;
+            }
+            simCyclicTimers[adjustedTarget] = t;
+            waveFormEditingIndex = adjustedTarget;
+        } else {
+            simCyclicTimers[targetIndex] = t;
+        }
+    } else {
+        const int existing = findWaveChannelIndex(t.device, t.addr);
+        if (existing >= 0) {
+            t.active = simCyclicTimers[existing].active;
+            t.elapsedSec = simCyclicTimers[existing].elapsedSec;
+            simCyclicTimers[existing] = t;
+            waveFormEditingIndex = existing;
+        } else {
+            simCyclicTimers.append(t);
+            waveFormEditingIndex = simCyclicTimers.size() - 1;
+        }
+    }
+
+    if (txtSimLog) {
+        txtSimLog->append(QStringLiteral("[%1] 波形通道 %2 %3 地址 %4 (类型:%5, 最大:%6, 最小:%7, 周期:%8s)")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+                              .arg(editingRow ? QStringLiteral("已更新") : QStringLiteral("已保存"))
+                              .arg(t.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV"))
+                              .arg(t.addr)
+                              .arg(t.type)
+                              .arg(t.maxValue)
+                              .arg(t.minValue)
+                              .arg(t.period));
+    }
+
+    refreshWaveChannelsTable();
+    updateSimTickTimerState();
+    updateWaveFormApplyButton();
 }
 
 void MainWindow::updateSimTickTimerState()
@@ -3305,53 +3534,34 @@ void MainWindow::onSimStopAllWaveformsClicked()
 
 void MainWindow::onSimAddCyclicTimerClicked()
 {
-    if (!cmbWaveDevice || !spinWaveAddr || !cmbWaveType || !spinWaveMax || !spinWaveMin || !spinWavePeriod || !tblWaveChannels) {
-        if (txtSimLog) {
-            txtSimLog->append(QStringLiteral("[%1] 波形控件未初始化，无法添加通道")
-                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
-        }
+    applyWaveChannelFromForm();
+}
+
+void MainWindow::onSimToggleWaveChannelClicked()
+{
+    const int row = waveChannelRowForButton(qobject_cast<QPushButton *>(sender()));
+    if (row < 0 || row >= simCyclicTimers.size()) {
         return;
     }
 
-    CyclicTimer t;
-    t.device = cmbWaveDevice->currentText() == QStringLiteral("主设备") ? QStringLiteral("Main") : QStringLiteral("AGV");
-    t.addr = static_cast<quint16>(spinWaveAddr->value());
-    t.type = cmbWaveType->currentText();
-    t.maxValue = spinWaveMax->value();
-    t.minValue = spinWaveMin->value();
-    t.period = qMax(0.001, spinWavePeriod->value());
-    t.elapsedSec = 0.0;
-    t.lastUiMs = 0;
-    t.lastLogMs = 0;
-    t.active = true;
-    t.cacheValid = false;
-
-    bool found = false;
-    for (int i = 0; i < simCyclicTimers.size(); ++i) {
-        if (simCyclicTimers[i].device == t.device && simCyclicTimers[i].addr == t.addr) {
-            simCyclicTimers[i] = t;
-            found = true;
-            break;
-        }
+    CyclicTimer &t = simCyclicTimers[row];
+    t.active = !t.active;
+    if (txtSimLog) {
+        const QString desc = waveChannelDescription(t.device, t.addr);
+        txtSimLog->append(QStringLiteral("[%1] 波形通道已%2: %3 地址 %4%5")
+                              .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")))
+                              .arg(t.active ? QStringLiteral("启动") : QStringLiteral("停止"))
+                              .arg(t.device == QLatin1String("Main") ? QStringLiteral("主设备") : QStringLiteral("AGV"))
+                              .arg(t.addr)
+                              .arg(desc.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(desc)));
     }
-    if (!found) simCyclicTimers.append(t);
-
     refreshWaveChannelsTable();
     updateSimTickTimerState();
 }
 
 void MainWindow::onSimRemoveCyclicTimerClicked()
 {
-    QPushButton *btn = qobject_cast<QPushButton*>(sender());
-    if (!btn || !tblWaveChannels) return;
-
-    int row = -1;
-    for (int r = 0; r < tblWaveChannels->rowCount(); ++r) {
-        if (tblWaveChannels->cellWidget(r, 4) == btn) {
-            row = r;
-            break;
-        }
-    }
+    const int row = waveChannelRowForButton(qobject_cast<QPushButton *>(sender()));
     if (row < 0 || row >= simCyclicTimers.size()) return;
 
     if (txtSimLog) {
@@ -3362,8 +3572,14 @@ void MainWindow::onSimRemoveCyclicTimerClicked()
                               .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), msg));
     }
     simCyclicTimers.removeAt(row);
+    if (waveFormEditingIndex == row) {
+        waveFormEditingIndex = -1;
+    } else if (waveFormEditingIndex > row) {
+        --waveFormEditingIndex;
+    }
     refreshWaveChannelsTable();
     updateSimTickTimerState();
+    updateWaveFormApplyButton();
 }
 
 void MainWindow::onSimTimerTick()
@@ -14733,51 +14949,268 @@ void MainWindow::onImportRegisterMapClicked() {
     QMessageBox::information(this, "成功", "地址映射表 CSV 导入成功。");
 }
 
-void MainWindow::onSearchMapTextFinished()
-{
-    onSearchMapClicked();
-}
-
 void MainWindow::onSearchMapClicked()
 {
-    QString searchText = txtSearchMap->text().trimmed();
-    if (searchText.isEmpty()) return;
+    if (!dlgFindMap) {
+        dlgFindMap = new QDialog(this);
+        dlgFindMap->setWindowTitle(QStringLiteral("查找"));
+        dlgFindMap->setModal(false);
+        dlgFindMap->setWindowFlag(Qt::Tool);
 
-    QTableWidget *currentTable = qobject_cast<QTableWidget*>(tabRegisterMaps->currentWidget());
-    if (!currentTable) return;
+        auto *lay = new QVBoxLayout(dlgFindMap);
+        auto *row = new QHBoxLayout();
+        row->addWidget(new QLabel(QStringLiteral("查找内容:")));
+        txtFindMap = new QLineEdit(dlgFindMap);
+        txtFindMap->setClearButtonEnabled(true);
+        txtFindMap->setPlaceholderText(QStringLiteral("地址映射表与从站模拟器寄存器表"));
+        txtFindMap->setMinimumWidth(220);
+        row->addWidget(txtFindMap, 1);
+        lay->addLayout(row);
 
-    // 获取当前选中的位置作为起点
-    int startRow = 0;
-    int startCol = 0;
-    QTableWidgetItem *currentItem = currentTable->currentItem();
-    if (currentItem) {
-        startRow = currentItem->row();
-        startCol = currentItem->column() + 1; // 从下一个单元格开始搜
-        if (startCol >= currentTable->columnCount()) {
-            startCol = 0;
-            startRow++;
-        }
+        auto *scopeRow = new QHBoxLayout();
+        scopeRow->addWidget(new QLabel(QStringLiteral("范围:")));
+        radFindMapCurrent = new QRadioButton(QStringLiteral("当前页面"), dlgFindMap);
+        radFindMapAll = new QRadioButton(QStringLiteral("全部"), dlgFindMap);
+        radFindMapCurrent->setToolTip(QStringLiteral("只查找当前打开的页面：Modbus TCP 的地址映射表，或从站模拟器的寄存器表"));
+        radFindMapAll->setToolTip(QStringLiteral("依次查找 Modbus TCP 地址映射表和从站模拟器寄存器表"));
+        radFindMapCurrent->setChecked(true);
+        scopeRow->addWidget(radFindMapCurrent);
+        scopeRow->addWidget(radFindMapAll);
+        scopeRow->addStretch();
+        lay->addLayout(scopeRow);
+
+        auto *btns = new QHBoxLayout();
+        auto *btnNext = new QPushButton(QStringLiteral("查找下一个"), dlgFindMap);
+        auto *btnClose = new QPushButton(QStringLiteral("关闭"), dlgFindMap);
+        btnNext->setAutoDefault(false);
+        btnClose->setAutoDefault(false);
+        btns->addWidget(btnNext);
+        btns->addWidget(btnClose);
+        btns->addStretch();
+        lay->addLayout(btns);
+
+        lblFindMapStatus = new QLabel(dlgFindMap);
+        lblFindMapStatus->setWordWrap(true);
+        lay->addWidget(lblFindMapStatus);
+
+        connect(txtFindMap, &QLineEdit::returnPressed, this, &MainWindow::onFindMapNext);
+        connect(btnNext, &QPushButton::clicked, this, &MainWindow::onFindMapNext);
+        connect(btnClose, &QPushButton::clicked, dlgFindMap, &QDialog::hide);
     }
 
-    int rowCount = currentTable->rowCount();
-    int colCount = currentTable->columnCount();
+    if (!dlgFindMap->isVisible()) {
+        dlgFindMap->adjustSize();
+        const QPoint origin = mapToGlobal(QPoint(qMax(0, width() - dlgFindMap->width() - 40), 80));
+        dlgFindMap->move(origin);
+    }
+    dlgFindMap->show();
+    dlgFindMap->raise();
+    dlgFindMap->activateWindow();
+    txtFindMap->setFocus();
+    txtFindMap->selectAll();
+}
 
-    // 循环搜索
-    for (int i = 0; i < rowCount; i++) {
-        int r = (startRow + i) % rowCount;
-        int cStart = (i == 0) ? startCol : 0;
-        for (int c = cStart; c < colCount; c++) {
-            QTableWidgetItem *item = currentTable->item(r, c);
-            if (item && item->text().contains(searchText, Qt::CaseInsensitive)) {
-                currentTable->setCurrentCell(r, c);
-                currentTable->scrollToItem(item, QAbstractItemView::PositionAtCenter);
-                return;
+void MainWindow::showRegisterMapFindHit(int group, int tab, int row, int col)
+{
+    QWidget *page = (group == 1) ? simulatorPageWidget : modbusPageWidget;
+    QTabWidget *tabs = (group == 1) ? tabSimRegisterMaps : tabRegisterMaps;
+    if (!page || !tabs) {
+        return;
+    }
+
+    const int pageIndex = stackedWidget->indexOf(page);
+    if (pageIndex >= 0 && stackedWidget->currentIndex() != pageIndex) {
+        navWidget->setCurrentRow(pageIndex);
+    }
+
+    if (tabs->currentIndex() != tab) {
+        const QSignalBlocker blocker(tabs);
+        tabs->setCurrentIndex(tab);
+    }
+
+    auto *table = qobject_cast<QTableWidget *>(tabs->widget(tab));
+    if (!table) {
+        return;
+    }
+    table->setCurrentCell(row, col);
+    if (QTableWidgetItem *item = table->item(row, col)) {
+        table->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+    }
+}
+
+void MainWindow::onFindMapNext()
+{
+    if (!txtFindMap) {
+        return;
+    }
+
+    const QString searchText = txtFindMap->text().trimmed();
+    if (searchText.isEmpty()) {
+        if (lblFindMapStatus) {
+            lblFindMapStatus->setText(QStringLiteral("请输入查找内容"));
+        }
+        return;
+    }
+
+    const bool searchAll = radFindMapAll && radFindMapAll->isChecked();
+    int currentGroup = -1;
+    if (stackedWidget->currentWidget() == simulatorPageWidget) {
+        currentGroup = 1;
+    } else if (stackedWidget->currentWidget() == modbusPageWidget) {
+        currentGroup = 0;
+    }
+    if (!searchAll && currentGroup < 0) {
+        findMapGroup = -1;
+        findMapTab = -1;
+        findMapRow = -1;
+        findMapCol = -1;
+        if (lblFindMapStatus) {
+            lblFindMapStatus->setText(QStringLiteral("当前页面没有寄存器表，可改选「全部」"));
+        }
+        return;
+    }
+
+    struct CellRef {
+        int group;
+        int tab;
+        int row;
+        int col;
+    };
+    QVector<CellRef> cells;
+    const auto appendTabs = [&cells](int group, QTabWidget *tabs) {
+        if (!tabs) {
+            return;
+        }
+        for (int tab = 0; tab < tabs->count(); ++tab) {
+            auto *table = qobject_cast<QTableWidget *>(tabs->widget(tab));
+            if (!table) {
+                continue;
+            }
+            for (int row = 0; row < table->rowCount(); ++row) {
+                for (int col = 0; col < table->columnCount(); ++col) {
+                    cells.append(CellRef{group, tab, row, col});
+                }
+            }
+        }
+    };
+    if (searchAll || currentGroup == 0) {
+        appendTabs(0, tabRegisterMaps);
+    }
+    if (searchAll || currentGroup == 1) {
+        appendTabs(1, tabSimRegisterMaps);
+    }
+    if (cells.isEmpty()) {
+        return;
+    }
+
+    const bool sameQuery = (searchText == findMapLastQuery)
+        && (searchAll == findMapLastAll)
+        && findMapGroup >= 0
+        && findMapTab >= 0
+        && (searchAll || findMapGroup == currentGroup);
+    findMapLastQuery = searchText;
+    findMapLastAll = searchAll;
+
+    int startIndex = 0;
+    bool wrappedStart = false;
+    if (sameQuery) {
+        int lastIndex = -1;
+        for (int i = 0; i < cells.size(); ++i) {
+            if (cells.at(i).group == findMapGroup
+                && cells.at(i).tab == findMapTab
+                && cells.at(i).row == findMapRow
+                && cells.at(i).col == findMapCol) {
+                lastIndex = i;
+                break;
+            }
+        }
+        if (lastIndex >= 0) {
+            if (lastIndex + 1 >= cells.size()) {
+                startIndex = 0;
+                wrappedStart = true;
+            } else {
+                startIndex = lastIndex + 1;
+            }
+        }
+    } else {
+        QTabWidget *startTabs = nullptr;
+        int startGroup = -1;
+        if (stackedWidget->currentWidget() == simulatorPageWidget) {
+            startTabs = tabSimRegisterMaps;
+            startGroup = 1;
+        } else if (stackedWidget->currentWidget() == modbusPageWidget) {
+            startTabs = tabRegisterMaps;
+            startGroup = 0;
+        }
+        if (startTabs) {
+            const int currentTab = startTabs->currentIndex();
+            int curRow = 0;
+            int curCol = 0;
+            if (auto *currentTable = qobject_cast<QTableWidget *>(startTabs->currentWidget())) {
+                if (QTableWidgetItem *cur = currentTable->currentItem()) {
+                    curRow = cur->row();
+                    curCol = cur->column();
+                }
+            }
+            for (int i = 0; i < cells.size(); ++i) {
+                if (cells.at(i).group == startGroup
+                    && cells.at(i).tab == currentTab
+                    && cells.at(i).row == curRow
+                    && cells.at(i).col == curCol) {
+                    startIndex = i;
+                    break;
+                }
             }
         }
     }
 
-    // 如果没搜到，提示一下
-    QMessageBox::information(this, "搜索", QString("未找到 \"%1\"").arg(searchText));
+    for (int n = 0; n < cells.size(); ++n) {
+        const int i = (startIndex + n) % cells.size();
+        const CellRef cell = cells.at(i);
+        QTabWidget *tabs = (cell.group == 1) ? tabSimRegisterMaps : tabRegisterMaps;
+        if (!tabs) {
+            continue;
+        }
+        auto *table = qobject_cast<QTableWidget *>(tabs->widget(cell.tab));
+        if (!table) {
+            continue;
+        }
+        QTableWidgetItem *item = table->item(cell.row, cell.col);
+        if (!item || !item->text().contains(searchText, Qt::CaseInsensitive)) {
+            continue;
+        }
+
+        findMapGroup = cell.group;
+        findMapTab = cell.tab;
+        findMapRow = cell.row;
+        findMapCol = cell.col;
+        showRegisterMapFindHit(cell.group, cell.tab, cell.row, cell.col);
+
+        const QString pageName = (cell.group == 1) ? QStringLiteral("从站模拟器") : QStringLiteral("Modbus TCP");
+        QString colName;
+        if (QTableWidgetItem *header = table->horizontalHeaderItem(cell.col)) {
+            colName = header->text();
+        }
+        QString status = QStringLiteral("%1 · %2 · 第 %3 行 · %4")
+                             .arg(pageName, tabs->tabText(cell.tab))
+                             .arg(cell.row + 1)
+                             .arg(colName);
+        if (wrappedStart || i < startIndex) {
+            status = QStringLiteral("已到末尾，从开头继续：") + status;
+        }
+        if (lblFindMapStatus) {
+            lblFindMapStatus->setText(status);
+        }
+        return;
+    }
+
+    findMapGroup = -1;
+    findMapTab = -1;
+    findMapRow = -1;
+    findMapCol = -1;
+    if (lblFindMapStatus) {
+        lblFindMapStatus->setText(QStringLiteral("未找到 \"%1\"").arg(searchText));
+    }
 }
 
 void MainWindow::onSimShowContextMenu(const QPoint &pos) {
@@ -14870,6 +15303,9 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     
     QString currentFmt = simTableFormats.value(table).value(row, "Unsigned");
     bool isFloat32 = (currentFmt == "32-bit Float");
+    const QString device = (tabSimRegisterMaps->currentIndex() == 0) ? QStringLiteral("AGV") : QStringLiteral("Main");
+    const quint16 waveAddr = static_cast<quint16>(addr);
+    const int existing = findWaveChannelIndex(device, waveAddr);
 
     g->addWidget(new QLabel("类型:"), 0, 0);
     QComboBox *cbType = new QComboBox();
@@ -14896,11 +15332,22 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     spPer->setDecimals(3);
     spPer->setValue(2.0);
     g->addWidget(spPer, 3, 1);
+
+    if (existing >= 0) {
+        const CyclicTimer &cur = simCyclicTimers[existing];
+        const int typeIdx = cbType->findText(cur.type);
+        if (typeIdx >= 0) {
+            cbType->setCurrentIndex(typeIdx);
+        }
+        spMax->setValue(cur.maxValue);
+        spMin->setValue(cur.minValue);
+        spPer->setValue(cur.period);
+    }
     
     v->addWidget(group);
     
     QHBoxLayout *hButtons = new QHBoxLayout();
-    QPushButton *btnOk = new QPushButton("开始生成");
+    QPushButton *btnOk = new QPushButton(existing >= 0 ? QStringLiteral("应用修改") : QStringLiteral("开始生成"));
     QPushButton *btnCancel = new QPushButton("取消");
     hButtons->addStretch();
     hButtons->addWidget(btnOk);
@@ -14909,8 +15356,8 @@ void MainWindow::onSimShowWaveformEditor(int row) {
     
     connect(btnOk, &QPushButton::clicked, dlg, [=](){
         CyclicTimer t;
-        t.device = (tabSimRegisterMaps->currentIndex() == 0) ? QStringLiteral("AGV") : QStringLiteral("Main");
-        t.addr = static_cast<quint16>(addr);
+        t.device = device;
+        t.addr = waveAddr;
         t.type = cbType->currentText();
         t.maxValue = spMax->value();
         t.minValue = spMin->value();
@@ -14921,22 +15368,23 @@ void MainWindow::onSimShowWaveformEditor(int row) {
         t.active = true;
         t.cacheValid = false;
 
-        bool found = false;
-        for (int i = 0; i < simCyclicTimers.size(); ++i) {
-            if (simCyclicTimers[i].device == t.device && simCyclicTimers[i].addr == t.addr) {
-                simCyclicTimers[i] = t;
-                found = true;
-                break;
-            }
+        const int idx = findWaveChannelIndex(t.device, t.addr);
+        const bool updating = idx >= 0;
+        if (updating) {
+            t.active = simCyclicTimers[idx].active;
+            t.elapsedSec = simCyclicTimers[idx].elapsedSec;
+            simCyclicTimers[idx] = t;
+        } else {
+            simCyclicTimers.append(t);
         }
-        if (!found) simCyclicTimers.append(t);
 
         refreshWaveChannelsTable();
         updateSimTickTimerState();
 
         if (txtSimLog) {
-            txtSimLog->append(QStringLiteral("地址 %1 开始生成 %2 (格式: %3, 最大:%4, 最小:%5, 周期:%6s)")
+            txtSimLog->append(QStringLiteral("地址 %1 %2 %3 (格式: %4, 最大:%5, 最小:%6, 周期:%7s)")
                                   .arg(addr)
+                                  .arg(updating ? QStringLiteral("已更新") : QStringLiteral("开始生成"))
                                   .arg(cbType->currentText(), currentFmt)
                                   .arg(spMax->value())
                                   .arg(spMin->value())
