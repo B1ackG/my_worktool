@@ -7156,70 +7156,29 @@ int MainWindow::gitBehindCommitCount(const QString &workDir) const
         return 0;
     }
 
-    const auto countRange = [workDir](const QString &range) -> int {
-        QString out;
-        if (!GitWorktreeRunner::runInRepo(
-                workDir,
-                {QStringLiteral("rev-list"), QStringLiteral("--count"), range},
-                &out, nullptr, 8000)) {
-            return 0;
-        }
-        bool ok = false;
-        const int count = out.trimmed().toInt(&ok);
-        return (ok && count > 0) ? count : 0;
-    };
-
-    int best = 0;
+    // 无上游跟踪分支时不算“远程领先”
     QString upstream;
-    if (GitWorktreeRunner::runInRepo(
+    if (!GitWorktreeRunner::runInRepo(
             workDir,
             {QStringLiteral("rev-parse"), QStringLiteral("--abbrev-ref"), QStringLiteral("@{u}")},
-            &upstream, nullptr, 8000)
-        && !upstream.trimmed().isEmpty()) {
-        best = countRange(QStringLiteral("HEAD..@{u}"));
+            &upstream, nullptr, 8000)) {
+        return 0;
+    }
+    if (upstream.trimmed().isEmpty()) {
+        return 0;
     }
 
-    QString branch;
+    QString out;
     if (!GitWorktreeRunner::runInRepo(
             workDir,
-            {QStringLiteral("rev-parse"), QStringLiteral("--abbrev-ref"), QStringLiteral("HEAD")},
-            &branch, nullptr, 8000)) {
-        return best;
-    }
-    branch = branch.trimmed();
-    if (branch.isEmpty() || branch == QLatin1String("HEAD")) {
-        return best;
+            {QStringLiteral("rev-list"), QStringLiteral("--count"), QStringLiteral("HEAD..@{u}")},
+            &out, nullptr, 8000)) {
+        return 0;
     }
 
-    // 同一分支可能同时存在 origin 与 GitHub 等远程。只看 @{u} 时，
-    // 另一个远程已经领先也不会被算进去。
-    QString remotesOut;
-    if (!GitWorktreeRunner::runInRepo(
-            workDir, {QStringLiteral("remote")}, &remotesOut, nullptr, 8000)) {
-        return best;
-    }
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    const QStringList remotes = remotesOut.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-#else
-    const QStringList remotes = remotesOut.split(QLatin1Char('\n'), QString::SkipEmptyParts);
-#endif
-    for (QString remote : remotes) {
-        remote = remote.trimmed();
-        if (remote.isEmpty()) {
-            continue;
-        }
-        const QString ref = remote + QLatin1Char('/') + branch;
-        QString verify;
-        if (!GitWorktreeRunner::runInRepo(
-                workDir,
-                {QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("--quiet"),
-                 QStringLiteral("refs/remotes/") + ref},
-                &verify, nullptr, 8000)) {
-            continue;
-        }
-        best = qMax(best, countRange(QStringLiteral("HEAD..") + ref));
-    }
-    return best;
+    bool ok = false;
+    const int count = out.trimmed().toInt(&ok);
+    return (ok && count > 0) ? count : 0;
 }
 
 QList<QPair<QString, QString>> MainWindow::collectGitPendingExitItems() const
@@ -7433,42 +7392,17 @@ void MainWindow::pushAllUnpushedRepos(const QStringList &repoDirs)
 
 QStringList MainWindow::rememberedGitRepoPaths() const
 {
-    QStringList rawPaths;
-    if (cmbGitDir) {
-        for (int i = 0; i < cmbGitDir->count(); ++i) {
-            rawPaths << cmbGitDir->itemText(i);
-        }
-        const QString current = cmbGitDir->currentText().trimmed();
-        if (!current.isEmpty()) {
-            rawPaths << current;
-        }
-    }
     QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
-    rawPaths << settings.value(QStringLiteral("GitHistory")).toStringList();
-
+    const QStringList history = settings.value(QStringLiteral("GitHistory")).toStringList();
     QStringList repos;
     QSet<QString> seen;
-    for (const QString &rawPath : rawPaths) {
-        const QString trimmed = rawPath.trimmed();
-        if (trimmed.isEmpty()) {
+
+    for (const QString &rawPath : history) {
+        const QString absPath = QDir(rawPath).absolutePath();
+        if (absPath.isEmpty() || seen.contains(absPath)) {
             continue;
         }
-        QString absPath = QDir::cleanPath(QDir(trimmed).absolutePath());
-        if (absPath.isEmpty()) {
-            continue;
-        }
-#ifdef Q_OS_WIN
-        if (absPath.size() >= 2 && absPath.at(1) == QLatin1Char(':')) {
-            absPath[0] = absPath.at(0).toUpper();
-        }
-        const QString key = absPath.toLower();
-#else
-        const QString key = absPath;
-#endif
-        if (seen.contains(key)) {
-            continue;
-        }
-        seen.insert(key);
+        seen.insert(absPath);
         if (!QDir(absPath).exists() || !isGitRepository(absPath)) {
             continue;
         }
@@ -7493,10 +7427,7 @@ QList<QPair<QString, QString>> MainWindow::collectRemoteAheadItems() const
             name = QFileInfo(absPath).fileName();
         }
         items.append({absPath,
-                      QStringLiteral("• %1：远程领先 %2 个提交（%3）")
-                          .arg(name)
-                          .arg(behind)
-                          .arg(QDir::toNativeSeparators(absPath))});
+                      QStringLiteral("• %1：远程领先 %2 个提交").arg(name).arg(behind)});
     }
 
     return items;
@@ -7511,7 +7442,7 @@ bool MainWindow::promptStartupFetchFailed(const QStringList &failedPaths)
         if (name.isEmpty()) {
             name = QFileInfo(absPath).fileName();
         }
-        names << QStringLiteral("%1（%2）").arg(name, QDir::toNativeSeparators(absPath));
+        names << name;
     }
 
     if (txtGitLog) {
@@ -7542,21 +7473,20 @@ void MainWindow::startStartupRemoteCheck()
         return;
     }
     if (gitNetworkBusy) {
-        if (gitStartupCheckBusyRetries < 20) {
-            ++gitStartupCheckBusyRetries;
-            QTimer::singleShot(800, this, [this]() { startStartupRemoteCheck(); });
-            return;
-        }
-        gitStartupCheckBusyRetries = 0;
-        if (txtGitLog) {
-            txtGitLog->append(
-                QStringLiteral("<font color='orange'>[启动检查] 其他 git 通讯占用中，"
-                               "跳过自动 fetch，按本地缓存检查远程领先。</font>"));
-        }
-        promptRemoteAheadOnOpen();
+        QTimer::singleShot(800, this, [this]() {
+            if (gitNetworkBusy) {
+                if (txtGitLog) {
+                    txtGitLog->append(
+                        QStringLiteral("<font color='orange'>[启动检查] 其他 git 通讯占用中，"
+                                       "跳过自动 fetch，按本地缓存检查远程领先。</font>"));
+                }
+                promptRemoteAheadOnOpen();
+                return;
+            }
+            startStartupRemoteCheck();
+        });
         return;
     }
-    gitStartupCheckBusyRetries = 0;
 
     const QStringList repos = rememberedGitRepoPaths();
     if (repos.isEmpty()) {
@@ -7567,15 +7497,9 @@ void MainWindow::startStartupRemoteCheck()
     gitStartupCheckAborted = false;
     gitStartupCheckActive = true;
     if (txtGitLog) {
-        QStringList lines;
-        lines.reserve(repos.size());
-        for (const QString &repo : repos) {
-            lines << QStringLiteral("• %1").arg(QDir::toNativeSeparators(repo));
-        }
         txtGitLog->append(
-            QStringLiteral("<font color='gray'>[启动检查] 正在 fetch %1 个记忆仓库：\n%2</font>")
-                .arg(repos.size())
-                .arg(lines.join(QLatin1Char('\n'))));
+            QStringLiteral("<font color='gray'>[启动检查] 正在 fetch %1 个记忆仓库…</font>")
+                .arg(repos.size()));
     }
     continueStartupRemoteCheck(repos, 0, QStringList());
 }
@@ -7616,11 +7540,8 @@ void MainWindow::continueStartupRemoteCheck(const QStringList &repos, int index,
 
     const QString absPath = repos.at(index);
     gitNetworkSuppressRetry = true;
-    // -C 固定仓库；--all 更新 origin 与 GitHub 等全部远程，避免只刷新当前目录的上游。
     runGitNetworkCommand(
-        QStringList() << QStringLiteral("-C") << absPath << QStringLiteral("fetch")
-                      << QStringLiteral("--all") << QStringLiteral("--prune"),
-        90000,
+        QStringList() << QStringLiteral("fetch") << QStringLiteral("--prune"), 60000,
         [this, repos, index, failedPaths](bool ok) {
             QStringList nextFailed = failedPaths;
             if (!ok) {
@@ -11570,20 +11491,9 @@ void MainWindow::setGitRepoMainGoalId(const QString &goalId) {
 }
 
 bool MainWindow::isGitRepository(const QString &workDir) const {
-    const QString dir = QDir::cleanPath(workDir.trimmed());
-    if (dir.isEmpty() || !QDir(dir).exists())
+    if (workDir.trimmed().isEmpty())
         return false;
-    const QFileInfo gitInfo(QDir(dir).filePath(QStringLiteral(".git")));
-    if (gitInfo.exists())
-        return true;
-    QString out;
-    if (!GitWorktreeRunner::runInRepo(
-            dir,
-            {QStringLiteral("rev-parse"), QStringLiteral("--is-inside-work-tree")},
-            &out, nullptr, 8000)) {
-        return false;
-    }
-    return out.trimmed() == QLatin1String("true");
+    return QFile::exists(QDir(workDir.trimmed()).absoluteFilePath(QStringLiteral(".git")));
 }
 
 QStringList MainWindow::fetchTodayCommitSubjects(const QString &workDir) const {

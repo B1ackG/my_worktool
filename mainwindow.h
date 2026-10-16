@@ -570,7 +570,6 @@ private:
     bool gitNetworkSuppressRetry = false;
     bool gitStartupCheckActive = false;
     bool gitStartupCheckAborted = false;
-    int gitStartupCheckBusyRetries = 0;
     QStringList gitNetworkLastArgs;
     QString gitNetworkLastWorkDir;
     int gitNetworkLastTimeoutMs = 30000;
@@ -750,7 +749,7 @@ private:
     /** True if index contains blocked paths (e.g. *.log). */
     bool gitStagedHasBlockedPaths(const QString &workDir, QStringList *blockedOut = nullptr) const;
     int gitUnpushedCommitCount(const QString &workDir) const;
-    /** 当前分支相对各远程同名分支（含上游）落后的最大提交数；没有可比较的远程分支则返回 0。 */
+    /** 本地相对上游落后的提交数（远程领先）；无上游则返回 0。 */
     int gitBehindCommitCount(const QString &workDir) const;
     /** 返回 (仓库绝对路径, 提示行) 列表，按记忆路径顺序。 */
     QList<QPair<QString, QString>> collectGitPendingExitItems() const;
