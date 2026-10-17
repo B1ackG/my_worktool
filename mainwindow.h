@@ -224,6 +224,8 @@ private slots:
     void onGitStashPopClicked();
     void onGitStashListClicked();
     void onGitAutoDiffReminderToggled(bool checked);
+    void onHmiTestRunClicked();
+    void onHmiTestStopClicked();
     void onGitAutoDiffReminderTick();
     void onGitOpenIgnoreClicked();
     void onGitGetSshKeyClicked(); // 新增：获取SSH公钥
@@ -518,6 +520,14 @@ private:
     QPushButton *btnGitStash;
     QPushButton *btnGitStashPop = nullptr; // 已并入 Stash 菜单
     QPushButton *btnGitAutoDiffReminder;
+    QComboBox *cmbHmiTestLayer = nullptr;
+    QLineEdit *txtHmiTestRepo = nullptr;
+    QLineEdit *txtHmiTestSimRoot = nullptr;
+    QLineEdit *txtHmiTestBackend = nullptr;
+    QPushButton *btnHmiTestRun = nullptr;
+    QPushButton *btnHmiTestStop = nullptr;
+    QProcess *hmiTestProcess = nullptr;
+    QByteArray hmiTestOutput;
     QPushButton *btnGitExeReminderCheckNow = nullptr;
     QPushButton *btnWinDeploy = nullptr;
     QSpinBox *spinGitDiffIntervalMinutes;
@@ -737,6 +747,9 @@ private:
     bool isGitAutoPushAfterCommitEnabled() const;
     void loadGitNetworkSettings();
     void saveGitNetworkSettings();
+    void loadHmiTestSettings();
+    void saveHmiTestSettings();
+    void flushHmiTestLog(int exitCode, QProcess::ExitStatus status);
     void refreshGitPendingStatusBar();
     void setGitPendingAlertActive(bool active);
     void applyGitPendingBlinkStyle();

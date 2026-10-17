@@ -873,6 +873,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadGitHistory();
     loadGitDiffReminderSettings();
     loadGitNetworkSettings();
+    loadHmiTestSettings();
     QTimer::singleShot(0, this, &MainWindow::deferredGitRepoInit);
     loadModbusFloatOrderSettings();
     loadRegisterTables();
@@ -1377,6 +1378,22 @@ void MainWindow::createWidgets()
     btnGitAutoDiffReminder->setStyleSheet("background-color: #fff3cd; font-weight: bold;");
     btnGitAutoDiffReminder->setToolTip(
         QStringLiteral("定时检查记忆列表中所有仓库的最新可执行文件是否相对基线有更新，有则提醒"));
+    cmbHmiTestLayer = new QComboBox();
+    cmbHmiTestLayer->addItems(QStringList() << QStringLiteral("all") << QStringLiteral("unit")
+                                            << QStringLiteral("component") << QStringLiteral("integration"));
+    cmbHmiTestLayer->setToolTip(QStringLiteral("run_tests.sh 参数。all 按 unit、component、integration 顺序执行。"));
+    txtHmiTestRepo = new QLineEdit(QStringLiteral("/home/l/work/180"));
+    txtHmiTestRepo->setToolTip(QStringLiteral("180 工程根目录，里面要有 scripts/tests/run_tests.sh"));
+    txtHmiTestSimRoot = new QLineEdit(QStringLiteral("/home/l/myAssistant/my-assistant"));
+    txtHmiTestSimRoot->setToolTip(QStringLiteral("MODBUS_SIM_ROOT，集成测试编译这里的 modbusslave.cpp"));
+    txtHmiTestBackend = new QLineEdit(QStringLiteral("/home/l/work/180/libmodbus_backend.so"));
+    txtHmiTestBackend->setToolTip(QStringLiteral("MODBUS_BACKEND_LIB。文件不存在时集成层会直接失败。"));
+    btnHmiTestRun = new QPushButton(QStringLiteral("一键运行无 PLC 测试"));
+    btnHmiTestRun->setStyleSheet(QStringLiteral("background-color: #c8e6c9; font-weight: bold;"));
+    btnHmiTestRun->setToolTip(
+        QStringLiteral("不连接真实 PLC，不打开 180 主界面。跑完后把完整日志写到下方 Git 日志，并保存到工程 build-tests/last-run.log。"));
+    btnHmiTestStop = new QPushButton(QStringLiteral("停止测试"));
+    btnHmiTestStop->setEnabled(false);
     btnGitExeReminderCheckNow = new QPushButton(QStringLiteral("立即检查"));
     btnGitExeReminderCheckNow->setToolTip(QStringLiteral("立刻扫描全部记忆仓库的可执行文件更新（不必等间隔）"));
     btnWinDeploy = new QPushButton(QStringLiteral("打包 Windows 目录"));
@@ -1764,6 +1781,51 @@ QWidget* MainWindow::createGitPage()
     layReminder->addWidget(spinGitDiffIntervalMinutes);
     layReminder->addStretch();
     layOps->addLayout(layReminder);
+
+    QGroupBox *grpHmiTest = new QGroupBox(QStringLiteral("180 无 PLC 测试"));
+    QGridLayout *layHmiTest = new QGridLayout();
+    layHmiTest->addWidget(new QLabel(QStringLiteral("层级:")), 0, 0);
+    layHmiTest->addWidget(cmbHmiTestLayer, 0, 1);
+    layHmiTest->addWidget(btnHmiTestRun, 0, 2);
+    layHmiTest->addWidget(btnHmiTestStop, 0, 3);
+    layHmiTest->addWidget(new QLabel(QStringLiteral("工程:")), 1, 0);
+    layHmiTest->addWidget(txtHmiTestRepo, 1, 1, 1, 2);
+    QPushButton *btnHmiRepo = new QPushButton(QStringLiteral("浏览"), this);
+    layHmiTest->addWidget(btnHmiRepo, 1, 3);
+    layHmiTest->addWidget(new QLabel(QStringLiteral("模拟器:")), 2, 0);
+    layHmiTest->addWidget(txtHmiTestSimRoot, 2, 1, 1, 2);
+    QPushButton *btnHmiSim = new QPushButton(QStringLiteral("浏览"), this);
+    layHmiTest->addWidget(btnHmiSim, 2, 3);
+    layHmiTest->addWidget(new QLabel(QStringLiteral("后端:")), 3, 0);
+    layHmiTest->addWidget(txtHmiTestBackend, 3, 1, 1, 2);
+    QPushButton *btnHmiBackend = new QPushButton(QStringLiteral("浏览"), this);
+    layHmiTest->addWidget(btnHmiBackend, 3, 3);
+    grpHmiTest->setLayout(layHmiTest);
+    layOps->addWidget(grpHmiTest);
+    connect(btnHmiRepo, &QPushButton::clicked, this, [this]() {
+        const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择 180 工程"),
+                                                              txtHmiTestRepo->text());
+        if (!dir.isEmpty()) {
+            txtHmiTestRepo->setText(dir);
+            saveHmiTestSettings();
+        }
+    });
+    connect(btnHmiSim, &QPushButton::clicked, this, [this]() {
+        const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择 ModbusSlave 目录"),
+                                                              txtHmiTestSimRoot->text());
+        if (!dir.isEmpty()) {
+            txtHmiTestSimRoot->setText(dir);
+            saveHmiTestSettings();
+        }
+    });
+    connect(btnHmiBackend, &QPushButton::clicked, this, [this]() {
+        const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("选择 libmodbus_backend.so"),
+                                                          txtHmiTestBackend->text());
+        if (!file.isEmpty()) {
+            txtHmiTestBackend->setText(file);
+            saveHmiTestSettings();
+        }
+    });
     
     // History Section
     QFrame *line = new QFrame();
@@ -2263,6 +2325,13 @@ void MainWindow::createMenus()
     connect(actSkills, &QAction::triggered, this, &MainWindow::onGitOpenSkillsClicked);
 
     toolsMenu->addSeparator();
+
+    QAction *actHmiTest = toolsMenu->addAction(QStringLiteral("运行 180 无 PLC 测试"));
+    actHmiTest->setToolTip(QStringLiteral("打开 Git 工作流并按已保存配置运行 scripts/tests/run_tests.sh"));
+    connect(actHmiTest, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onHmiTestRunClicked();
+    });
 
     QAction *actExeCheckNow = toolsMenu->addAction(QStringLiteral("立即检查可执行文件更新"));
     connect(actExeCheckNow, &QAction::triggered, this, &MainWindow::onGitAutoDiffReminderTick);
@@ -3153,6 +3222,14 @@ void MainWindow::createConnections()
     }
     connect(txtGitCmdInput, &QLineEdit::returnPressed, this, &MainWindow::onGitConsoleCommandSubmitted);
     // Stash / 更多操作 are wired via button menus
+    connect(btnHmiTestRun, &QPushButton::clicked, this, &MainWindow::onHmiTestRunClicked);
+    connect(btnHmiTestStop, &QPushButton::clicked, this, &MainWindow::onHmiTestStopClicked);
+    connect(cmbHmiTestLayer, &QComboBox::currentTextChanged, this, [this](const QString &) {
+        saveHmiTestSettings();
+    });
+    connect(txtHmiTestRepo, &QLineEdit::editingFinished, this, &MainWindow::saveHmiTestSettings);
+    connect(txtHmiTestSimRoot, &QLineEdit::editingFinished, this, &MainWindow::saveHmiTestSettings);
+    connect(txtHmiTestBackend, &QLineEdit::editingFinished, this, &MainWindow::saveHmiTestSettings);
     connect(btnGitAutoDiffReminder, &QPushButton::toggled, this, &MainWindow::onGitAutoDiffReminderToggled);
     connect(btnGitExeReminderCheckNow, &QPushButton::clicked, this, &MainWindow::onGitAutoDiffReminderTick);
     connect(btnWinDeploy, &QPushButton::clicked, this, &MainWindow::onWinDeployClicked);
@@ -6433,6 +6510,169 @@ void MainWindow::saveGitNetworkSettings()
     settings.setValue(QStringLiteral("autoFetch"), gitAutoFetchEnabled);
     settings.setValue(QStringLiteral("autoPushAfterCommit"), gitAutoPushAfterCommitEnabled);
     settings.endGroup();
+}
+
+void MainWindow::loadHmiTestSettings()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("hmiTests"));
+    const QString layer = settings.value(QStringLiteral("layer"), QStringLiteral("all")).toString();
+    const QString repo = settings.value(QStringLiteral("repo"), QStringLiteral("/home/l/work/180")).toString();
+    const QString simRoot = settings.value(QStringLiteral("simRoot"),
+                                           QStringLiteral("/home/l/myAssistant/my-assistant")).toString();
+    const QString backend = settings.value(QStringLiteral("backend"),
+                                           QStringLiteral("/home/l/work/180/libmodbus_backend.so")).toString();
+    settings.endGroup();
+    if (cmbHmiTestLayer) {
+        const int index = cmbHmiTestLayer->findText(layer);
+        cmbHmiTestLayer->blockSignals(true);
+        cmbHmiTestLayer->setCurrentIndex(index >= 0 ? index : 0);
+        cmbHmiTestLayer->blockSignals(false);
+    }
+    if (txtHmiTestRepo) {
+        txtHmiTestRepo->setText(repo);
+    }
+    if (txtHmiTestSimRoot) {
+        txtHmiTestSimRoot->setText(simRoot);
+    }
+    if (txtHmiTestBackend) {
+        txtHmiTestBackend->setText(backend);
+    }
+}
+
+void MainWindow::saveHmiTestSettings()
+{
+    if (!cmbHmiTestLayer || !txtHmiTestRepo || !txtHmiTestSimRoot || !txtHmiTestBackend) {
+        return;
+    }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.beginGroup(QStringLiteral("hmiTests"));
+    settings.setValue(QStringLiteral("layer"), cmbHmiTestLayer->currentText());
+    settings.setValue(QStringLiteral("repo"), txtHmiTestRepo->text().trimmed());
+    settings.setValue(QStringLiteral("simRoot"), txtHmiTestSimRoot->text().trimmed());
+    settings.setValue(QStringLiteral("backend"), txtHmiTestBackend->text().trimmed());
+    settings.endGroup();
+}
+
+void MainWindow::onHmiTestRunClicked()
+{
+    if (hmiTestProcess && hmiTestProcess->state() != QProcess::NotRunning) {
+        appendGitLogHtml(QStringLiteral("<font color='orange'>[无PLC测试] 已有测试在运行</font>"));
+        return;
+    }
+    saveHmiTestSettings();
+    const QString repo = txtHmiTestRepo->text().trimmed();
+    const QString script = repo + QStringLiteral("/scripts/tests/run_tests.sh");
+    if (!QFileInfo::exists(script)) {
+        appendGitLogHtml(QStringLiteral("<font color='red'>[无PLC测试] 找不到 %1</font>")
+                             .arg(script.toHtmlEscaped()));
+        return;
+    }
+    hmiTestOutput.clear();
+    if (!hmiTestProcess) {
+        hmiTestProcess = new QProcess(this);
+        hmiTestProcess->setProcessChannelMode(QProcess::MergedChannels);
+        connect(hmiTestProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+            hmiTestOutput += hmiTestProcess->readAllStandardOutput();
+        });
+        connect(hmiTestProcess,
+                static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                this, [this](int exitCode, QProcess::ExitStatus status) {
+                    btnHmiTestRun->setEnabled(true);
+                    btnHmiTestStop->setEnabled(false);
+                    flushHmiTestLog(exitCode, status);
+                });
+    }
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("MODBUS_SIM_ROOT"), txtHmiTestSimRoot->text().trimmed());
+    env.insert(QStringLiteral("MODBUS_BACKEND_LIB"), txtHmiTestBackend->text().trimmed());
+    env.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
+    hmiTestProcess->setProcessEnvironment(env);
+    hmiTestProcess->setWorkingDirectory(repo);
+    const QString layer = cmbHmiTestLayer->currentText();
+    appendGitLogHtml(QStringLiteral("<font color='gray'>[无PLC测试] 开始 %1 %2，完成后输出日志</font>")
+                         .arg(script.toHtmlEscaped(), layer.toHtmlEscaped()));
+    btnHmiTestRun->setEnabled(false);
+    btnHmiTestStop->setEnabled(true);
+    hmiTestProcess->start(QStringLiteral("bash"), QStringList() << script << layer);
+    if (!hmiTestProcess->waitForStarted(3000)) {
+        btnHmiTestRun->setEnabled(true);
+        btnHmiTestStop->setEnabled(false);
+        appendGitLogHtml(QStringLiteral("<font color='red'>[无PLC测试] 启动失败: %1</font>")
+                             .arg(hmiTestProcess->errorString().toHtmlEscaped()));
+    }
+}
+
+void MainWindow::flushHmiTestLog(int exitCode, QProcess::ExitStatus status)
+{
+    if (hmiTestProcess) {
+        hmiTestOutput += hmiTestProcess->readAllStandardOutput();
+    }
+    const QString text = PlatformPrefs::decodeProcessOutput(hmiTestOutput);
+    hmiTestOutput.clear();
+
+    const QString repo = txtHmiTestRepo ? txtHmiTestRepo->text().trimmed() : QString();
+    const QString layer = cmbHmiTestLayer ? cmbHmiTestLayer->currentText() : QString();
+    QString logPath;
+    if (!repo.isEmpty()) {
+        const QString dir = repo + QStringLiteral("/build-tests");
+        QDir().mkpath(dir);
+        logPath = dir + QStringLiteral("/last-run.log");
+        QFile file(logPath);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QTextStream out(&file);
+            out.setCodec("UTF-8");
+            out << QStringLiteral("# 180 无 PLC 测试\n");
+            out << QStringLiteral("# 时间: ")
+                << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                << QLatin1Char('\n');
+            out << QStringLiteral("# 层级: ") << layer << QLatin1Char('\n');
+            out << QStringLiteral("# 退出码: ") << exitCode << QLatin1Char('\n');
+            out << QStringLiteral("# 状态: ")
+                << (status == QProcess::NormalExit ? QStringLiteral("正常退出")
+                                                   : QStringLiteral("异常退出"))
+                << QLatin1Char('\n');
+            out << text;
+            if (!text.endsWith(QLatin1Char('\n'))) {
+                out << QLatin1Char('\n');
+            }
+            file.close();
+        } else {
+            logPath.clear();
+        }
+    }
+
+    if (txtGitLog && !text.trimmed().isEmpty()) {
+        QTextCursor cursor(txtGitLog->document());
+        cursor.movePosition(QTextCursor::End);
+        cursor.insertBlock();
+        cursor.insertText(text.endsWith(QLatin1Char('\n')) ? text : text + QLatin1Char('\n'));
+        txtGitLog->setTextCursor(cursor);
+        txtGitLog->moveCursor(QTextCursor::End);
+    }
+
+    const bool ok = status == QProcess::NormalExit && exitCode == 0;
+    QString summary = ok
+        ? QStringLiteral("<font color='green'>[无PLC测试] 通过，退出码 0</font>")
+        : QStringLiteral("<font color='red'>[无PLC测试] 失败，退出码 %1</font>").arg(exitCode);
+    if (!logPath.isEmpty()) {
+        summary += QStringLiteral("<br><font color='gray'>[无PLC测试] 日志已写入 %1</font>")
+                       .arg(logPath.toHtmlEscaped());
+    } else {
+        summary += QStringLiteral("<br><font color='orange'>[无PLC测试] 日志文件写入失败</font>");
+    }
+    appendGitLogHtml(summary);
+}
+
+void MainWindow::onHmiTestStopClicked()
+{
+    if (!hmiTestProcess || hmiTestProcess->state() == QProcess::NotRunning) {
+        return;
+    }
+    hmiTestProcess->terminate();
+    if (!hmiTestProcess->waitForFinished(2000)) {
+        hmiTestProcess->kill();
+    }
 }
 
 void MainWindow::onGitAutoFetchToggled(bool checked)

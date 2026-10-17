@@ -69,8 +69,36 @@ bool ModbusSlave::start(quint16 port, quint8 unitId, const QString &bindAddr)
     } else {
         ok = server->listen(QHostAddress::Any, port);
     }
-    emit logMessage(QString("Modbus 从站启动: 端口 %1, 单元ID %2, 成功=%3").arg(port).arg(unitId).arg(ok));
+    emit logMessage(QString("Modbus 从站启动: 端口 %1, 单元ID %2, 成功=%3")
+                        .arg(ok ? server->serverPort() : port)
+                        .arg(unitId)
+                        .arg(ok));
     return ok;
+}
+
+quint16 ModbusSlave::serverPort() const
+{
+    if (!server || !server->isListening()) {
+        return 0;
+    }
+    return server->serverPort();
+}
+
+void ModbusSlave::disconnectAllClients()
+{
+    const QList<QTcpSocket *> snapshot = clients;
+    for (QTcpSocket *sock : snapshot) {
+        if (sock) {
+            sock->abort();
+        }
+    }
+    const QList<QTcpSocket *> leftover = clients;
+    for (QTcpSocket *sock : leftover) {
+        clients.removeAll(sock);
+        if (sock) {
+            sock->deleteLater();
+        }
+    }
 }
 
 void ModbusSlave::stop()

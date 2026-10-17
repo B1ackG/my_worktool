@@ -24,6 +24,8 @@ public:
     bool start(quint16 port, quint8 unitId = 1, const QString &bindAddr = QString());
     void stop();
     bool isRunning() const;
+    quint16 serverPort() const;
+    void disconnectAllClients();
     int clientCount() const { return clients.size(); }
 
     // Register access
