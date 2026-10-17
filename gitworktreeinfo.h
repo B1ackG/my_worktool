@@ -4,9 +4,17 @@
 #include <QDateTime>
 #include <QString>
 
+struct GitCommitRef {
+    QString hash;
+    QString shortHash;
+    QString date;
+    QString subject;
+};
+
 struct GitWorktreeEntry {
     QString path;
     QString branch;          // empty when detached
+    QString head;            // full commit hash checked out here
     bool isMain = false;
     bool isDirty = false;
     bool isDetached = false;

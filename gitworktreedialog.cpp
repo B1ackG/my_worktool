@@ -2,6 +2,7 @@
 
 #include "gitworktreeapplydialog.h"
 #include "gitworktreerunner.h"
+#include "gitworktreerevdialog.h"
 #include "gitworktreewizard.h"
 #include "mainwindow.h"
 
@@ -59,9 +60,15 @@ GitWorktreeDialog::GitWorktreeDialog(MainWindow *mainWindow, const QString &main
     QPushButton *btnRefresh = new QPushButton(QStringLiteral("刷新"), this);
     QPushButton *btnCreate = new QPushButton(QStringLiteral("创建向导…"), this);
     btnCreate->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    QPushButton *btnRev = new QPushButton(QStringLiteral("历史版本…"), this);
+    btnRev->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    btnRev->setToolTip(QStringLiteral(
+        "检出某次历史提交到旁边的目录，并用 Qt Creator 打开。主目录保持不动。编完后点「移除」。"));
     QPushButton *btnCleanup = new QPushButton(QStringLiteral("清理建议…"), this);
     QPushButton *btnPrune = new QPushButton(QStringLiteral("Prune"), this);
     QPushButton *btnOpen = new QPushButton(QStringLiteral("打开目录"), this);
+    QPushButton *btnQt = new QPushButton(QStringLiteral("用 Qt 打开"), this);
+    btnQt->setToolTip(QStringLiteral("用 Qt Creator 打开所选目录下的 .pro。请在 Qt 里执行「重新构建」。"));
     QPushButton *btnEnter = new QPushButton(QStringLiteral("进入"), this);
     btnEnter->setStyleSheet(QStringLiteral("background-color: #e3f2fd; font-weight: bold;"));
     QPushButton *btnApply = new QPushButton(QStringLiteral("迁回主目录"), this);
@@ -73,25 +80,33 @@ GitWorktreeDialog::GitWorktreeDialog(MainWindow *mainWindow, const QString &main
     QHBoxLayout *tools = new QHBoxLayout();
     tools->addWidget(btnRefresh);
     tools->addWidget(btnCreate);
+    tools->addWidget(btnRev);
     tools->addWidget(btnCleanup);
     tools->addWidget(btnPrune);
     tools->addStretch();
-    tools->addWidget(btnOpen);
-    tools->addWidget(btnEnter);
-    tools->addWidget(btnApply);
-    tools->addWidget(btnRemove);
-    tools->addWidget(btnClose);
+
+    QHBoxLayout *actions = new QHBoxLayout();
+    actions->addWidget(btnOpen);
+    actions->addWidget(btnQt);
+    actions->addWidget(btnEnter);
+    actions->addWidget(btnApply);
+    actions->addWidget(btnRemove);
+    actions->addStretch();
+    actions->addWidget(btnClose);
 
     QVBoxLayout *lay = new QVBoxLayout(this);
     lay->addWidget(m_lblHint);
     lay->addWidget(m_table, 1);
     lay->addLayout(tools);
+    lay->addLayout(actions);
 
     connect(btnRefresh, &QPushButton::clicked, this, &GitWorktreeDialog::onRefresh);
     connect(btnCreate, &QPushButton::clicked, this, &GitWorktreeDialog::onCreateWizard);
+    connect(btnRev, &QPushButton::clicked, this, &GitWorktreeDialog::onCheckoutRevision);
     connect(btnCleanup, &QPushButton::clicked, this, &GitWorktreeDialog::onCleanupSuggestions);
     connect(btnPrune, &QPushButton::clicked, this, &GitWorktreeDialog::onPrune);
     connect(btnOpen, &QPushButton::clicked, this, &GitWorktreeDialog::onOpenDir);
+    connect(btnQt, &QPushButton::clicked, this, &GitWorktreeDialog::onOpenInQt);
     connect(btnEnter, &QPushButton::clicked, this, &GitWorktreeDialog::onEnter);
     connect(btnApply, &QPushButton::clicked, this, &GitWorktreeDialog::onApply);
     connect(btnRemove, &QPushButton::clicked, this, &GitWorktreeDialog::onRemove);
@@ -170,9 +185,18 @@ void GitWorktreeDialog::rebuildTable()
         const GitWorktreeEntry &e = m_entries.at(i);
         m_table->insertRow(i);
         auto *pathItem = new QTableWidgetItem(e.path);
-        auto *branchItem = new QTableWidgetItem(
-            e.isDetached ? QStringLiteral("(detached)")
-                         : (e.branch.isEmpty() ? QStringLiteral("-") : e.branch));
+        QString branchText;
+        if (e.isDetached) {
+            const QString shortHead = e.head.left(7);
+            branchText = shortHead.isEmpty() ? QStringLiteral("(detached)")
+                                             : QStringLiteral("(detached %1)").arg(shortHead);
+        } else {
+            branchText = e.branch.isEmpty() ? QStringLiteral("-") : e.branch;
+        }
+        auto *branchItem = new QTableWidgetItem(branchText);
+        if (!e.head.isEmpty()) {
+            branchItem->setToolTip(e.head);
+        }
         auto *mainItem = new QTableWidgetItem(e.isMain ? QStringLiteral("是") : QStringLiteral("否"));
         auto *dirtyItem = new QTableWidgetItem(e.isDirty ? QStringLiteral("是") : QStringLiteral("否"));
         auto *actItem = new QTableWidgetItem(
@@ -306,6 +330,52 @@ void GitWorktreeDialog::onPrune()
     QMessageBox::information(this, QStringLiteral("Prune"), QStringLiteral("已执行 git worktree prune。"));
 }
 
+void GitWorktreeDialog::onCheckoutRevision()
+{
+    GitWorktreeRevDialog dlg(m_mainRepoDir, this);
+    dlg.exec();
+    if (!dlg.logText().isEmpty()) {
+        appendLog(dlg.logText());
+    }
+    if (dlg.createdOk()) {
+        rebuildTable();
+        selectPath(dlg.createdPath());
+    }
+}
+
+void GitWorktreeDialog::onOpenInQt()
+{
+    const int row = selectedRow();
+    const GitWorktreeEntry e = entryAt(row);
+    if (e.path.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("用 Qt 打开"), QStringLiteral("请先选择一行。"));
+        return;
+    }
+    const GitWorktreeQtOpenResult opened = openWorktreeInQtCreator(this, e.path);
+    if (opened.cancelled) {
+        return;
+    }
+    if (!opened.opened) {
+        QMessageBox::warning(this, QStringLiteral("Qt Creator"), opened.error);
+        return;
+    }
+    appendLog(QStringLiteral("$ qtcreator %1").arg(opened.proFile));
+}
+
+void GitWorktreeDialog::selectPath(const QString &path)
+{
+    const QString abs = QDir(path).absolutePath();
+    for (int i = 0; i < m_entries.size(); ++i) {
+        if (QDir(m_entries.at(i).path).absolutePath() == abs) {
+            m_table->selectRow(i);
+            if (QTableWidgetItem *item = m_table->item(i, kColPath)) {
+                m_table->scrollToItem(item);
+            }
+            return;
+        }
+    }
+}
+
 void GitWorktreeDialog::onOpenDir()
 {
     const int row = selectedRow();
@@ -419,7 +489,7 @@ void GitWorktreeDialog::onRemove()
     }
     if (QMessageBox::question(
             this, QStringLiteral("确认移除"),
-            QStringLiteral("确定要移除并删除目录吗？\n%1\n这将删除该目录下所有未提交的内容!")
+            QStringLiteral("确定要移除这个工作树并删除目录吗？\n%1\n主仓库目录不会改动。该目录里未提交的内容会一起删除。")
                 .arg(e.path),
             QMessageBox::Yes | QMessageBox::No)
         != QMessageBox::Yes) {

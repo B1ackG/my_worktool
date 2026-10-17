@@ -26,9 +26,11 @@ public:
 private slots:
     void onRefresh();
     void onCreateWizard();
+    void onCheckoutRevision();
     void onCleanupSuggestions();
     void onPrune();
     void onOpenDir();
+    void onOpenInQt();
     void onEnter();
     void onApply();
     void onRemove();
@@ -40,6 +42,7 @@ private:
     GitWorktreeEntry entryAt(int row) const;
     void appendLog(const QString &text);
     void removeFromGitHistory(const QString &path);
+    void selectPath(const QString &path);
 
     MainWindow *m_mainWindow = nullptr;
     QString m_mainRepoDir;

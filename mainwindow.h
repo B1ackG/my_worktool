@@ -232,6 +232,7 @@ private slots:
     void onGitQuickBranchSwitchClicked();
     void onGitCheckIgnoreClicked();
     void onGitWorktreeManageClicked();
+    void onGitWorktreeRevisionClicked();
     void onGitRefreshLogClicked();
     void onGitResetClicked();
     void onGitSoftResetClicked();   // <--- 新增

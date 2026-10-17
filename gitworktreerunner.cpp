@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSettings>
+#include <QStandardPaths>
 
 namespace {
 
@@ -283,6 +285,148 @@ QStringList GitWorktreeRunner::branchesInUse(const QString &repoDir)
     return used;
 }
 
+QVector<GitCommitRef> GitWorktreeRunner::listRecentCommits(const QString &repoDir, int limit)
+{
+    QVector<GitCommitRef> commits;
+    if (limit < 1) {
+        limit = 1;
+    }
+    QString out;
+    if (!runInRepo(repoDir,
+                   {QStringLiteral("log"), QStringLiteral("-n"), QString::number(limit),
+                    QStringLiteral("--date=short"),
+                    QStringLiteral("--pretty=format:%H%x09%h%x09%ad%x09%s")},
+                   &out)) {
+        return commits;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList lines = out.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#else
+    const QStringList lines = out.split(QLatin1Char('\n'), QString::SkipEmptyParts);
+#endif
+    for (const QString &line : lines) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        const QStringList parts = line.split(QLatin1Char('\t'), Qt::KeepEmptyParts);
+#else
+        const QStringList parts = line.split(QLatin1Char('\t'), QString::KeepEmptyParts);
+#endif
+        if (parts.size() < 4) {
+            continue;
+        }
+        GitCommitRef ref;
+        ref.hash = parts.at(0).trimmed();
+        ref.shortHash = parts.at(1).trimmed();
+        ref.date = parts.at(2).trimmed();
+        ref.subject = parts.mid(3).join(QStringLiteral("\t")).trimmed();
+        if (ref.hash.isEmpty()) {
+            continue;
+        }
+        commits.append(ref);
+    }
+    return commits;
+}
+
+bool GitWorktreeRunner::resolveCommit(const QString &repoDir, const QString &rev, QString *fullOut,
+                                      QString *shortOut, QString *errorOut)
+{
+    const QString spec = rev.trimmed();
+    if (spec.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("请选择或输入一次提交。");
+        }
+        return false;
+    }
+    QString so;
+    QString se;
+    if (!runInRepo(repoDir,
+                   {QStringLiteral("rev-parse"), QStringLiteral("--verify"),
+                    spec + QStringLiteral("^{commit}")},
+                   &so, &se)) {
+        if (errorOut) {
+            const QString err = se.trimmed().isEmpty() ? so.trimmed() : se.trimmed();
+            *errorOut = err.isEmpty() ? QStringLiteral("无法识别该提交。") : err;
+        }
+        return false;
+    }
+    const QString full = so.trimmed();
+    QString shortSo;
+    if (!runInRepo(repoDir, {QStringLiteral("rev-parse"), QStringLiteral("--short"), full}, &shortSo)) {
+        shortSo = full.left(7);
+    }
+    if (fullOut) {
+        *fullOut = full;
+    }
+    if (shortOut) {
+        const QString shortHash = shortSo.trimmed();
+        *shortOut = shortHash.isEmpty() ? full.left(7) : shortHash;
+    }
+    return true;
+}
+
+QStringList GitWorktreeRunner::topLevelProFiles(const QString &dir)
+{
+    QStringList result;
+    const QDir d(dir);
+    const QStringList names = d.entryList({QStringLiteral("*.pro")}, QDir::Files, QDir::Name);
+    for (const QString &name : names) {
+        result << d.absoluteFilePath(name);
+    }
+    return result;
+}
+
+QString GitWorktreeRunner::locateQtCreator()
+{
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    const QString saved = settings.value(QStringLiteral("QtCreatorBinary")).toString().trimmed();
+    if (!saved.isEmpty() && QFileInfo(saved).isExecutable()) {
+        return saved;
+    }
+
+    const QString found = QStandardPaths::findExecutable(QStringLiteral("qtcreator"));
+    if (!found.isEmpty()) {
+        return found;
+    }
+
+#ifdef Q_OS_WIN
+    const QString exeName = QStringLiteral("qtcreator.exe");
+#else
+    const QString exeName = QStringLiteral("qtcreator");
+#endif
+    const QString rel = QStringLiteral("Tools/QtCreator/bin/") + exeName;
+    QStringList candidates;
+    const QString homeQt = QDir::home().filePath(QStringLiteral("Qt"));
+    candidates << QDir(homeQt).filePath(rel);
+    candidates << QDir(QStringLiteral("/opt")).filePath(QStringLiteral("qtcreator/bin/") + exeName);
+    candidates << QDir(QStringLiteral("/usr/bin")).filePath(exeName);
+#ifdef Q_OS_WIN
+    candidates << QDir(QStringLiteral("C:/Qt")).filePath(rel);
+#endif
+
+    const QDir base(homeQt);
+    if (base.exists()) {
+        const QStringList subs = base.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &sub : subs) {
+            candidates << base.filePath(sub + QLatin1Char('/') + rel);
+        }
+    }
+    for (const QString &candidate : candidates) {
+        if (QFileInfo(candidate).isExecutable()) {
+            return candidate;
+        }
+    }
+    return QString();
+}
+
+void GitWorktreeRunner::rememberQtCreator(const QString &program)
+{
+    const QString path = program.trimmed();
+    if (path.isEmpty()) {
+        return;
+    }
+    QSettings settings(QStringLiteral("LiChenYang"), QStringLiteral("LinuxHelper"));
+    settings.setValue(QStringLiteral("QtCreatorBinary"), path);
+}
+
 QString GitWorktreeRunner::pathForBranch(const QString &repoDir, const QString &branchName)
 {
     const QString target = normalizeLocalBranchRef(branchName);
@@ -386,9 +530,10 @@ QVector<GitWorktreeEntry> GitWorktreeRunner::listWorktrees(const QString &mainRe
             current.path = line.mid(9).trimmed();
             current.isDetached = false;
             current.branch.clear();
+            current.head.clear();
             have = true;
         } else if (line.startsWith(QStringLiteral("HEAD "))) {
-            // keep for potential future use
+            current.head = line.mid(5).trimmed();
         } else if (line.startsWith(QStringLiteral("branch "))) {
             const QString ref = line.mid(7).trimmed();
             if (ref.startsWith(prefix)) {

@@ -25,6 +25,7 @@ SOURCES += \
     gitworktreeapplydialog.cpp \
     gitworktreewizard.cpp \
     gitworktreedialog.cpp \
+    gitworktreerevdialog.cpp \
     gitstageguard.cpp \
     gitstagereviewdialog.cpp \
     cursorskillsdialog.cpp \
@@ -50,6 +51,7 @@ HEADERS += \
     gitworktreeapplydialog.h \
     gitworktreewizard.h \
     gitworktreedialog.h \
+    gitworktreerevdialog.h \
     nowheelfilter.h \
     gitstageguard.h \
     gitstagereviewdialog.h \

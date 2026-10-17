@@ -37,6 +37,14 @@ public:
     static QStringList localBranches(const QString &repoDir);
     static QStringList branchesInUse(const QString &repoDir);
 
+    static QVector<GitCommitRef> listRecentCommits(const QString &repoDir, int limit = 120);
+    /** Resolve rev to a commit. fullOut/shortOut may be null. */
+    static bool resolveCommit(const QString &repoDir, const QString &rev, QString *fullOut,
+                              QString *shortOut, QString *errorOut = nullptr);
+    static QStringList topLevelProFiles(const QString &dir);
+    static QString locateQtCreator();
+    static void rememberQtCreator(const QString &program);
+
     static GitWorktreeApplyPlan buildApplyPlan(const QString &mainDir,
                                                const QString &worktreeDir);
 

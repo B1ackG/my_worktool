@@ -4,6 +4,7 @@
 #include "gitstageguard.h"
 #include "gitstagereviewdialog.h"
 #include "gitworktreedialog.h"
+#include "gitworktreerevdialog.h"
 #include "gitworktreerunner.h"
 #include "lifeassistantwidget.h"
 #include "inputquickerwidget.h"
@@ -2228,6 +2229,14 @@ void MainWindow::createMenus()
     connect(actWorktree, &QAction::triggered, this, [this]() {
         navWidget->setCurrentRow(2);
         onGitWorktreeManageClicked();
+    });
+
+    QAction *actWorktreeRev = toolsMenu->addAction(QStringLiteral("历史版本检出…"));
+    actWorktreeRev->setToolTip(
+        QStringLiteral("把某次历史提交检到旁边的目录，并用 Qt Creator 打开。当前目录保持不动。"));
+    connect(actWorktreeRev, &QAction::triggered, this, [this]() {
+        navWidget->setCurrentRow(2);
+        onGitWorktreeRevisionClicked();
     });
 
     QAction *actOpenIgnore = toolsMenu->addAction(QStringLiteral("管理 .gitignore…"));
@@ -8777,6 +8786,29 @@ void MainWindow::onGitGetSshKeyClicked() {
     // 弹窗提示
     QMessageBox::information(this, "SSH 公钥", 
         "SSH 公钥内容已复制到剪贴板！\n\n文件路径: " + keyFile + "\n\n您可以直接去 GitHub 设置中粘贴了。");
+}
+
+void MainWindow::onGitWorktreeRevisionClicked()
+{
+    const QString workDir = cmbGitDir->currentText().trimmed();
+    if (workDir.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("历史版本"),
+                             QStringLiteral("请先选择本地 Git 仓库目录。"));
+        return;
+    }
+    if (!isGitRepository(workDir)) {
+        QMessageBox::warning(this, QStringLiteral("历史版本"),
+                             QStringLiteral("当前路径不是有效的 Git 仓库。"));
+        return;
+    }
+
+    GitWorktreeRevDialog dlg(workDir, this);
+    dlg.exec();
+    if (!dlg.logText().isEmpty()) {
+        appendGitLogHtml(QStringLiteral("<font color='gray'>%1</font>")
+                             .arg(dlg.logText().toHtmlEscaped().replace(QLatin1Char('\n'),
+                                                                       QStringLiteral("<br>"))));
+    }
 }
 
 void MainWindow::onGitWorktreeManageClicked()
